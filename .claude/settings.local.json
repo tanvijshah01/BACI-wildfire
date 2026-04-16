@@ -9,7 +9,10 @@
       "Read(//c/Program Files/Quarto/**)",
       "Read(//c/Program Files/Positron/bin//**)",
       "Bash(/c/Program Files/RStudio/resources/app/bin/quarto/bin/quarto.exe render *)",
-      "Bash(\"/c/Program Files/RStudio/resources/app/bin/quarto/bin/quarto.exe\" render \"C:/Users/shaht/OneDrive/Documents/MESM UCSB/BACI/analysis/01_exploration.qmd\")"
+      "Bash(\"/c/Program Files/RStudio/resources/app/bin/quarto/bin/quarto.exe\" render \"C:/Users/shaht/OneDrive/Documents/MESM UCSB/BACI/analysis/01_exploration.qmd\")",
+      "WebFetch(domain:emapr.github.io)",
+      "Bash(mkdir -p \"C:/Users/shaht/OneDrive/Documents/MESM UCSB/BACI/scripts/python\")",
+      "Bash(mkdir -p \"C:/Users/shaht/OneDrive/Documents/MESM UCSB/BACI/output\")"
     ]
   }
 }
