@@ -1,0 +1,15 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(python3 *)",
+      "Bash(python *)",
+      "Bash(/c/Users/shaht/anaconda3/python.exe *)",
+      "Bash(cmd.exe *)",
+      "Bash(powershell.exe *)",
+      "Read(//c/Program Files/Quarto/**)",
+      "Read(//c/Program Files/Positron/bin//**)",
+      "Bash(/c/Program Files/RStudio/resources/app/bin/quarto/bin/quarto.exe render *)",
+      "Bash(\"/c/Program Files/RStudio/resources/app/bin/quarto/bin/quarto.exe\" render \"C:/Users/shaht/OneDrive/Documents/MESM UCSB/BACI/analysis/01_exploration.qmd\")"
+    ]
+  }
+}

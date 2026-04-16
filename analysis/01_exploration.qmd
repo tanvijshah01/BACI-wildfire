@@ -1,0 +1,489 @@
+---
+title: "EDA: MTBS Wildfire Perimeters — Western US"
+subtitle: "Exploratory data analysis, pre-biomass-extraction phase"
+date: today
+format:
+  html:
+    toc: true
+    toc-depth: 3
+    code-fold: true
+    fig-width: 10
+    fig-height: 7
+    theme: flatly
+execute:
+  warning: false
+  message: false
+  cache: false
+---
+
+```{r}
+# =============================================================================
+# SCRIPT OUTLINE
+# 1. Setup — packages, paths, study parameters
+# 2. Load MTBS data + sanity checks
+# 3. Filter to study region (11 Western states) and period (2000–2023)
+# 4. Plot 1 — Fire locations map (spatial distribution)
+# 5. Plot 2 — Fires per year (temporal trend)
+# 6. Plot 3 — Fire size distribution
+# 7. Plot 4 — Burn severity distribution
+# =============================================================================
+```
+
+## 1. Setup
+
+```{r setup}
+# Install any missing packages before loading
+.install_if_missing <- function(pkgs) {
+  missing <- pkgs[!pkgs %in% rownames(installed.packages())]
+  if (length(missing) > 0) {
+    message("Installing missing packages: ", paste(missing, collapse = ", "))
+    install.packages(missing, repos = "https://cloud.r-project.org", quiet = TRUE)
+  }
+}
+.install_if_missing(c("tigris", "ggspatial", "glue"))
+
+library(tidyverse)         # data wrangling + ggplot2
+library(sf)                # spatial vector data
+library(tigris)            # US Census state boundaries
+library(ggspatial)         # scale bar + north arrow
+library(rnaturalearth)     # fallback state boundaries (already installed)
+library(here)              # project-relative paths
+library(scales)            # axis formatting (comma, log)
+library(lubridate)         # date parsing
+library(glue)              # string interpolation
+
+options(tigris_use_cache = TRUE)  # cache Census downloads locally
+
+# Use GEOS (planar) instead of s2 (spherical) for spatial operations.
+# MTBS perimeters contain self-touching edges that s2 rejects but GEOS handles
+# correctly. For coterminous US data the planar approximation is fine.
+sf_use_s2(FALSE)
+
+# Anchor here() to the project root (one level up from analysis/)
+here::i_am("analysis/01_exploration.qmd")
+
+# --- Study parameters (all hardcoded values in one place) -------------------
+WESTERN_STATES <- c("AZ", "CA", "CO", "ID", "MT", "NV", "NM", "OR", "UT", "WA", "WY")
+YEAR_MIN       <- 2000
+YEAR_MAX       <- 2023
+MIN_FIRE_ACRES <- 1000   # MTBS default minimum (fires <1000 ac are not mapped)
+MTBS_PATH      <- here("data/raw/mtbs/mtbs_perimeter_data/mtbs_perims_DD.shp")
+
+# --- Severity color palette (colorblind-friendly, ordered Low → High) -------
+SEVERITY_COLORS <- c(
+  "Low"       = "#fee08b",
+  "Moderate"  = "#fc8d59",
+  "High"      = "#d73027",
+  "Other"     = "#bababa"
+)
+
+# --- Output directory --------------------------------------------------------
+dir.create(here("figures"), showWarnings = FALSE)
+```
+
+---
+
+## 2. Load and Inspect MTBS Data
+
+```{r load-mtbs}
+# Load the raw shapefile
+mtbs_raw <- st_read(MTBS_PATH, quiet = TRUE)
+
+# --- Sanity checks on raw data ----------------------------------------------
+stopifnot(
+  "Missing expected fields" =
+    all(c("event_id", "ig_date", "incid_type", "burnbndac",
+          "low_t", "mod_t", "high_t", "incgreen_t") %in% names(mtbs_raw))
+)
+
+# Check geometry validity and fix if needed
+n_invalid <- sum(!st_is_valid(mtbs_raw))
+if (n_invalid > 0) {
+  message(glue::glue("Fixing {n_invalid} invalid geometries with st_make_valid()"))
+  mtbs_raw <- st_make_valid(mtbs_raw)
+}
+
+cat("Records loaded:   ", nrow(mtbs_raw), "\n")
+cat("Incident types:   ", paste(sort(unique(mtbs_raw$incid_type)), collapse = ", "), "\n")
+cat("CRS:              ", st_crs(mtbs_raw)$input, "\n")
+```
+
+```{r parse-fields}
+# Parse year from ig_date ("YYYY-MM-DD" character string)
+# Assign dominant severity class based on which percentage is highest
+mtbs_parsed <- mtbs_raw |>
+  mutate(
+    year = as.integer(substr(ig_date, 1, 4)),
+
+    # Dominant severity: highest of low/mod/high percentage wins
+    # (incgreen_t and nodata_t are not traditional severity classes)
+    dominant_severity = case_when(
+      high_t >= mod_t & high_t >= low_t & high_t > 0 ~ "High",
+      mod_t  >= high_t & mod_t  >= low_t & mod_t  > 0 ~ "Moderate",
+      low_t  >= high_t & low_t  >= mod_t & low_t  > 0 ~ "Low",
+      TRUE ~ "Other"  # fires where no severity class dominates (e.g. increased greenness)
+    ),
+    dominant_severity = factor(dominant_severity,
+                               levels = c("Low", "Moderate", "High", "Other"))
+  )
+
+cat("Year range in raw data:", min(mtbs_parsed$year, na.rm = TRUE),
+    "–", max(mtbs_parsed$year, na.rm = TRUE), "\n")
+```
+
+---
+
+## 3. Filter to Study Region and Period
+
+```{r get-state-boundaries}
+# Download Western US state boundaries (cb = TRUE for simplified cartographic)
+western_states_sf <- states(cb = TRUE, progress_bar = FALSE) |>
+  filter(STUSPS %in% WESTERN_STATES) |>
+  st_transform(st_crs(mtbs_parsed))   # match CRS to MTBS
+
+cat("State boundaries loaded for:", paste(sort(western_states_sf$STUSPS), collapse = ", "), "\n")
+stopifnot("Not all 11 states returned" = nrow(western_states_sf) == 11)
+```
+
+```{r filter-region-period}
+# Step 1: Wildfire only (exclude Prescribed Fire)
+n_before <- nrow(mtbs_parsed)
+mtbs_wf <- mtbs_parsed |> filter(incid_type == "Wildfire")
+cat("After Wildfire filter:        ", nrow(mtbs_wf), "(removed", n_before - nrow(mtbs_wf), "prescribed fires)\n")
+
+# Step 2: Year filter (2000–2023, matching biomass data availability)
+mtbs_wf <- mtbs_wf |> filter(year >= YEAR_MIN & year <= YEAR_MAX)
+cat("After year filter (2000–23):  ", nrow(mtbs_wf), "\n")
+
+# Step 3: Spatial intersect with 11 Western states
+# Use st_join to attach state abbreviation, then drop fires outside study region
+mtbs_west <- st_join(mtbs_wf, western_states_sf["STUSPS"], join = st_intersects, left = FALSE)
+cat("After Western US spatial filter:", nrow(mtbs_west), "\n")
+
+# Sanity check: confirm all 11 states are represented
+present_states <- sort(unique(mtbs_west$STUSPS))
+missing_states  <- setdiff(WESTERN_STATES, present_states)
+if (length(missing_states) > 0) {
+  warning(paste("States with no fires:", paste(missing_states, collapse = ", ")))
+} else {
+  cat("All 11 Western states have ≥1 fire. ✓\n")
+}
+
+# Final fire count for inline reference
+n_fires_total <- nrow(mtbs_west)
+cat("\nFinal dataset:", n_fires_total, "wildfires, Western US, 2000–2023\n")
+```
+
+```{r severity-sanity}
+# Confirm severity class assignment is reasonable
+sev_table <- mtbs_west |>
+  st_drop_geometry() |>
+  count(dominant_severity) |>
+  mutate(pct = round(100 * n / sum(n), 1))
+
+cat("\nSeverity class distribution:\n")
+print(sev_table)
+
+# Flag if >20% of fires fall into "Other" (suggests a field name issue)
+other_pct <- sev_table |> filter(dominant_severity == "Other") |> pull(pct)
+if (length(other_pct) > 0 && other_pct > 20) {
+  warning(paste0(other_pct, "% of fires classified as 'Other' — check severity field names"))
+}
+```
+
+::: callout-note
+**Total wildfires in study region:** `r n_fires_total` fires (Western US, 2000–2023, wildfires ≥1,000 acres)
+:::
+
+---
+
+## Plot 1 — Fire Locations Map
+
+Spatial distribution of MTBS wildfire perimeters across the 11 Western states, colored by dominant severity class. Use this map to assess spatial coverage, identify clustering, and confirm the state filter worked correctly.
+
+```{r plot1-map, fig.height=9}
+# Use Albers Equal Area projection for the map display — avoids distortion
+# across the latitudinal spread of the Western US
+crs_albers <- 5070  # EPSG:5070 (Conus Albers Equal Area)
+
+western_states_alb <- st_transform(western_states_sf, crs_albers)
+mtbs_west_alb      <- st_transform(mtbs_west, crs_albers)
+
+p1 <- ggplot() +
+  # State boundaries as base layer
+  geom_sf(data = western_states_alb,
+          fill = "grey96", color = "grey50", linewidth = 0.4) +
+  # Fire perimeters, semi-transparent so overlapping fires are visible
+  geom_sf(data = mtbs_west_alb,
+          aes(fill = dominant_severity),
+          color = NA, alpha = 0.65) +
+  scale_fill_manual(
+    name   = "Dominant burn severity",
+    values = SEVERITY_COLORS,
+    drop   = FALSE
+  ) +
+  # Scale bar (bottom-left) and north arrow (top-right)
+  annotation_scale(location = "bl", width_hint = 0.25, text_cex = 0.85) +
+  annotation_north_arrow(
+    location = "tr", which_north = "true",
+    style    = north_arrow_minimal(text_size = 10)
+  ) +
+  labs(
+    title    = "MTBS Wildfire Perimeters — Western United States (2000–2023)",
+    subtitle = glue::glue("{scales::comma(n_fires_total)} wildfires ≥ 1,000 acres"),
+    caption  = "Source: USGS Monitoring Trends in Burn Severity (MTBS) Program"
+  ) +
+  theme_void(base_size = 12) +
+  theme(
+    plot.title      = element_text(face = "bold", size = 14),
+    plot.subtitle   = element_text(color = "grey40", margin = margin(b = 6)),
+    plot.caption    = element_text(color = "grey50", size = 9),
+    legend.position = "bottom",
+    legend.title    = element_text(size = 11, face = "bold"),
+    legend.text     = element_text(size = 10),
+    plot.margin     = margin(10, 10, 10, 10)
+  ) +
+  guides(fill = guide_legend(nrow = 1, override.aes = list(alpha = 1)))
+
+print(p1)
+
+# --- QA: confirm legend is visible and plot non-empty -----------
+stopifnot("Plot 1 has no data" = nrow(mtbs_west_alb) > 0)
+
+ggsave(here("figures/fire_locations_map.png"),
+       plot = p1, width = 10, height = 9, dpi = 300, bg = "white")
+
+# Confirm output resolution
+img_dims <- dim(png::readPNG(here("figures/fire_locations_map.png")))
+cat("Plot 1 saved — dimensions (px):", img_dims[2], "x", img_dims[1], "\n")
+```
+
+---
+
+## Plot 2 — Fires Per Year (Temporal Trend)
+
+Annual wildfire count across the Western US, 2000–2023, with a linear trend line. This reveals whether fire frequency is increasing over time — a key consideration for the staggered DiD design (more treatment cohorts = better identification).
+
+```{r plot2-fires-per-year}
+fires_per_year <- mtbs_west |>
+  st_drop_geometry() |>
+  count(year, name = "n_fires")
+
+# Sanity check: should have one row per year across the full range
+expected_years <- YEAR_MIN:YEAR_MAX
+missing_years  <- setdiff(expected_years, fires_per_year$year)
+if (length(missing_years) > 0) {
+  message("Years with zero fires (will add as 0): ", paste(missing_years, collapse = ", "))
+  fires_per_year <- fires_per_year |>
+    complete(year = expected_years, fill = list(n_fires = 0))
+}
+
+p2 <- ggplot(fires_per_year, aes(x = year, y = n_fires)) +
+  geom_col(fill = "#fc8d59", color = "white", linewidth = 0.3, alpha = 0.85) +
+  # Linear trend line to visualize direction of change
+  geom_smooth(method = "lm", se = TRUE,
+              color = "#d73027", fill = "#d73027", alpha = 0.15,
+              linewidth = 1) +
+  scale_x_continuous(
+    breaks = seq(YEAR_MIN, YEAR_MAX, by = 2),
+    expand = c(0.01, 0)
+  ) +
+  scale_y_continuous(
+    labels = comma,
+    expand = c(0, 0),
+    limits = c(0, max(fires_per_year$n_fires) * 1.15)
+  ) +
+  labs(
+    title   = "Annual Wildfire Count — Western United States",
+    x       = "Year",
+    y       = "Number of wildfires",
+    caption = "Source: USGS MTBS. Wildfires ≥ 1,000 acres only. Red band = 95% CI around linear trend."
+  ) +
+  theme_minimal(base_size = 12) +
+  theme(
+    plot.title      = element_text(face = "bold", size = 14),
+    plot.caption    = element_text(color = "grey50", size = 9),
+    panel.grid.minor = element_blank(),
+    axis.title      = element_text(size = 11),
+    axis.text       = element_text(size = 10)
+  )
+
+print(p2)
+
+# --- QA ---
+stopifnot("Y-axis must not be all zeros" = max(fires_per_year$n_fires) > 0)
+stopifnot("X-axis must span 2000-2023"   = range(fires_per_year$year) == c(YEAR_MIN, YEAR_MAX))
+
+ggsave(here("figures/fires_per_year.png"),
+       plot = p2, width = 10, height = 6, dpi = 300, bg = "white")
+
+img_dims <- dim(png::readPNG(here("figures/fires_per_year.png")))
+cat("Plot 2 saved — dimensions (px):", img_dims[2], "x", img_dims[1], "\n")
+```
+
+---
+
+## Plot 3 — Fire Size Distribution
+
+Histogram of fire sizes (acres) on a log₁₀ scale. The log scale is necessary because fire sizes span several orders of magnitude. This informs the minimum fire size threshold decision — at what size does the biomass signal become detectable?
+
+```{r plot3-fire-size}
+# Summary stats to annotate the plot
+size_stats <- mtbs_west |>
+  st_drop_geometry() |>
+  summarise(
+    median_ac = median(burnbndac, na.rm = TRUE),
+    mean_ac   = mean(burnbndac, na.rm = TRUE),
+    p95_ac    = quantile(burnbndac, 0.95, na.rm = TRUE)
+  )
+
+cat("Fire size summary:\n")
+cat("  Median:", scales::comma(size_stats$median_ac), "acres\n")
+cat("  Mean:  ", scales::comma(round(size_stats$mean_ac)), "acres\n")
+cat("  95th %:", scales::comma(size_stats$p95_ac), "acres\n")
+
+# Sanity check: no negative or zero acre values
+n_bad <- sum(mtbs_west$burnbndac <= 0, na.rm = TRUE)
+if (n_bad > 0) warning(paste(n_bad, "fires have burnbndac <= 0"))
+
+p3 <- ggplot(mtbs_west |> st_drop_geometry(),
+             aes(x = burnbndac)) +
+  geom_histogram(bins = 60, fill = "#fc8d59", color = "white",
+                 linewidth = 0.2, alpha = 0.9) +
+  # Mark median with a vertical line
+  geom_vline(xintercept = size_stats$median_ac,
+             color = "#d73027", linewidth = 1, linetype = "dashed") +
+  annotate("text",
+           x = size_stats$median_ac * 1.5,
+           y = Inf, vjust = 1.5, hjust = 0, size = 3.5, color = "#d73027",
+           label = paste0("Median: ", scales::comma(size_stats$median_ac), " ac")) +
+  scale_x_log10(
+    labels = label_comma(),
+    breaks = c(1000, 5000, 10000, 50000, 100000, 500000)
+  ) +
+  scale_y_continuous(labels = comma, expand = c(0, 0)) +
+  labs(
+    title   = "Distribution of Wildfire Sizes — Western United States (2000–2023)",
+    x       = "Fire size (acres, log₁₀ scale)",
+    y       = "Number of fires",
+    caption = "Source: USGS MTBS. Dashed line = median fire size."
+  ) +
+  theme_minimal(base_size = 12) +
+  theme(
+    plot.title       = element_text(face = "bold", size = 14),
+    plot.caption     = element_text(color = "grey50", size = 9),
+    panel.grid.minor = element_blank(),
+    axis.title       = element_text(size = 11),
+    axis.text        = element_text(size = 10)
+  )
+
+print(p3)
+
+ggsave(here("figures/fire_size_distribution.png"),
+       plot = p3, width = 10, height = 6, dpi = 300, bg = "white")
+
+img_dims <- dim(png::readPNG(here("figures/fire_size_distribution.png")))
+cat("Plot 3 saved — dimensions (px):", img_dims[2], "x", img_dims[1], "\n")
+```
+
+---
+
+## Plot 4 — Burn Severity Distribution
+
+How fires are distributed across dominant severity classes, and how the percentage of high-severity area varies. This directly informs two design decisions: (1) whether to restrict analysis to high-severity fires and (2) whether to use categorical vs. continuous (`high_t`) treatment.
+
+```{r plot4-severity}
+# --- 4a: Bar chart of dominant severity class counts ---
+p4a <- ggplot(sev_table,
+              aes(x = dominant_severity, y = n, fill = dominant_severity)) +
+  geom_col(color = "white", linewidth = 0.3, alpha = 0.9) +
+  geom_text(aes(label = paste0(scales::comma(n), "\n(", pct, "%)")),
+            vjust = -0.4, size = 3.5, fontface = "bold") +
+  scale_fill_manual(values = SEVERITY_COLORS, guide = "none") +
+  scale_y_continuous(
+    labels = comma,
+    expand = c(0, 0),
+    limits = c(0, max(sev_table$n) * 1.2)
+  ) +
+  labs(
+    title   = "Wildfire Count by Dominant Severity Class",
+    x       = "Dominant burn severity",
+    y       = "Number of fires",
+    caption = "Dominant class = highest percentage of burn area (low / moderate / high)"
+  ) +
+  theme_minimal(base_size = 12) +
+  theme(
+    plot.title       = element_text(face = "bold", size = 13),
+    plot.caption     = element_text(color = "grey50", size = 9),
+    panel.grid.minor = element_blank(),
+    panel.grid.major.x = element_blank(),
+    axis.title       = element_text(size = 11),
+    axis.text        = element_text(size = 10)
+  )
+
+# --- 4b: Distribution of high-severity area percentage across all fires ---
+# This shows whether "high severity" is a sharp threshold or a continuum
+p4b <- ggplot(mtbs_west |> st_drop_geometry(),
+              aes(x = high_t)) +
+  geom_histogram(bins = 50, fill = "#d73027", color = "white",
+                 linewidth = 0.2, alpha = 0.85) +
+  scale_x_continuous(
+    labels = function(x) paste0(x, "%"),
+    limits = c(0, 100),
+    breaks = seq(0, 100, 20)
+  ) +
+  scale_y_continuous(labels = comma, expand = c(0, 0)) +
+  labs(
+    title   = "Distribution of High-Severity Burn Area (% per fire)",
+    x       = "High-severity area (% of total burn area)",
+    y       = "Number of fires",
+    caption = "Values near 0% = mostly low/moderate severity; near 100% = predominantly high severity"
+  ) +
+  theme_minimal(base_size = 12) +
+  theme(
+    plot.title       = element_text(face = "bold", size = 13),
+    plot.caption     = element_text(color = "grey50", size = 9),
+    panel.grid.minor = element_blank(),
+    axis.title       = element_text(size = 11),
+    axis.text        = element_text(size = 10)
+  )
+
+print(p4a)
+print(p4b)
+
+# --- QA: legend check (p4a has no legend by design; verify fill is applied) -
+stopifnot("Severity bar chart has no rows" = nrow(sev_table) > 0)
+
+ggsave(here("figures/severity_by_class.png"),
+       plot = p4a, width = 8, height = 6, dpi = 300, bg = "white")
+
+ggsave(here("figures/severity_high_pct_distribution.png"),
+       plot = p4b, width = 8, height = 6, dpi = 300, bg = "white")
+
+img_dims <- dim(png::readPNG(here("figures/severity_by_class.png")))
+cat("Plot 4a saved — dimensions (px):", img_dims[2], "x", img_dims[1], "\n")
+img_dims <- dim(png::readPNG(here("figures/severity_high_pct_distribution.png")))
+cat("Plot 4b saved — dimensions (px):", img_dims[2], "x", img_dims[1], "\n")
+```
+
+---
+
+## Summary
+
+```{r summary-table}
+# Quick summary table of what was found — useful for NOTES.md
+summary_tbl <- tibble::tribble(
+  ~Metric,                          ~Value,
+  "Total wildfires (2000–2023)",    scales::comma(n_fires_total),
+  "States covered",                 paste(present_states, collapse = ", "),
+  "Median fire size",               paste(scales::comma(size_stats$median_ac), "acres"),
+  "Most common severity class",     as.character(sev_table$dominant_severity[which.max(sev_table$n)]),
+  "Fires with dominant High sev.",  paste0(sev_table |> filter(dominant_severity == "High") |> pull(pct), "%")
+)
+
+knitr::kable(summary_tbl, col.names = c("Metric", "Value"), align = "lr")
+```
+
+::: callout-important
+**Next step:** Based on these distributions, resolve the design decisions in `NOTES.md` (minimum fire size, severity inclusion threshold, ecoregion selection), then proceed to GEE biomass extraction (`scripts/python/01_extract_biomass_gee.py`).
+:::

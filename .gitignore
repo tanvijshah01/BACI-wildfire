@@ -1,0 +1,81 @@
+# .gitignore for wildfire-biomass-did project
+
+# ===== DATA FILES (DO NOT COMMIT) =====
+# Raw data - too large, can be re-downloaded
+data/raw/
+data/processed/
+data/final/
+
+# ===== R FILES =====
+# History files
+.Rhistory
+.Rapp.history
+
+# Session Data files
+.RData
+.RDataTmp
+
+# User-specific files
+.Ruserdata
+
+# RStudio project files
+*.Rproj.user/
+*.Rproj
+
+# Temporary files
+*~
+*.swp
+*.swo
+
+# ===== PYTHON FILES =====
+# Byte-compiled / optimized
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Virtual environments
+venv/
+env/
+ENV/
+.venv
+
+# Jupyter Notebook
+.ipynb_checkpoints
+
+# ===== OUTPUT FILES =====
+# Generated figures (can be regenerated)
+figures/*.png
+figures/*.pdf
+figures/eda/
+
+# Output files (can be regenerated)
+output/
+
+# Quarto render outputs
+_site/
+*_cache/
+*_files/
+
+# ===== SYSTEM FILES =====
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+Thumbs.db
+
+# ===== CREDENTIALS =====
+# Never commit these!
+.env
+credentials.json
+*.key
+*_token.txt
+
+# Google Earth Engine credentials
+.config/earthengine/
+
+# ===== LARGE FILES =====
+# Anything over 100MB
+*.tif
+*.shp.zip
+*.tar.gz
