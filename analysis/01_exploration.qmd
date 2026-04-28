@@ -22,10 +22,16 @@ execute:
 # 1. Setup — packages, paths, study parameters
 # 2. Load MTBS data + sanity checks
 # 3. Filter to study region (11 Western states) and period (2000–2023)
-# 4. Plot 1 — Fire locations map (spatial distribution)
+# 4. Plot 1 — Fire locations map (spatial distribution, colored by assessment type)
 # 5. Plot 2 — Fires per year (temporal trend)
 # 6. Plot 3 — Fire size distribution
-# 7. Plot 4 — Burn severity distribution
+# 7. Plot 4 — Severity threshold distributions (dNBR thresholds + dNBR offset)
+#
+# NOTE ON SEVERITY FIELDS:
+# The MTBS perimeter shapefile contains Low_T / Mod_T / High_T as dNBR THRESHOLD
+# VALUES (classification breakpoints), NOT area percentages. Per-class area
+# breakdowns (% low / moderate / high) require individual fire severity rasters
+# which are not included in this download. See MTBS metadata for field definitions.
 # =============================================================================
 ```
 
@@ -69,12 +75,16 @@ YEAR_MAX       <- 2023
 MIN_FIRE_ACRES <- 1000   # MTBS default minimum (fires <1000 ac are not mapped)
 MTBS_PATH      <- here("data/raw/mtbs/mtbs_perimeter_data/mtbs_perims_DD.shp")
 
-# --- Severity color palette (colorblind-friendly, ordered Low → High) -------
-SEVERITY_COLORS <- c(
-  "Low"       = "#fee08b",
-  "Moderate"  = "#fc8d59",
-  "High"      = "#d73027",
-  "Other"     = "#bababa"
+# --- Assessment type color palette (colorblind-friendly) --------------------
+# Fires are colored by mapping assessment type (Initial vs Extended), since the
+# perimeter shapefile has no per-class area data — only dNBR threshold values.
+ASMT_COLORS <- c(
+  "Initial"          = "#4393c3",
+  "Initial (SS)"     = "#92c5de",
+  "Extended"         = "#d6604d",
+  "Extended (SS)"    = "#f4a582",
+  "Emergency"        = "#878787",
+  "Emergency (SS)"   = "#bababa"
 )
 
 # --- Output directory --------------------------------------------------------
@@ -90,10 +100,14 @@ dir.create(here("figures"), showWarnings = FALSE)
 mtbs_raw <- st_read(MTBS_PATH, quiet = TRUE)
 
 # --- Sanity checks on raw data ----------------------------------------------
+# IMPORTANT: low_t / mod_t / high_t are dNBR THRESHOLD VALUES (index units),
+# NOT area percentages. They define the dNBR breakpoints between severity classes
+# and vary fire-by-fire based on analyst calibration. Do not compare them as if
+# they were proportions of burned area.
 stopifnot(
   "Missing expected fields" =
     all(c("event_id", "ig_date", "incid_type", "burnbndac",
-          "low_t", "mod_t", "high_t", "incgreen_t") %in% names(mtbs_raw))
+          "low_t", "mod_t", "high_t", "dnbr_offst", "asmnt_type") %in% names(mtbs_raw))
 )
 
 # Check geometry validity and fix if needed
@@ -110,25 +124,21 @@ cat("CRS:              ", st_crs(mtbs_raw)$input, "\n")
 
 ```{r parse-fields}
 # Parse year from ig_date ("YYYY-MM-DD" character string)
-# Assign dominant severity class based on which percentage is highest
+# Flag fires with valid (non-sentinel) severity thresholds.
+# Sentinel values -9999 and 9999 mean "No Data" per the MTBS data dictionary.
 mtbs_parsed <- mtbs_raw |>
   mutate(
     year = as.integer(substr(ig_date, 1, 4)),
-
-    # Dominant severity: highest of low/mod/high percentage wins
-    # (incgreen_t and nodata_t are not traditional severity classes)
-    dominant_severity = case_when(
-      high_t >= mod_t & high_t >= low_t & high_t > 0 ~ "High",
-      mod_t  >= high_t & mod_t  >= low_t & mod_t  > 0 ~ "Moderate",
-      low_t  >= high_t & low_t  >= mod_t & low_t  > 0 ~ "Low",
-      TRUE ~ "Other"  # fires where no severity class dominates (e.g. increased greenness)
-    ),
-    dominant_severity = factor(dominant_severity,
-                               levels = c("Low", "Moderate", "High", "Other"))
+    # TRUE when all three threshold fields are populated with real dNBR values
+    thresholds_valid = !(low_t %in% c(-9999, 9999) |
+                         mod_t %in% c(-9999, 9999) |
+                         high_t %in% c(-9999, 9999))
   )
 
 cat("Year range in raw data:", min(mtbs_parsed$year, na.rm = TRUE),
     "–", max(mtbs_parsed$year, na.rm = TRUE), "\n")
+cat("Fires with valid thresholds:", sum(mtbs_parsed$thresholds_valid),
+    "/", nrow(mtbs_parsed), "\n")
 ```
 
 ---
@@ -175,31 +185,89 @@ cat("\nFinal dataset:", n_fires_total, "wildfires, Western US, 2000–2023\n")
 ```
 
 ```{r severity-sanity}
-# Confirm severity class assignment is reasonable
-sev_table <- mtbs_west |>
+# ---- Sanity checks on dNBR threshold fields --------------------------------
+# These checks guard against the most common misuse: treating threshold values
+# (dNBR index units, typically 50–600) as if they were percentages (0–100).
+
+valid_thresh <- mtbs_west |>
   st_drop_geometry() |>
-  count(dominant_severity) |>
-  mutate(pct = round(100 * n / sum(n), 1))
+  filter(thresholds_valid)
 
-cat("\nSeverity class distribution:\n")
-print(sev_table)
+# Check 1: Threshold orientation.
+# MTBS fires can be mapped on either axis of the dNBR spectrum:
+#   "Burned" fires:             low_t < mod_t < high_t (thresholds increase toward high severity)
+#   "Increased Greenness" fires: low_t > mod_t > high_t (thresholds decrease, negative dNBR)
+# Both orderings are valid. What is NOT valid is a MIXED ordering (non-monotone),
+# which would indicate corrupted threshold values.
+valid_thresh <- valid_thresh |>
+  mutate(
+    thresh_orient = case_when(
+      low_t < mod_t & mod_t < high_t ~ "burned",       # typical positive-dNBR fire
+      low_t > mod_t & mod_t > high_t ~ "greenness",    # increased-greenness fire
+      TRUE                            ~ "mixed"         # non-monotone — data problem
+    )
+  )
 
-# Flag if >20% of fires fall into "Other" (suggests a field name issue)
-other_pct <- sev_table |> filter(dominant_severity == "Other") |> pull(pct)
-if (length(other_pct) > 0 && other_pct > 20) {
-  warning(paste0(other_pct, "% of fires classified as 'Other' — check severity field names"))
+orient_tbl <- valid_thresh |> count(thresh_orient)
+cat("Threshold orientation breakdown:\n")
+print(orient_tbl)
+
+n_mixed <- sum(valid_thresh$thresh_orient == "mixed")
+if (n_mixed > 0) {
+  warning(sprintf("%d fires have non-monotone thresholds (low_t, mod_t, high_t not ordered) — inspect for data issues.", n_mixed))
+} else {
+  cat("All valid fires have monotone thresholds (burned or increased-greenness). ✓\n")
 }
+
+# For severity distribution plots, restrict to "burned" orientation fires
+# (positive dNBR axis), which is the relevant class for this biomass study.
+sev_burned <- valid_thresh |> filter(thresh_orient == "burned")
+
+# Check 2: Values must NOT all fall in 0–100 — that would mean we have percentages
+# loaded into threshold fields (e.g. wrong join or wrong shapefile).
+stopifnot(
+  "high_t values all in 0–100 range — are these percentages, not dNBR thresholds?" =
+    !(all(valid_thresh$high_t >= 0 & valid_thresh$high_t <= 100)),
+  "low_t values all in 0–100 range — are these percentages, not dNBR thresholds?" =
+    !(all(valid_thresh$low_t >= 0 & valid_thresh$low_t <= 100))
+)
+cat("Threshold scale check passed (values outside 0–100 percentage range). ✓\n")
+
+# Check 3: Non-zero variance — if all fires had identical thresholds it would
+# suggest a bad join, a constant-filled field, or the wrong column entirely.
+stopifnot(
+  "high_t has zero variance — all fires have same threshold (wrong field?)" =
+    sd(valid_thresh$high_t, na.rm = TRUE) > 0
+)
+cat("Threshold variance check passed. ✓\n")
+
+# Report no-data counts and value ranges
+n_nodata <- sum(!mtbs_west$thresholds_valid, na.rm = TRUE)
+cat("\nFires with no-data thresholds (-9999 or 9999):", n_nodata,
+    sprintf("(%.1f%%)\n", 100 * n_nodata / nrow(mtbs_west)))
+
+cat("\ndNBR threshold value ranges (valid fires only):\n")
+cat("  High_T:", range(valid_thresh$high_t), "\n")
+cat("  Mod_T: ", range(valid_thresh$mod_t),  "\n")
+cat("  Low_T: ", range(valid_thresh$low_t),  "\n")
+
+# Report dNBR offset range (proxy for background spectral change)
+valid_offst <- mtbs_west |> st_drop_geometry() |>
+  filter(!dnbr_offst %in% c(-9999, 9999))
+cat("\ndNBR offset range (valid fires):", range(valid_offst$dnbr_offst), "\n")
 ```
 
 ::: callout-note
 **Total wildfires in study region:** `r n_fires_total` fires (Western US, 2000–2023, wildfires ≥1,000 acres)
+
+**Note on severity data:** The MTBS perimeter shapefile contains `Low_T`, `Mod_T`, and `High_T` as dNBR index threshold values — not area percentages. Per-class burn area distributions (% low / moderate / high) require individual fire severity rasters and are not available in this download.
 :::
 
 ---
 
 ## Plot 1 — Fire Locations Map
 
-Spatial distribution of MTBS wildfire perimeters across the 11 Western states, colored by dominant severity class. Use this map to assess spatial coverage, identify clustering, and confirm the state filter worked correctly.
+Spatial distribution of MTBS wildfire perimeters across the 11 Western states, colored by mapping assessment type (Initial vs Extended). Initial assessments use imagery shortly after containment; Extended assessments use a later peak-greenness post-fire image for more accurate severity calibration. This map confirms spatial coverage and that the state filter worked correctly.
 
 ```{r plot1-map, fig.height=9}
 # Use Albers Equal Area projection for the map display — avoids distortion
@@ -209,18 +277,27 @@ crs_albers <- 5070  # EPSG:5070 (Conus Albers Equal Area)
 western_states_alb <- st_transform(western_states_sf, crs_albers)
 mtbs_west_alb      <- st_transform(mtbs_west, crs_albers)
 
+# Normalize assessment type labels to the palette keys (some may have trailing
+# whitespace or alternate capitalizations in the shapefile)
+mtbs_west_alb <- mtbs_west_alb |>
+  mutate(asmnt_type = trimws(asmnt_type))
+
+# Use only the assessment types actually present; fall back to grey for unknowns
+present_asmnt <- sort(unique(mtbs_west_alb$asmnt_type))
+cat("Assessment types present:", paste(present_asmnt, collapse = ", "), "\n")
+
 p1 <- ggplot() +
   # State boundaries as base layer
   geom_sf(data = western_states_alb,
           fill = "grey96", color = "grey50", linewidth = 0.4) +
   # Fire perimeters, semi-transparent so overlapping fires are visible
   geom_sf(data = mtbs_west_alb,
-          aes(fill = dominant_severity),
+          aes(fill = asmnt_type),
           color = NA, alpha = 0.65) +
   scale_fill_manual(
-    name   = "Dominant burn severity",
-    values = SEVERITY_COLORS,
-    drop   = FALSE
+    name   = "Assessment type",
+    values = ASMT_COLORS,
+    na.value = "#cccccc"
   ) +
   # Scale bar (bottom-left) and north arrow (top-right)
   annotation_scale(location = "bl", width_hint = 0.25, text_cex = 0.85) +
@@ -243,7 +320,7 @@ p1 <- ggplot() +
     legend.text     = element_text(size = 10),
     plot.margin     = margin(10, 10, 10, 10)
   ) +
-  guides(fill = guide_legend(nrow = 1, override.aes = list(alpha = 1)))
+  guides(fill = guide_legend(nrow = 2, override.aes = list(alpha = 1)))
 
 print(p1)
 
@@ -388,56 +465,107 @@ cat("Plot 3 saved — dimensions (px):", img_dims[2], "x", img_dims[1], "\n")
 
 ---
 
-## Plot 4 — Burn Severity Distribution
+## Plot 4 — Burn Severity Threshold Distributions
 
-How fires are distributed across dominant severity classes, and how the percentage of high-severity area varies. This directly informs two design decisions: (1) whether to restrict analysis to high-severity fires and (2) whether to use categorical vs. continuous (`high_t`) treatment.
+The MTBS perimeter shapefile stores fire-specific dNBR threshold values, not per-class area percentages. Three plots describe what we can characterize from these fields:
+
+- **4a** — Distribution of `High_T` (Moderate→High boundary). Fires with a lower `High_T` value have more pixels classified as high severity (the dNBR bar is set lower).
+- **4b** — Distribution of `dNBR_offst` (mean dNBR in unburned reference pixels outside the perimeter). Larger positive values indicate greater pre→post spectral change in the surrounding landscape.
+- **4c** — `High_T` vs. fire size: whether larger fires tend to have systematically different severity thresholds.
+
+::: callout-important
+**Per-class area breakdowns (% low / % moderate / % high) are not available in the perimeter shapefile.** These require the individual fire severity rasters distributed separately by MTBS (one raster per fire). Download and process those rasters before reporting severity area statistics.
+:::
 
 ```{r plot4-severity}
-# --- 4a: Bar chart of dominant severity class counts ---
-p4a <- ggplot(sev_table,
-              aes(x = dominant_severity, y = n, fill = dominant_severity)) +
-  geom_col(color = "white", linewidth = 0.3, alpha = 0.9) +
-  geom_text(aes(label = paste0(scales::comma(n), "\n(", pct, "%)")),
-            vjust = -0.4, size = 3.5, fontface = "bold") +
-  scale_fill_manual(values = SEVERITY_COLORS, guide = "none") +
-  scale_y_continuous(
-    labels = comma,
-    expand = c(0, 0),
-    limits = c(0, max(sev_table$n) * 1.2)
-  ) +
+# sev_burned is derived in the severity-sanity chunk: fires with valid,
+# monotone (positive-dNBR) thresholds — the relevant class for biomass analysis.
+offst_valid <- mtbs_west |>
+  st_drop_geometry() |>
+  filter(!dnbr_offst %in% c(-9999, 9999))
+
+cat("Fires with burned-orientation thresholds:", nrow(sev_burned), "/", nrow(mtbs_west), "\n")
+cat("Fires with valid dNBR offset:", nrow(offst_valid), "/", nrow(mtbs_west), "\n")
+
+# QA: must have data to plot
+stopifnot("No burned-orientation threshold rows to plot" = nrow(sev_burned) > 0)
+stopifnot("No valid dNBR offset rows to plot" = nrow(offst_valid) > 0)
+
+# --- 4a: Distribution of High_T threshold values ----------------------------
+high_t_median <- median(sev_burned$high_t, na.rm = TRUE)
+
+p4a <- ggplot(sev_burned, aes(x = high_t)) +
+  geom_histogram(bins = 60, fill = "#d73027", color = "white",
+                 linewidth = 0.2, alpha = 0.85) +
+  geom_vline(xintercept = high_t_median,
+             color = "#4d4d4d", linewidth = 1, linetype = "dashed") +
+  annotate("text",
+           x = high_t_median + 10, y = Inf, vjust = 1.5, hjust = 0,
+           size = 3.5, color = "#4d4d4d",
+           label = paste0("Median: ", round(high_t_median))) +
+  scale_x_continuous(labels = comma) +
+  scale_y_continuous(labels = comma, expand = c(0, 0)) +
   labs(
-    title   = "Wildfire Count by Dominant Severity Class",
-    x       = "Dominant burn severity",
+    title   = "Distribution of Moderate→High dNBR Threshold (High_T) Across Fires",
+    x       = "Moderate/High dNBR threshold (index units)",
     y       = "Number of fires",
-    caption = "Dominant class = highest percentage of burn area (low / moderate / high)"
+    caption = paste0("Lower High_T = fires where more pixels are classified as high severity. ",
+                     "n = ", scales::comma(nrow(sev_burned)), " burned-orientation fires.")
   ) +
   theme_minimal(base_size = 12) +
   theme(
     plot.title       = element_text(face = "bold", size = 13),
     plot.caption     = element_text(color = "grey50", size = 9),
     panel.grid.minor = element_blank(),
-    panel.grid.major.x = element_blank(),
     axis.title       = element_text(size = 11),
     axis.text        = element_text(size = 10)
   )
 
-# --- 4b: Distribution of high-severity area percentage across all fires ---
-# This shows whether "high severity" is a sharp threshold or a continuum
-p4b <- ggplot(mtbs_west |> st_drop_geometry(),
-              aes(x = high_t)) +
-  geom_histogram(bins = 50, fill = "#d73027", color = "white",
+# --- 4b: Distribution of dNBR offset ----------------------------------------
+offst_median <- median(offst_valid$dnbr_offst, na.rm = TRUE)
+
+p4b <- ggplot(offst_valid, aes(x = dnbr_offst)) +
+  geom_histogram(bins = 60, fill = "#4393c3", color = "white",
                  linewidth = 0.2, alpha = 0.85) +
-  scale_x_continuous(
-    labels = function(x) paste0(x, "%"),
-    limits = c(0, 100),
-    breaks = seq(0, 100, 20)
-  ) +
+  geom_vline(xintercept = offst_median,
+             color = "#4d4d4d", linewidth = 1, linetype = "dashed") +
+  annotate("text",
+           x = offst_median + 2, y = Inf, vjust = 1.5, hjust = 0,
+           size = 3.5, color = "#4d4d4d",
+           label = paste0("Median: ", round(offst_median, 1))) +
+  scale_x_continuous(labels = comma) +
   scale_y_continuous(labels = comma, expand = c(0, 0)) +
   labs(
-    title   = "Distribution of High-Severity Burn Area (% per fire)",
-    x       = "High-severity area (% of total burn area)",
+    title   = "Distribution of dNBR Offset (Mean dNBR in Unburned Reference Area)",
+    x       = "dNBR offset (index units)",
     y       = "Number of fires",
-    caption = "Values near 0% = mostly low/moderate severity; near 100% = predominantly high severity"
+    caption = paste0("Values near 0 = little background spectral change; ",
+                     "large values = substantial pre/post change in surrounding area. ",
+                     "n = ", scales::comma(nrow(offst_valid)), " fires with valid offset.")
+  ) +
+  theme_minimal(base_size = 12) +
+  theme(
+    plot.title       = element_text(face = "bold", size = 13),
+    plot.caption     = element_text(color = "grey50", size = 9),
+    panel.grid.minor = element_blank(),
+    axis.title       = element_text(size = 11),
+    axis.text        = element_text(size = 10)
+  )
+
+# --- 4c: High_T vs. fire size ------------------------------------------------
+p4c <- ggplot(sev_burned, aes(x = burnbndac, y = high_t)) +
+  geom_point(alpha = 0.25, size = 0.8, color = "#d73027") +
+  geom_smooth(method = "loess", se = TRUE,
+              color = "#4d4d4d", fill = "#4d4d4d", alpha = 0.15,
+              linewidth = 0.8) +
+  scale_x_log10(labels = label_comma(),
+                breaks  = c(1000, 5000, 10000, 50000, 100000, 500000)) +
+  scale_y_continuous(labels = comma) +
+  labs(
+    title   = "Moderate→High dNBR Threshold vs. Fire Size",
+    x       = "Fire size (acres, log₁₀ scale)",
+    y       = "High_T (dNBR threshold, index units)",
+    caption = "Grey band = loess ± 95% CI. No strong size–threshold relationship expected."
   ) +
   theme_minimal(base_size = 12) +
   theme(
@@ -450,20 +578,23 @@ p4b <- ggplot(mtbs_west |> st_drop_geometry(),
 
 print(p4a)
 print(p4b)
+print(p4c)
 
-# --- QA: legend check (p4a has no legend by design; verify fill is applied) -
-stopifnot("Severity bar chart has no rows" = nrow(sev_table) > 0)
-
-ggsave(here("figures/severity_by_class.png"),
+ggsave(here("figures/severity_high_t_distribution.png"),
        plot = p4a, width = 8, height = 6, dpi = 300, bg = "white")
 
-ggsave(here("figures/severity_high_pct_distribution.png"),
+ggsave(here("figures/severity_dnbr_offset.png"),
        plot = p4b, width = 8, height = 6, dpi = 300, bg = "white")
 
-img_dims <- dim(png::readPNG(here("figures/severity_by_class.png")))
+ggsave(here("figures/severity_high_t_vs_size.png"),
+       plot = p4c, width = 8, height = 6, dpi = 300, bg = "white")
+
+img_dims <- dim(png::readPNG(here("figures/severity_high_t_distribution.png")))
 cat("Plot 4a saved — dimensions (px):", img_dims[2], "x", img_dims[1], "\n")
-img_dims <- dim(png::readPNG(here("figures/severity_high_pct_distribution.png")))
+img_dims <- dim(png::readPNG(here("figures/severity_dnbr_offset.png")))
 cat("Plot 4b saved — dimensions (px):", img_dims[2], "x", img_dims[1], "\n")
+img_dims <- dim(png::readPNG(here("figures/severity_high_t_vs_size.png")))
+cat("Plot 4c saved — dimensions (px):", img_dims[2], "x", img_dims[1], "\n")
 ```
 
 ---
@@ -472,13 +603,16 @@ cat("Plot 4b saved — dimensions (px):", img_dims[2], "x", img_dims[1], "\n")
 
 ```{r summary-table}
 # Quick summary table of what was found — useful for NOTES.md
+n_valid_thresh  <- sum(mtbs_west$thresholds_valid, na.rm = TRUE)
+median_high_t   <- median(sev_burned$high_t, na.rm = TRUE)
+
 summary_tbl <- tibble::tribble(
-  ~Metric,                          ~Value,
-  "Total wildfires (2000–2023)",    scales::comma(n_fires_total),
-  "States covered",                 paste(present_states, collapse = ", "),
-  "Median fire size",               paste(scales::comma(size_stats$median_ac), "acres"),
-  "Most common severity class",     as.character(sev_table$dominant_severity[which.max(sev_table$n)]),
-  "Fires with dominant High sev.",  paste0(sev_table |> filter(dominant_severity == "High") |> pull(pct), "%")
+  ~Metric,                                ~Value,
+  "Total wildfires (2000–2023)",          scales::comma(n_fires_total),
+  "States covered",                       paste(present_states, collapse = ", "),
+  "Median fire size",                     paste(scales::comma(size_stats$median_ac), "acres"),
+  "Fires with valid severity thresholds", scales::comma(n_valid_thresh),
+  "Median High_T threshold (dNBR units)", as.character(round(median_high_t))
 )
 
 knitr::kable(summary_tbl, col.names = c("Metric", "Value"), align = "lr")
