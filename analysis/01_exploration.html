@@ -91,7 +91,7 @@ pre > code.sourceCode > span > a:first-child::before { text-decoration: underlin
   <li><a href="#plot-1-fire-locations-map" id="toc-plot-1-fire-locations-map" class="nav-link" data-scroll-target="#plot-1-fire-locations-map">Plot 1 — Fire Locations Map</a></li>
   <li><a href="#plot-2-fires-per-year-temporal-trend" id="toc-plot-2-fires-per-year-temporal-trend" class="nav-link" data-scroll-target="#plot-2-fires-per-year-temporal-trend">Plot 2 — Fires Per Year (Temporal Trend)</a></li>
   <li><a href="#plot-3-fire-size-distribution" id="toc-plot-3-fire-size-distribution" class="nav-link" data-scroll-target="#plot-3-fire-size-distribution">Plot 3 — Fire Size Distribution</a></li>
-  <li><a href="#plot-4-burn-severity-threshold-distributions" id="toc-plot-4-burn-severity-threshold-distributions" class="nav-link" data-scroll-target="#plot-4-burn-severity-threshold-distributions">Plot 4 — Burn Severity Threshold Distributions</a></li>
+  <li><a href="#plot-4-burn-severity-dnbr-and-rdnbr-distributions" id="toc-plot-4-burn-severity-dnbr-and-rdnbr-distributions" class="nav-link" data-scroll-target="#plot-4-burn-severity-dnbr-and-rdnbr-distributions">Plot 4 — Burn Severity: dNBR and RdNBR Distributions</a></li>
   <li><a href="#summary" id="toc-summary" class="nav-link" data-scroll-target="#summary">Summary</a></li>
   </ul>
 </nav>
@@ -778,140 +778,215 @@ Note
 </div>
 <hr>
 </section>
-<section id="plot-4-burn-severity-threshold-distributions" class="level2">
-<h2 class="anchored" data-anchor-id="plot-4-burn-severity-threshold-distributions">Plot 4 — Burn Severity Threshold Distributions</h2>
-<p>The MTBS perimeter shapefile stores fire-specific dNBR threshold values, not per-class area percentages. Three plots describe what we can characterize from these fields:</p>
-<ul>
-<li><strong>4a</strong> — Distribution of <code>High_T</code> (Moderate→High boundary). Fires with a lower <code>High_T</code> value have more pixels classified as high severity (the dNBR bar is set lower).</li>
-<li><strong>4b</strong> — Distribution of <code>dNBR_offst</code> (mean dNBR in unburned reference pixels outside the perimeter). Larger positive values indicate greater pre→post spectral change in the surrounding landscape.</li>
-<li><strong>4c</strong> — <code>High_T</code> vs.&nbsp;fire size: whether larger fires tend to have systematically different severity thresholds.</li>
-</ul>
-<div class="callout callout-style-default callout-important callout-titled">
-<div class="callout-header d-flex align-content-center">
-<div class="callout-icon-container">
-<i class="callout-icon"></i>
-</div>
-<div class="callout-title-container flex-fill">
-Important
-</div>
-</div>
-<div class="callout-body-container callout-body">
-<p><strong>Per-class area breakdowns (% low / % moderate / % high) are not available in the perimeter shapefile.</strong> These require the individual fire severity rasters distributed separately by MTBS (one raster per fire). Download and process those rasters before reporting severity area statistics.</p>
-</div>
-</div>
+<section id="plot-4-burn-severity-dnbr-and-rdnbr-distributions" class="level2">
+<h2 class="anchored" data-anchor-id="plot-4-burn-severity-dnbr-and-rdnbr-distributions">Plot 4 — Burn Severity: dNBR and RdNBR Distributions</h2>
 <div class="cell">
 <details class="code-fold">
 <summary>Code</summary>
-<div class="code-copy-outer-scaffold"><div class="sourceCode cell-code" id="cb67"><pre class="sourceCode r code-with-copy"><code class="sourceCode r"><span id="cb67-1"><a href="#cb67-1" aria-hidden="true" tabindex="-1"></a><span class="co"># sev_burned is derived in the severity-sanity chunk: fires with valid,</span></span>
-<span id="cb67-2"><a href="#cb67-2" aria-hidden="true" tabindex="-1"></a><span class="co"># monotone (positive-dNBR) thresholds — the relevant class for biomass analysis.</span></span>
-<span id="cb67-3"><a href="#cb67-3" aria-hidden="true" tabindex="-1"></a>offst_valid <span class="ot">&lt;-</span> mtbs_west <span class="sc">|&gt;</span></span>
-<span id="cb67-4"><a href="#cb67-4" aria-hidden="true" tabindex="-1"></a>  <span class="fu">st_drop_geometry</span>() <span class="sc">|&gt;</span></span>
-<span id="cb67-5"><a href="#cb67-5" aria-hidden="true" tabindex="-1"></a>  <span class="fu">filter</span>(<span class="sc">!</span>dnbr_offst <span class="sc">%in%</span> <span class="fu">c</span>(<span class="sc">-</span><span class="dv">9999</span>, <span class="dv">9999</span>))</span>
-<span id="cb67-6"><a href="#cb67-6" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb67-7"><a href="#cb67-7" aria-hidden="true" tabindex="-1"></a><span class="fu">cat</span>(<span class="st">"Fires with burned-orientation thresholds:"</span>, <span class="fu">nrow</span>(sev_burned), <span class="st">"/"</span>, <span class="fu">nrow</span>(mtbs_west), <span class="st">"</span><span class="sc">\n</span><span class="st">"</span>)</span></code></pre></div><button title="Copy to Clipboard" class="code-copy-button"><i class="bi"></i></button></div>
+<div class="code-copy-outer-scaffold"><div class="sourceCode cell-code" id="cb67"><pre class="sourceCode r code-with-copy"><code class="sourceCode r"><span id="cb67-1"><a href="#cb67-1" aria-hidden="true" tabindex="-1"></a><span class="co"># =============================================================================</span></span>
+<span id="cb67-2"><a href="#cb67-2" aria-hidden="true" tabindex="-1"></a><span class="co"># BURN SEVERITY METRICS — dNBR vs. RdNBR</span></span>
+<span id="cb67-3"><a href="#cb67-3" aria-hidden="true" tabindex="-1"></a><span class="co">#</span></span>
+<span id="cb67-4"><a href="#cb67-4" aria-hidden="true" tabindex="-1"></a><span class="co"># dNBR  (differenced Normalized Burn Ratio):</span></span>
+<span id="cb67-5"><a href="#cb67-5" aria-hidden="true" tabindex="-1"></a><span class="co">#   dNBR = (preFireNBR − postFireNBR) × 1000</span></span>
+<span id="cb67-6"><a href="#cb67-6" aria-hidden="true" tabindex="-1"></a><span class="co">#   Captures spectral change caused by fire. Positive values = vegetation</span></span>
+<span id="cb67-7"><a href="#cb67-7" aria-hidden="true" tabindex="-1"></a><span class="co">#   loss (burning). Stored in MTBS/BSP as integer index units (×1000 scale),</span></span>
+<span id="cb67-8"><a href="#cb67-8" aria-hidden="true" tabindex="-1"></a><span class="co">#   so values typically range from −500 (increased greenness) to 1300+ (high</span></span>
+<span id="cb67-9"><a href="#cb67-9" aria-hidden="true" tabindex="-1"></a><span class="co">#   severity). A useful absolute measure of spectral change per fire pixel.</span></span>
+<span id="cb67-10"><a href="#cb67-10" aria-hidden="true" tabindex="-1"></a><span class="co">#</span></span>
+<span id="cb67-11"><a href="#cb67-11" aria-hidden="true" tabindex="-1"></a><span class="co">#   LIMITATION: pre-fire biomass confounds cross-fire comparison. A dNBR of</span></span>
+<span id="cb67-12"><a href="#cb67-12" aria-hidden="true" tabindex="-1"></a><span class="co">#   300 in dense old-growth forest represents less relative canopy destruction</span></span>
+<span id="cb67-13"><a href="#cb67-13" aria-hidden="true" tabindex="-1"></a><span class="co">#   than 300 in sparse shrubland, because old-growth had more NBR to lose.</span></span>
+<span id="cb67-14"><a href="#cb67-14" aria-hidden="true" tabindex="-1"></a><span class="co">#</span></span>
+<span id="cb67-15"><a href="#cb67-15" aria-hidden="true" tabindex="-1"></a><span class="co"># RdNBR (Relativized dNBR; Miller &amp; Thode 2007):</span></span>
+<span id="cb67-16"><a href="#cb67-16" aria-hidden="true" tabindex="-1"></a><span class="co">#   RdNBR = dNBR / sqrt(|preFireNBR / 1000|)</span></span>
+<span id="cb67-17"><a href="#cb67-17" aria-hidden="true" tabindex="-1"></a><span class="co">#   Divides by the square root of pre-fire NBR (rescaled to the 0–1 range),</span></span>
+<span id="cb67-18"><a href="#cb67-18" aria-hidden="true" tabindex="-1"></a><span class="co">#   normalizing for vegetation density before the fire. This makes severity</span></span>
+<span id="cb67-19"><a href="#cb67-19" aria-hidden="true" tabindex="-1"></a><span class="co">#   more comparable across fires in different biomes and vegetation types —</span></span>
+<span id="cb67-20"><a href="#cb67-20" aria-hidden="true" tabindex="-1"></a><span class="co">#   the preferred continuous treatment variable for a cross-fire DiD study.</span></span>
+<span id="cb67-21"><a href="#cb67-21" aria-hidden="true" tabindex="-1"></a><span class="co">#</span></span>
+<span id="cb67-22"><a href="#cb67-22" aria-hidden="true" tabindex="-1"></a><span class="co"># Data: USGS Burn Severity Program (BSP) CBI field plots — geospatially</span></span>
+<span id="cb67-23"><a href="#cb67-23" aria-hidden="true" tabindex="-1"></a><span class="co"># validated measurement points sampled within fire perimeters by field crews.</span></span>
+<span id="cb67-24"><a href="#cb67-24" aria-hidden="true" tabindex="-1"></a><span class="co"># BSP stores raw dNBR and pre-fire NBR per plot, enabling RdNBR computation.</span></span>
+<span id="cb67-25"><a href="#cb67-25" aria-hidden="true" tabindex="-1"></a><span class="co"># These are the only per-point raw dNBR observations available in this</span></span>
+<span id="cb67-26"><a href="#cb67-26" aria-hidden="true" tabindex="-1"></a><span class="co"># download without fetching individual MTBS fire severity rasters.</span></span>
+<span id="cb67-27"><a href="#cb67-27" aria-hidden="true" tabindex="-1"></a><span class="co"># =============================================================================</span></span>
+<span id="cb67-28"><a href="#cb67-28" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb67-29"><a href="#cb67-29" aria-hidden="true" tabindex="-1"></a>BSP_PATH <span class="ot">&lt;-</span> <span class="fu">here</span>(<span class="st">"data/raw/mtbs/burn_severity_perimeter_data/bsp_perims_DD.shp"</span>)</span>
+<span id="cb67-30"><a href="#cb67-30" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb67-31"><a href="#cb67-31" aria-hidden="true" tabindex="-1"></a>bsp_raw <span class="ot">&lt;-</span> <span class="fu">st_read</span>(BSP_PATH, <span class="at">quiet =</span> <span class="cn">TRUE</span>)</span>
+<span id="cb67-32"><a href="#cb67-32" aria-hidden="true" tabindex="-1"></a><span class="fu">names</span>(bsp_raw) <span class="ot">&lt;-</span> <span class="fu">tolower</span>(<span class="fu">names</span>(bsp_raw))</span>
+<span id="cb67-33"><a href="#cb67-33" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb67-34"><a href="#cb67-34" aria-hidden="true" tabindex="-1"></a><span class="co"># Keep only CBI field plots with valid dNBR and pre-fire NBR.</span></span>
+<span id="cb67-35"><a href="#cb67-35" aria-hidden="true" tabindex="-1"></a><span class="co"># Exclude sentinel 9999 (no data) and |preNBR| ≤ 10 (avoids RdNBR blow-up</span></span>
+<span id="cb67-36"><a href="#cb67-36" aria-hidden="true" tabindex="-1"></a><span class="co"># from near-zero pre-fire NBR in bare/sparse areas).</span></span>
+<span id="cb67-37"><a href="#cb67-37" aria-hidden="true" tabindex="-1"></a>cbi_raw <span class="ot">&lt;-</span> bsp_raw <span class="sc">|&gt;</span></span>
+<span id="cb67-38"><a href="#cb67-38" aria-hidden="true" tabindex="-1"></a>  <span class="fu">filter</span>(</span>
+<span id="cb67-39"><a href="#cb67-39" aria-hidden="true" tabindex="-1"></a>    map_prog   <span class="sc">==</span> <span class="st">"CBI"</span>,</span>
+<span id="cb67-40"><a href="#cb67-40" aria-hidden="true" tabindex="-1"></a>    <span class="sc">!</span><span class="fu">is.na</span>(dnbr_val),  <span class="sc">!</span><span class="fu">is.na</span>(prenbr_val),</span>
+<span id="cb67-41"><a href="#cb67-41" aria-hidden="true" tabindex="-1"></a>    dnbr_val   <span class="sc">!=</span> <span class="dv">9999</span>, prenbr_val <span class="sc">!=</span> <span class="dv">9999</span>,</span>
+<span id="cb67-42"><a href="#cb67-42" aria-hidden="true" tabindex="-1"></a>    <span class="fu">abs</span>(prenbr_val) <span class="sc">&gt;</span> <span class="dv">10</span></span>
+<span id="cb67-43"><a href="#cb67-43" aria-hidden="true" tabindex="-1"></a>  ) <span class="sc">|&gt;</span></span>
+<span id="cb67-44"><a href="#cb67-44" aria-hidden="true" tabindex="-1"></a>  <span class="fu">mutate</span>(</span>
+<span id="cb67-45"><a href="#cb67-45" aria-hidden="true" tabindex="-1"></a>    <span class="co"># RdNBR: normalize by sqrt(|preNBR|) on the 0–1 NBR scale</span></span>
+<span id="cb67-46"><a href="#cb67-46" aria-hidden="true" tabindex="-1"></a>    <span class="at">rdnbr =</span> dnbr_val <span class="sc">/</span> <span class="fu">sqrt</span>(<span class="fu">abs</span>(prenbr_val <span class="sc">/</span> <span class="dv">1000</span>))</span>
+<span id="cb67-47"><a href="#cb67-47" aria-hidden="true" tabindex="-1"></a>  )</span>
+<span id="cb67-48"><a href="#cb67-48" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb67-49"><a href="#cb67-49" aria-hidden="true" tabindex="-1"></a><span class="co"># Spatial filter to Western US (BSP is NAD83, matches western_states_sf CRS)</span></span>
+<span id="cb67-50"><a href="#cb67-50" aria-hidden="true" tabindex="-1"></a>cbi_raw  <span class="ot">&lt;-</span> <span class="fu">st_transform</span>(cbi_raw, <span class="fu">st_crs</span>(western_states_sf))</span>
+<span id="cb67-51"><a href="#cb67-51" aria-hidden="true" tabindex="-1"></a>cbi_west <span class="ot">&lt;-</span> <span class="fu">st_filter</span>(cbi_raw, western_states_sf)</span>
+<span id="cb67-52"><a href="#cb67-52" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb67-53"><a href="#cb67-53" aria-hidden="true" tabindex="-1"></a><span class="fu">cat</span>(<span class="st">"CBI field plots (Western US, valid dNBR + preNBR):"</span>, <span class="fu">nrow</span>(cbi_west), <span class="st">"</span><span class="sc">\n</span><span class="st">"</span>)</span></code></pre></div><button title="Copy to Clipboard" class="code-copy-button"><i class="bi"></i></button></div>
 </details>
 <div class="cell-output cell-output-stdout">
-<pre><code>Fires with burned-orientation thresholds: 4045 / 6828 </code></pre>
+<pre><code>CBI field plots (Western US, valid dNBR + preNBR): 4777 </code></pre>
 </div>
 <details class="code-fold">
 <summary>Code</summary>
-<div class="code-copy-outer-scaffold"><div class="sourceCode cell-code" id="cb69"><pre class="sourceCode r code-with-copy"><code class="sourceCode r"><span id="cb69-1"><a href="#cb69-1" aria-hidden="true" tabindex="-1"></a><span class="fu">cat</span>(<span class="st">"Fires with valid dNBR offset:"</span>, <span class="fu">nrow</span>(offst_valid), <span class="st">"/"</span>, <span class="fu">nrow</span>(mtbs_west), <span class="st">"</span><span class="sc">\n</span><span class="st">"</span>)</span></code></pre></div><button title="Copy to Clipboard" class="code-copy-button"><i class="bi"></i></button></div>
+<div class="code-copy-outer-scaffold"><div class="sourceCode cell-code" id="cb69"><pre class="sourceCode r code-with-copy"><code class="sourceCode r"><span id="cb69-1"><a href="#cb69-1" aria-hidden="true" tabindex="-1"></a><span class="fu">cat</span>(<span class="st">"dNBR  range:"</span>, <span class="fu">range</span>(cbi_west<span class="sc">$</span>dnbr_val),            <span class="st">"</span><span class="sc">\n</span><span class="st">"</span>)</span></code></pre></div><button title="Copy to Clipboard" class="code-copy-button"><i class="bi"></i></button></div>
 </details>
 <div class="cell-output cell-output-stdout">
-<pre><code>Fires with valid dNBR offset: 6828 / 6828 </code></pre>
+<pre><code>dNBR  range: -340 1040 </code></pre>
 </div>
 <details class="code-fold">
 <summary>Code</summary>
-<div class="code-copy-outer-scaffold"><div class="sourceCode cell-code" id="cb71"><pre class="sourceCode r code-with-copy"><code class="sourceCode r"><span id="cb71-1"><a href="#cb71-1" aria-hidden="true" tabindex="-1"></a><span class="co"># QA: must have data to plot</span></span>
-<span id="cb71-2"><a href="#cb71-2" aria-hidden="true" tabindex="-1"></a><span class="fu">stopifnot</span>(<span class="st">"No burned-orientation threshold rows to plot"</span> <span class="ot">=</span> <span class="fu">nrow</span>(sev_burned) <span class="sc">&gt;</span> <span class="dv">0</span>)</span>
-<span id="cb71-3"><a href="#cb71-3" aria-hidden="true" tabindex="-1"></a><span class="fu">stopifnot</span>(<span class="st">"No valid dNBR offset rows to plot"</span> <span class="ot">=</span> <span class="fu">nrow</span>(offst_valid) <span class="sc">&gt;</span> <span class="dv">0</span>)</span>
-<span id="cb71-4"><a href="#cb71-4" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb71-5"><a href="#cb71-5" aria-hidden="true" tabindex="-1"></a><span class="co"># --- 4a: Distribution of High_T threshold values ----------------------------</span></span>
-<span id="cb71-6"><a href="#cb71-6" aria-hidden="true" tabindex="-1"></a>high_t_median <span class="ot">&lt;-</span> <span class="fu">median</span>(sev_burned<span class="sc">$</span>high_t, <span class="at">na.rm =</span> <span class="cn">TRUE</span>)</span>
-<span id="cb71-7"><a href="#cb71-7" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb71-8"><a href="#cb71-8" aria-hidden="true" tabindex="-1"></a>p4a <span class="ot">&lt;-</span> <span class="fu">ggplot</span>(sev_burned, <span class="fu">aes</span>(<span class="at">x =</span> high_t)) <span class="sc">+</span></span>
-<span id="cb71-9"><a href="#cb71-9" aria-hidden="true" tabindex="-1"></a>  <span class="fu">geom_histogram</span>(<span class="at">bins =</span> <span class="dv">60</span>, <span class="at">fill =</span> <span class="st">"#d73027"</span>, <span class="at">color =</span> <span class="st">"white"</span>,</span>
-<span id="cb71-10"><a href="#cb71-10" aria-hidden="true" tabindex="-1"></a>                 <span class="at">linewidth =</span> <span class="fl">0.2</span>, <span class="at">alpha =</span> <span class="fl">0.85</span>) <span class="sc">+</span></span>
-<span id="cb71-11"><a href="#cb71-11" aria-hidden="true" tabindex="-1"></a>  <span class="fu">geom_vline</span>(<span class="at">xintercept =</span> high_t_median,</span>
-<span id="cb71-12"><a href="#cb71-12" aria-hidden="true" tabindex="-1"></a>             <span class="at">color =</span> <span class="st">"#4d4d4d"</span>, <span class="at">linewidth =</span> <span class="dv">1</span>, <span class="at">linetype =</span> <span class="st">"dashed"</span>) <span class="sc">+</span></span>
-<span id="cb71-13"><a href="#cb71-13" aria-hidden="true" tabindex="-1"></a>  <span class="fu">annotate</span>(<span class="st">"text"</span>,</span>
-<span id="cb71-14"><a href="#cb71-14" aria-hidden="true" tabindex="-1"></a>           <span class="at">x =</span> high_t_median <span class="sc">+</span> <span class="dv">10</span>, <span class="at">y =</span> <span class="cn">Inf</span>, <span class="at">vjust =</span> <span class="fl">1.5</span>, <span class="at">hjust =</span> <span class="dv">0</span>,</span>
-<span id="cb71-15"><a href="#cb71-15" aria-hidden="true" tabindex="-1"></a>           <span class="at">size =</span> <span class="fl">3.5</span>, <span class="at">color =</span> <span class="st">"#4d4d4d"</span>,</span>
-<span id="cb71-16"><a href="#cb71-16" aria-hidden="true" tabindex="-1"></a>           <span class="at">label =</span> <span class="fu">paste0</span>(<span class="st">"Median: "</span>, <span class="fu">round</span>(high_t_median))) <span class="sc">+</span></span>
-<span id="cb71-17"><a href="#cb71-17" aria-hidden="true" tabindex="-1"></a>  <span class="fu">scale_x_continuous</span>(<span class="at">labels =</span> comma) <span class="sc">+</span></span>
-<span id="cb71-18"><a href="#cb71-18" aria-hidden="true" tabindex="-1"></a>  <span class="fu">scale_y_continuous</span>(<span class="at">labels =</span> comma, <span class="at">expand =</span> <span class="fu">c</span>(<span class="dv">0</span>, <span class="dv">0</span>)) <span class="sc">+</span></span>
-<span id="cb71-19"><a href="#cb71-19" aria-hidden="true" tabindex="-1"></a>  <span class="fu">labs</span>(</span>
-<span id="cb71-20"><a href="#cb71-20" aria-hidden="true" tabindex="-1"></a>    <span class="at">title   =</span> <span class="st">"Distribution of Moderate→High dNBR Threshold (High_T) Across Fires"</span>,</span>
-<span id="cb71-21"><a href="#cb71-21" aria-hidden="true" tabindex="-1"></a>    <span class="at">x       =</span> <span class="st">"Moderate/High dNBR threshold (index units)"</span>,</span>
-<span id="cb71-22"><a href="#cb71-22" aria-hidden="true" tabindex="-1"></a>    <span class="at">y       =</span> <span class="st">"Number of fires"</span>,</span>
-<span id="cb71-23"><a href="#cb71-23" aria-hidden="true" tabindex="-1"></a>    <span class="at">caption =</span> <span class="fu">paste0</span>(<span class="st">"Lower High_T = fires where more pixels are classified as high severity. "</span>,</span>
-<span id="cb71-24"><a href="#cb71-24" aria-hidden="true" tabindex="-1"></a>                     <span class="st">"n = "</span>, scales<span class="sc">::</span><span class="fu">comma</span>(<span class="fu">nrow</span>(sev_burned)), <span class="st">" burned-orientation fires."</span>)</span>
-<span id="cb71-25"><a href="#cb71-25" aria-hidden="true" tabindex="-1"></a>  ) <span class="sc">+</span></span>
-<span id="cb71-26"><a href="#cb71-26" aria-hidden="true" tabindex="-1"></a>  <span class="fu">theme_minimal</span>(<span class="at">base_size =</span> <span class="dv">12</span>) <span class="sc">+</span></span>
-<span id="cb71-27"><a href="#cb71-27" aria-hidden="true" tabindex="-1"></a>  <span class="fu">theme</span>(</span>
-<span id="cb71-28"><a href="#cb71-28" aria-hidden="true" tabindex="-1"></a>    <span class="at">plot.title       =</span> <span class="fu">element_text</span>(<span class="at">face =</span> <span class="st">"bold"</span>, <span class="at">size =</span> <span class="dv">13</span>),</span>
-<span id="cb71-29"><a href="#cb71-29" aria-hidden="true" tabindex="-1"></a>    <span class="at">plot.caption     =</span> <span class="fu">element_text</span>(<span class="at">color =</span> <span class="st">"grey50"</span>, <span class="at">size =</span> <span class="dv">9</span>),</span>
-<span id="cb71-30"><a href="#cb71-30" aria-hidden="true" tabindex="-1"></a>    <span class="at">panel.grid.minor =</span> <span class="fu">element_blank</span>(),</span>
-<span id="cb71-31"><a href="#cb71-31" aria-hidden="true" tabindex="-1"></a>    <span class="at">axis.title       =</span> <span class="fu">element_text</span>(<span class="at">size =</span> <span class="dv">11</span>),</span>
-<span id="cb71-32"><a href="#cb71-32" aria-hidden="true" tabindex="-1"></a>    <span class="at">axis.text        =</span> <span class="fu">element_text</span>(<span class="at">size =</span> <span class="dv">10</span>)</span>
-<span id="cb71-33"><a href="#cb71-33" aria-hidden="true" tabindex="-1"></a>  )</span>
-<span id="cb71-34"><a href="#cb71-34" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb71-35"><a href="#cb71-35" aria-hidden="true" tabindex="-1"></a><span class="co"># --- 4b: Distribution of dNBR offset ----------------------------------------</span></span>
-<span id="cb71-36"><a href="#cb71-36" aria-hidden="true" tabindex="-1"></a>offst_median <span class="ot">&lt;-</span> <span class="fu">median</span>(offst_valid<span class="sc">$</span>dnbr_offst, <span class="at">na.rm =</span> <span class="cn">TRUE</span>)</span>
-<span id="cb71-37"><a href="#cb71-37" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb71-38"><a href="#cb71-38" aria-hidden="true" tabindex="-1"></a>p4b <span class="ot">&lt;-</span> <span class="fu">ggplot</span>(offst_valid, <span class="fu">aes</span>(<span class="at">x =</span> dnbr_offst)) <span class="sc">+</span></span>
-<span id="cb71-39"><a href="#cb71-39" aria-hidden="true" tabindex="-1"></a>  <span class="fu">geom_histogram</span>(<span class="at">bins =</span> <span class="dv">60</span>, <span class="at">fill =</span> <span class="st">"#4393c3"</span>, <span class="at">color =</span> <span class="st">"white"</span>,</span>
-<span id="cb71-40"><a href="#cb71-40" aria-hidden="true" tabindex="-1"></a>                 <span class="at">linewidth =</span> <span class="fl">0.2</span>, <span class="at">alpha =</span> <span class="fl">0.85</span>) <span class="sc">+</span></span>
-<span id="cb71-41"><a href="#cb71-41" aria-hidden="true" tabindex="-1"></a>  <span class="fu">geom_vline</span>(<span class="at">xintercept =</span> offst_median,</span>
-<span id="cb71-42"><a href="#cb71-42" aria-hidden="true" tabindex="-1"></a>             <span class="at">color =</span> <span class="st">"#4d4d4d"</span>, <span class="at">linewidth =</span> <span class="dv">1</span>, <span class="at">linetype =</span> <span class="st">"dashed"</span>) <span class="sc">+</span></span>
-<span id="cb71-43"><a href="#cb71-43" aria-hidden="true" tabindex="-1"></a>  <span class="fu">annotate</span>(<span class="st">"text"</span>,</span>
-<span id="cb71-44"><a href="#cb71-44" aria-hidden="true" tabindex="-1"></a>           <span class="at">x =</span> offst_median <span class="sc">+</span> <span class="dv">2</span>, <span class="at">y =</span> <span class="cn">Inf</span>, <span class="at">vjust =</span> <span class="fl">1.5</span>, <span class="at">hjust =</span> <span class="dv">0</span>,</span>
-<span id="cb71-45"><a href="#cb71-45" aria-hidden="true" tabindex="-1"></a>           <span class="at">size =</span> <span class="fl">3.5</span>, <span class="at">color =</span> <span class="st">"#4d4d4d"</span>,</span>
-<span id="cb71-46"><a href="#cb71-46" aria-hidden="true" tabindex="-1"></a>           <span class="at">label =</span> <span class="fu">paste0</span>(<span class="st">"Median: "</span>, <span class="fu">round</span>(offst_median, <span class="dv">1</span>))) <span class="sc">+</span></span>
-<span id="cb71-47"><a href="#cb71-47" aria-hidden="true" tabindex="-1"></a>  <span class="fu">scale_x_continuous</span>(<span class="at">labels =</span> comma) <span class="sc">+</span></span>
-<span id="cb71-48"><a href="#cb71-48" aria-hidden="true" tabindex="-1"></a>  <span class="fu">scale_y_continuous</span>(<span class="at">labels =</span> comma, <span class="at">expand =</span> <span class="fu">c</span>(<span class="dv">0</span>, <span class="dv">0</span>)) <span class="sc">+</span></span>
-<span id="cb71-49"><a href="#cb71-49" aria-hidden="true" tabindex="-1"></a>  <span class="fu">labs</span>(</span>
-<span id="cb71-50"><a href="#cb71-50" aria-hidden="true" tabindex="-1"></a>    <span class="at">title   =</span> <span class="st">"Distribution of dNBR Offset (Mean dNBR in Unburned Reference Area)"</span>,</span>
-<span id="cb71-51"><a href="#cb71-51" aria-hidden="true" tabindex="-1"></a>    <span class="at">x       =</span> <span class="st">"dNBR offset (index units)"</span>,</span>
-<span id="cb71-52"><a href="#cb71-52" aria-hidden="true" tabindex="-1"></a>    <span class="at">y       =</span> <span class="st">"Number of fires"</span>,</span>
-<span id="cb71-53"><a href="#cb71-53" aria-hidden="true" tabindex="-1"></a>    <span class="at">caption =</span> <span class="fu">paste0</span>(<span class="st">"Values near 0 = little background spectral change; "</span>,</span>
-<span id="cb71-54"><a href="#cb71-54" aria-hidden="true" tabindex="-1"></a>                     <span class="st">"large values = substantial pre/post change in surrounding area. "</span>,</span>
-<span id="cb71-55"><a href="#cb71-55" aria-hidden="true" tabindex="-1"></a>                     <span class="st">"n = "</span>, scales<span class="sc">::</span><span class="fu">comma</span>(<span class="fu">nrow</span>(offst_valid)), <span class="st">" fires with valid offset."</span>)</span>
-<span id="cb71-56"><a href="#cb71-56" aria-hidden="true" tabindex="-1"></a>  ) <span class="sc">+</span></span>
-<span id="cb71-57"><a href="#cb71-57" aria-hidden="true" tabindex="-1"></a>  <span class="fu">theme_minimal</span>(<span class="at">base_size =</span> <span class="dv">12</span>) <span class="sc">+</span></span>
-<span id="cb71-58"><a href="#cb71-58" aria-hidden="true" tabindex="-1"></a>  <span class="fu">theme</span>(</span>
-<span id="cb71-59"><a href="#cb71-59" aria-hidden="true" tabindex="-1"></a>    <span class="at">plot.title       =</span> <span class="fu">element_text</span>(<span class="at">face =</span> <span class="st">"bold"</span>, <span class="at">size =</span> <span class="dv">13</span>),</span>
-<span id="cb71-60"><a href="#cb71-60" aria-hidden="true" tabindex="-1"></a>    <span class="at">plot.caption     =</span> <span class="fu">element_text</span>(<span class="at">color =</span> <span class="st">"grey50"</span>, <span class="at">size =</span> <span class="dv">9</span>),</span>
-<span id="cb71-61"><a href="#cb71-61" aria-hidden="true" tabindex="-1"></a>    <span class="at">panel.grid.minor =</span> <span class="fu">element_blank</span>(),</span>
-<span id="cb71-62"><a href="#cb71-62" aria-hidden="true" tabindex="-1"></a>    <span class="at">axis.title       =</span> <span class="fu">element_text</span>(<span class="at">size =</span> <span class="dv">11</span>),</span>
-<span id="cb71-63"><a href="#cb71-63" aria-hidden="true" tabindex="-1"></a>    <span class="at">axis.text        =</span> <span class="fu">element_text</span>(<span class="at">size =</span> <span class="dv">10</span>)</span>
-<span id="cb71-64"><a href="#cb71-64" aria-hidden="true" tabindex="-1"></a>  )</span>
-<span id="cb71-65"><a href="#cb71-65" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb71-66"><a href="#cb71-66" aria-hidden="true" tabindex="-1"></a><span class="co"># --- 4c: High_T vs. fire size ------------------------------------------------</span></span>
-<span id="cb71-67"><a href="#cb71-67" aria-hidden="true" tabindex="-1"></a>p4c <span class="ot">&lt;-</span> <span class="fu">ggplot</span>(sev_burned, <span class="fu">aes</span>(<span class="at">x =</span> burnbndac, <span class="at">y =</span> high_t)) <span class="sc">+</span></span>
-<span id="cb71-68"><a href="#cb71-68" aria-hidden="true" tabindex="-1"></a>  <span class="fu">geom_point</span>(<span class="at">alpha =</span> <span class="fl">0.25</span>, <span class="at">size =</span> <span class="fl">0.8</span>, <span class="at">color =</span> <span class="st">"#d73027"</span>) <span class="sc">+</span></span>
-<span id="cb71-69"><a href="#cb71-69" aria-hidden="true" tabindex="-1"></a>  <span class="fu">geom_smooth</span>(<span class="at">method =</span> <span class="st">"loess"</span>, <span class="at">se =</span> <span class="cn">TRUE</span>,</span>
-<span id="cb71-70"><a href="#cb71-70" aria-hidden="true" tabindex="-1"></a>              <span class="at">color =</span> <span class="st">"#4d4d4d"</span>, <span class="at">fill =</span> <span class="st">"#4d4d4d"</span>, <span class="at">alpha =</span> <span class="fl">0.15</span>,</span>
-<span id="cb71-71"><a href="#cb71-71" aria-hidden="true" tabindex="-1"></a>              <span class="at">linewidth =</span> <span class="fl">0.8</span>) <span class="sc">+</span></span>
-<span id="cb71-72"><a href="#cb71-72" aria-hidden="true" tabindex="-1"></a>  <span class="fu">scale_x_log10</span>(<span class="at">labels =</span> <span class="fu">label_comma</span>(),</span>
-<span id="cb71-73"><a href="#cb71-73" aria-hidden="true" tabindex="-1"></a>                <span class="at">breaks  =</span> <span class="fu">c</span>(<span class="dv">1000</span>, <span class="dv">5000</span>, <span class="dv">10000</span>, <span class="dv">50000</span>, <span class="dv">100000</span>, <span class="dv">500000</span>)) <span class="sc">+</span></span>
-<span id="cb71-74"><a href="#cb71-74" aria-hidden="true" tabindex="-1"></a>  <span class="fu">scale_y_continuous</span>(<span class="at">labels =</span> comma) <span class="sc">+</span></span>
-<span id="cb71-75"><a href="#cb71-75" aria-hidden="true" tabindex="-1"></a>  <span class="fu">labs</span>(</span>
-<span id="cb71-76"><a href="#cb71-76" aria-hidden="true" tabindex="-1"></a>    <span class="at">title   =</span> <span class="st">"Moderate→High dNBR Threshold vs. Fire Size"</span>,</span>
-<span id="cb71-77"><a href="#cb71-77" aria-hidden="true" tabindex="-1"></a>    <span class="at">x       =</span> <span class="st">"Fire size (acres, log₁₀ scale)"</span>,</span>
-<span id="cb71-78"><a href="#cb71-78" aria-hidden="true" tabindex="-1"></a>    <span class="at">y       =</span> <span class="st">"High_T (dNBR threshold, index units)"</span>,</span>
-<span id="cb71-79"><a href="#cb71-79" aria-hidden="true" tabindex="-1"></a>    <span class="at">caption =</span> <span class="st">"Grey band = loess ± 95% CI. No strong size–threshold relationship expected."</span></span>
-<span id="cb71-80"><a href="#cb71-80" aria-hidden="true" tabindex="-1"></a>  ) <span class="sc">+</span></span>
-<span id="cb71-81"><a href="#cb71-81" aria-hidden="true" tabindex="-1"></a>  <span class="fu">theme_minimal</span>(<span class="at">base_size =</span> <span class="dv">12</span>) <span class="sc">+</span></span>
-<span id="cb71-82"><a href="#cb71-82" aria-hidden="true" tabindex="-1"></a>  <span class="fu">theme</span>(</span>
-<span id="cb71-83"><a href="#cb71-83" aria-hidden="true" tabindex="-1"></a>    <span class="at">plot.title       =</span> <span class="fu">element_text</span>(<span class="at">face =</span> <span class="st">"bold"</span>, <span class="at">size =</span> <span class="dv">13</span>),</span>
-<span id="cb71-84"><a href="#cb71-84" aria-hidden="true" tabindex="-1"></a>    <span class="at">plot.caption     =</span> <span class="fu">element_text</span>(<span class="at">color =</span> <span class="st">"grey50"</span>, <span class="at">size =</span> <span class="dv">9</span>),</span>
-<span id="cb71-85"><a href="#cb71-85" aria-hidden="true" tabindex="-1"></a>    <span class="at">panel.grid.minor =</span> <span class="fu">element_blank</span>(),</span>
-<span id="cb71-86"><a href="#cb71-86" aria-hidden="true" tabindex="-1"></a>    <span class="at">axis.title       =</span> <span class="fu">element_text</span>(<span class="at">size =</span> <span class="dv">11</span>),</span>
-<span id="cb71-87"><a href="#cb71-87" aria-hidden="true" tabindex="-1"></a>    <span class="at">axis.text        =</span> <span class="fu">element_text</span>(<span class="at">size =</span> <span class="dv">10</span>)</span>
-<span id="cb71-88"><a href="#cb71-88" aria-hidden="true" tabindex="-1"></a>  )</span>
-<span id="cb71-89"><a href="#cb71-89" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb71-90"><a href="#cb71-90" aria-hidden="true" tabindex="-1"></a><span class="fu">print</span>(p4a)</span></code></pre></div><button title="Copy to Clipboard" class="code-copy-button"><i class="bi"></i></button></div>
+<div class="code-copy-outer-scaffold"><div class="sourceCode cell-code" id="cb71"><pre class="sourceCode r code-with-copy"><code class="sourceCode r"><span id="cb71-1"><a href="#cb71-1" aria-hidden="true" tabindex="-1"></a><span class="fu">cat</span>(<span class="st">"RdNBR range:"</span>, <span class="fu">round</span>(<span class="fu">range</span>(cbi_west<span class="sc">$</span>rdnbr, <span class="at">na.rm =</span> <span class="cn">TRUE</span>), <span class="dv">1</span>), <span class="st">"</span><span class="sc">\n</span><span class="st">"</span>)</span></code></pre></div><button title="Copy to Clipboard" class="code-copy-button"><i class="bi"></i></button></div>
+</details>
+<div class="cell-output cell-output-stdout">
+<pre><code>RdNBR range: -1189.5 3556.4 </code></pre>
+</div>
+<details class="code-fold">
+<summary>Code</summary>
+<div class="code-copy-outer-scaffold"><div class="sourceCode cell-code" id="cb73"><pre class="sourceCode r code-with-copy"><code class="sourceCode r"><span id="cb73-1"><a href="#cb73-1" aria-hidden="true" tabindex="-1"></a><span class="co"># --- Sanity checks -----------------------------------------------------------</span></span>
+<span id="cb73-2"><a href="#cb73-2" aria-hidden="true" tabindex="-1"></a><span class="fu">stopifnot</span>(<span class="st">"No CBI plots in Western US"</span>         <span class="ot">=</span> <span class="fu">nrow</span>(cbi_west) <span class="sc">&gt;</span> <span class="dv">0</span>)</span>
+<span id="cb73-3"><a href="#cb73-3" aria-hidden="true" tabindex="-1"></a><span class="fu">stopifnot</span>(<span class="st">"All dNBR values identical"</span>          <span class="ot">=</span> <span class="fu">sd</span>(cbi_west<span class="sc">$</span>dnbr_val) <span class="sc">&gt;</span> <span class="dv">0</span>)</span>
+<span id="cb73-4"><a href="#cb73-4" aria-hidden="true" tabindex="-1"></a>n_rdnbr_na <span class="ot">&lt;-</span> <span class="fu">sum</span>(<span class="fu">is.na</span>(cbi_west<span class="sc">$</span>rdnbr) <span class="sc">|</span> <span class="sc">!</span><span class="fu">is.finite</span>(cbi_west<span class="sc">$</span>rdnbr))</span>
+<span id="cb73-5"><a href="#cb73-5" aria-hidden="true" tabindex="-1"></a><span class="cf">if</span> (n_rdnbr_na <span class="sc">&gt;</span> <span class="dv">0</span>)</span>
+<span id="cb73-6"><a href="#cb73-6" aria-hidden="true" tabindex="-1"></a>  <span class="fu">message</span>(n_rdnbr_na, <span class="st">" RdNBR values are NA/Inf (pre-fire NBR near zero)"</span>)</span>
+<span id="cb73-7"><a href="#cb73-7" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb73-8"><a href="#cb73-8" aria-hidden="true" tabindex="-1"></a><span class="co"># For mapping: extract centroids from mixed-geometry BSP features</span></span>
+<span id="cb73-9"><a href="#cb73-9" aria-hidden="true" tabindex="-1"></a>cbi_pts_alb <span class="ot">&lt;-</span> cbi_west <span class="sc">|&gt;</span></span>
+<span id="cb73-10"><a href="#cb73-10" aria-hidden="true" tabindex="-1"></a>  <span class="fu">st_centroid</span>() <span class="sc">|&gt;</span></span>
+<span id="cb73-11"><a href="#cb73-11" aria-hidden="true" tabindex="-1"></a>  <span class="fu">st_transform</span>(crs_albers)   <span class="co"># crs_albers defined in Plot 1 chunk</span></span>
+<span id="cb73-12"><a href="#cb73-12" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb73-13"><a href="#cb73-13" aria-hidden="true" tabindex="-1"></a><span class="co"># Color scale limits: clip to 2nd–98th percentile to prevent outliers from</span></span>
+<span id="cb73-14"><a href="#cb73-14" aria-hidden="true" tabindex="-1"></a><span class="co"># collapsing the colour range</span></span>
+<span id="cb73-15"><a href="#cb73-15" aria-hidden="true" tabindex="-1"></a>dnbr_lims <span class="ot">&lt;-</span> <span class="fu">quantile</span>(cbi_west<span class="sc">$</span>dnbr_val, <span class="fu">c</span>(<span class="fl">0.02</span>, <span class="fl">0.98</span>), <span class="at">na.rm =</span> <span class="cn">TRUE</span>)</span>
+<span id="cb73-16"><a href="#cb73-16" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb73-17"><a href="#cb73-17" aria-hidden="true" tabindex="-1"></a><span class="co"># --- 4a: Map — CBI field plots colored by dNBR -------------------------------</span></span>
+<span id="cb73-18"><a href="#cb73-18" aria-hidden="true" tabindex="-1"></a>p4a <span class="ot">&lt;-</span> <span class="fu">ggplot</span>() <span class="sc">+</span></span>
+<span id="cb73-19"><a href="#cb73-19" aria-hidden="true" tabindex="-1"></a>  <span class="fu">geom_sf</span>(<span class="at">data =</span> western_states_alb,</span>
+<span id="cb73-20"><a href="#cb73-20" aria-hidden="true" tabindex="-1"></a>          <span class="at">fill =</span> <span class="st">"grey96"</span>, <span class="at">color =</span> <span class="st">"grey50"</span>, <span class="at">linewidth =</span> <span class="fl">0.4</span>) <span class="sc">+</span></span>
+<span id="cb73-21"><a href="#cb73-21" aria-hidden="true" tabindex="-1"></a>  <span class="fu">geom_sf</span>(<span class="at">data =</span> mtbs_west_alb,</span>
+<span id="cb73-22"><a href="#cb73-22" aria-hidden="true" tabindex="-1"></a>          <span class="at">fill =</span> <span class="st">"grey80"</span>, <span class="at">color =</span> <span class="cn">NA</span>, <span class="at">alpha =</span> <span class="fl">0.45</span>) <span class="sc">+</span></span>
+<span id="cb73-23"><a href="#cb73-23" aria-hidden="true" tabindex="-1"></a>  <span class="fu">geom_sf</span>(<span class="at">data =</span> cbi_pts_alb,</span>
+<span id="cb73-24"><a href="#cb73-24" aria-hidden="true" tabindex="-1"></a>          <span class="fu">aes</span>(<span class="at">color =</span> dnbr_val), <span class="at">size =</span> <span class="fl">1.1</span>, <span class="at">alpha =</span> <span class="fl">0.8</span>) <span class="sc">+</span></span>
+<span id="cb73-25"><a href="#cb73-25" aria-hidden="true" tabindex="-1"></a>  <span class="fu">scale_color_viridis_c</span>(</span>
+<span id="cb73-26"><a href="#cb73-26" aria-hidden="true" tabindex="-1"></a>    <span class="at">name      =</span> <span class="st">"dNBR</span><span class="sc">\n</span><span class="st">(index units)"</span>,</span>
+<span id="cb73-27"><a href="#cb73-27" aria-hidden="true" tabindex="-1"></a>    <span class="at">option    =</span> <span class="st">"inferno"</span>,</span>
+<span id="cb73-28"><a href="#cb73-28" aria-hidden="true" tabindex="-1"></a>    <span class="at">direction =</span> <span class="sc">-</span><span class="dv">1</span>,</span>
+<span id="cb73-29"><a href="#cb73-29" aria-hidden="true" tabindex="-1"></a>    <span class="at">limits    =</span> dnbr_lims,</span>
+<span id="cb73-30"><a href="#cb73-30" aria-hidden="true" tabindex="-1"></a>    <span class="at">oob       =</span> scales<span class="sc">::</span>squish,</span>
+<span id="cb73-31"><a href="#cb73-31" aria-hidden="true" tabindex="-1"></a>    <span class="at">labels    =</span> comma</span>
+<span id="cb73-32"><a href="#cb73-32" aria-hidden="true" tabindex="-1"></a>  ) <span class="sc">+</span></span>
+<span id="cb73-33"><a href="#cb73-33" aria-hidden="true" tabindex="-1"></a>  <span class="fu">annotation_scale</span>(<span class="at">location =</span> <span class="st">"bl"</span>, <span class="at">width_hint =</span> <span class="fl">0.25</span>, <span class="at">text_cex =</span> <span class="fl">0.85</span>) <span class="sc">+</span></span>
+<span id="cb73-34"><a href="#cb73-34" aria-hidden="true" tabindex="-1"></a>  <span class="fu">annotation_north_arrow</span>(</span>
+<span id="cb73-35"><a href="#cb73-35" aria-hidden="true" tabindex="-1"></a>    <span class="at">location =</span> <span class="st">"tr"</span>, <span class="at">which_north =</span> <span class="st">"true"</span>,</span>
+<span id="cb73-36"><a href="#cb73-36" aria-hidden="true" tabindex="-1"></a>    <span class="at">style    =</span> <span class="fu">north_arrow_minimal</span>(<span class="at">text_size =</span> <span class="dv">10</span>)</span>
+<span id="cb73-37"><a href="#cb73-37" aria-hidden="true" tabindex="-1"></a>  ) <span class="sc">+</span></span>
+<span id="cb73-38"><a href="#cb73-38" aria-hidden="true" tabindex="-1"></a>  <span class="fu">labs</span>(</span>
+<span id="cb73-39"><a href="#cb73-39" aria-hidden="true" tabindex="-1"></a>    <span class="at">title    =</span> <span class="st">"BSP CBI Field Plot Locations — Colored by Raw dNBR"</span>,</span>
+<span id="cb73-40"><a href="#cb73-40" aria-hidden="true" tabindex="-1"></a>    <span class="at">subtitle =</span> <span class="fu">glue</span>(<span class="st">"{scales::comma(nrow(cbi_west))} validated field plots, Western US (1994–2017)"</span>),</span>
+<span id="cb73-41"><a href="#cb73-41" aria-hidden="true" tabindex="-1"></a>    <span class="at">caption  =</span> <span class="fu">paste0</span>(</span>
+<span id="cb73-42"><a href="#cb73-42" aria-hidden="true" tabindex="-1"></a>      <span class="st">"Grey polygons = MTBS fire perimeters. "</span>,</span>
+<span id="cb73-43"><a href="#cb73-43" aria-hidden="true" tabindex="-1"></a>      <span class="st">"Source: USGS Burn Severity Program (BSP) CBI field plots. "</span>,</span>
+<span id="cb73-44"><a href="#cb73-44" aria-hidden="true" tabindex="-1"></a>      <span class="st">"Color clipped to 2nd–98th percentile."</span></span>
+<span id="cb73-45"><a href="#cb73-45" aria-hidden="true" tabindex="-1"></a>    )</span>
+<span id="cb73-46"><a href="#cb73-46" aria-hidden="true" tabindex="-1"></a>  ) <span class="sc">+</span></span>
+<span id="cb73-47"><a href="#cb73-47" aria-hidden="true" tabindex="-1"></a>  <span class="fu">theme_void</span>(<span class="at">base_size =</span> <span class="dv">12</span>) <span class="sc">+</span></span>
+<span id="cb73-48"><a href="#cb73-48" aria-hidden="true" tabindex="-1"></a>  <span class="fu">theme</span>(</span>
+<span id="cb73-49"><a href="#cb73-49" aria-hidden="true" tabindex="-1"></a>    <span class="at">plot.title    =</span> <span class="fu">element_text</span>(<span class="at">face =</span> <span class="st">"bold"</span>, <span class="at">size =</span> <span class="dv">14</span>),</span>
+<span id="cb73-50"><a href="#cb73-50" aria-hidden="true" tabindex="-1"></a>    <span class="at">plot.subtitle =</span> <span class="fu">element_text</span>(<span class="at">color =</span> <span class="st">"grey40"</span>, <span class="at">margin =</span> <span class="fu">margin</span>(<span class="at">b =</span> <span class="dv">6</span>)),</span>
+<span id="cb73-51"><a href="#cb73-51" aria-hidden="true" tabindex="-1"></a>    <span class="at">plot.caption  =</span> <span class="fu">element_text</span>(<span class="at">color =</span> <span class="st">"grey50"</span>, <span class="at">size =</span> <span class="dv">9</span>),</span>
+<span id="cb73-52"><a href="#cb73-52" aria-hidden="true" tabindex="-1"></a>    <span class="at">legend.position =</span> <span class="st">"bottom"</span>,</span>
+<span id="cb73-53"><a href="#cb73-53" aria-hidden="true" tabindex="-1"></a>    <span class="at">legend.title  =</span> <span class="fu">element_text</span>(<span class="at">size =</span> <span class="dv">11</span>, <span class="at">face =</span> <span class="st">"bold"</span>),</span>
+<span id="cb73-54"><a href="#cb73-54" aria-hidden="true" tabindex="-1"></a>    <span class="at">legend.text   =</span> <span class="fu">element_text</span>(<span class="at">size =</span> <span class="dv">10</span>),</span>
+<span id="cb73-55"><a href="#cb73-55" aria-hidden="true" tabindex="-1"></a>    <span class="at">plot.margin   =</span> <span class="fu">margin</span>(<span class="dv">10</span>, <span class="dv">10</span>, <span class="dv">10</span>, <span class="dv">10</span>)</span>
+<span id="cb73-56"><a href="#cb73-56" aria-hidden="true" tabindex="-1"></a>  ) <span class="sc">+</span></span>
+<span id="cb73-57"><a href="#cb73-57" aria-hidden="true" tabindex="-1"></a>  <span class="fu">guides</span>(<span class="at">color =</span> <span class="fu">guide_colorbar</span>(<span class="at">barwidth =</span> <span class="dv">12</span>, <span class="at">barheight =</span> <span class="fl">0.8</span>))</span>
+<span id="cb73-58"><a href="#cb73-58" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb73-59"><a href="#cb73-59" aria-hidden="true" tabindex="-1"></a><span class="co"># --- 4b: Histogram — dNBR distribution --------------------------------------</span></span>
+<span id="cb73-60"><a href="#cb73-60" aria-hidden="true" tabindex="-1"></a>dnbr_med <span class="ot">&lt;-</span> <span class="fu">median</span>(cbi_west<span class="sc">$</span>dnbr_val, <span class="at">na.rm =</span> <span class="cn">TRUE</span>)</span>
+<span id="cb73-61"><a href="#cb73-61" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb73-62"><a href="#cb73-62" aria-hidden="true" tabindex="-1"></a>p4b <span class="ot">&lt;-</span> <span class="fu">ggplot</span>(cbi_west <span class="sc">|&gt;</span> <span class="fu">st_drop_geometry</span>(), <span class="fu">aes</span>(<span class="at">x =</span> dnbr_val)) <span class="sc">+</span></span>
+<span id="cb73-63"><a href="#cb73-63" aria-hidden="true" tabindex="-1"></a>  <span class="fu">geom_histogram</span>(<span class="at">bins =</span> <span class="dv">60</span>, <span class="at">fill =</span> <span class="st">"#d73027"</span>, <span class="at">color =</span> <span class="st">"white"</span>,</span>
+<span id="cb73-64"><a href="#cb73-64" aria-hidden="true" tabindex="-1"></a>                 <span class="at">linewidth =</span> <span class="fl">0.2</span>, <span class="at">alpha =</span> <span class="fl">0.85</span>) <span class="sc">+</span></span>
+<span id="cb73-65"><a href="#cb73-65" aria-hidden="true" tabindex="-1"></a>  <span class="fu">geom_vline</span>(<span class="at">xintercept =</span> <span class="dv">0</span>,</span>
+<span id="cb73-66"><a href="#cb73-66" aria-hidden="true" tabindex="-1"></a>             <span class="at">color =</span> <span class="st">"black"</span>, <span class="at">linewidth =</span> <span class="fl">0.6</span>, <span class="at">linetype =</span> <span class="st">"dotted"</span>) <span class="sc">+</span></span>
+<span id="cb73-67"><a href="#cb73-67" aria-hidden="true" tabindex="-1"></a>  <span class="fu">geom_vline</span>(<span class="at">xintercept =</span> dnbr_med,</span>
+<span id="cb73-68"><a href="#cb73-68" aria-hidden="true" tabindex="-1"></a>             <span class="at">color =</span> <span class="st">"#4d4d4d"</span>, <span class="at">linewidth =</span> <span class="dv">1</span>, <span class="at">linetype =</span> <span class="st">"dashed"</span>) <span class="sc">+</span></span>
+<span id="cb73-69"><a href="#cb73-69" aria-hidden="true" tabindex="-1"></a>  <span class="fu">annotate</span>(<span class="st">"text"</span>,</span>
+<span id="cb73-70"><a href="#cb73-70" aria-hidden="true" tabindex="-1"></a>           <span class="at">x =</span> dnbr_med <span class="sc">+</span> <span class="dv">15</span>, <span class="at">y =</span> <span class="cn">Inf</span>, <span class="at">vjust =</span> <span class="fl">1.5</span>, <span class="at">hjust =</span> <span class="dv">0</span>,</span>
+<span id="cb73-71"><a href="#cb73-71" aria-hidden="true" tabindex="-1"></a>           <span class="at">size =</span> <span class="fl">3.5</span>, <span class="at">color =</span> <span class="st">"#4d4d4d"</span>,</span>
+<span id="cb73-72"><a href="#cb73-72" aria-hidden="true" tabindex="-1"></a>           <span class="at">label =</span> <span class="fu">paste0</span>(<span class="st">"Median: "</span>, <span class="fu">round</span>(dnbr_med))) <span class="sc">+</span></span>
+<span id="cb73-73"><a href="#cb73-73" aria-hidden="true" tabindex="-1"></a>  <span class="fu">scale_x_continuous</span>(<span class="at">labels =</span> comma) <span class="sc">+</span></span>
+<span id="cb73-74"><a href="#cb73-74" aria-hidden="true" tabindex="-1"></a>  <span class="fu">scale_y_continuous</span>(<span class="at">labels =</span> comma, <span class="at">expand =</span> <span class="fu">c</span>(<span class="dv">0</span>, <span class="dv">0</span>)) <span class="sc">+</span></span>
+<span id="cb73-75"><a href="#cb73-75" aria-hidden="true" tabindex="-1"></a>  <span class="fu">labs</span>(</span>
+<span id="cb73-76"><a href="#cb73-76" aria-hidden="true" tabindex="-1"></a>    <span class="at">title   =</span> <span class="st">"Distribution of Raw dNBR at BSP CBI Field Plots — Western US"</span>,</span>
+<span id="cb73-77"><a href="#cb73-77" aria-hidden="true" tabindex="-1"></a>    <span class="at">x       =</span> <span class="st">"dNBR (index units;  positive = burning,  negative = increased greenness)"</span>,</span>
+<span id="cb73-78"><a href="#cb73-78" aria-hidden="true" tabindex="-1"></a>    <span class="at">y       =</span> <span class="st">"Number of field plots"</span>,</span>
+<span id="cb73-79"><a href="#cb73-79" aria-hidden="true" tabindex="-1"></a>    <span class="at">caption =</span> <span class="fu">paste0</span>(</span>
+<span id="cb73-80"><a href="#cb73-80" aria-hidden="true" tabindex="-1"></a>      <span class="st">"Dotted line = 0 (no change). Dashed line = median. "</span>,</span>
+<span id="cb73-81"><a href="#cb73-81" aria-hidden="true" tabindex="-1"></a>      <span class="st">"n = "</span>, scales<span class="sc">::</span><span class="fu">comma</span>(<span class="fu">nrow</span>(cbi_west)), <span class="st">" CBI field plots."</span></span>
+<span id="cb73-82"><a href="#cb73-82" aria-hidden="true" tabindex="-1"></a>    )</span>
+<span id="cb73-83"><a href="#cb73-83" aria-hidden="true" tabindex="-1"></a>  ) <span class="sc">+</span></span>
+<span id="cb73-84"><a href="#cb73-84" aria-hidden="true" tabindex="-1"></a>  <span class="fu">theme_minimal</span>(<span class="at">base_size =</span> <span class="dv">12</span>) <span class="sc">+</span></span>
+<span id="cb73-85"><a href="#cb73-85" aria-hidden="true" tabindex="-1"></a>  <span class="fu">theme</span>(</span>
+<span id="cb73-86"><a href="#cb73-86" aria-hidden="true" tabindex="-1"></a>    <span class="at">plot.title       =</span> <span class="fu">element_text</span>(<span class="at">face =</span> <span class="st">"bold"</span>, <span class="at">size =</span> <span class="dv">13</span>),</span>
+<span id="cb73-87"><a href="#cb73-87" aria-hidden="true" tabindex="-1"></a>    <span class="at">plot.caption     =</span> <span class="fu">element_text</span>(<span class="at">color =</span> <span class="st">"grey50"</span>, <span class="at">size =</span> <span class="dv">9</span>),</span>
+<span id="cb73-88"><a href="#cb73-88" aria-hidden="true" tabindex="-1"></a>    <span class="at">panel.grid.minor =</span> <span class="fu">element_blank</span>(),</span>
+<span id="cb73-89"><a href="#cb73-89" aria-hidden="true" tabindex="-1"></a>    <span class="at">axis.title       =</span> <span class="fu">element_text</span>(<span class="at">size =</span> <span class="dv">11</span>),</span>
+<span id="cb73-90"><a href="#cb73-90" aria-hidden="true" tabindex="-1"></a>    <span class="at">axis.text        =</span> <span class="fu">element_text</span>(<span class="at">size =</span> <span class="dv">10</span>)</span>
+<span id="cb73-91"><a href="#cb73-91" aria-hidden="true" tabindex="-1"></a>  )</span>
+<span id="cb73-92"><a href="#cb73-92" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb73-93"><a href="#cb73-93" aria-hidden="true" tabindex="-1"></a><span class="co"># --- 4c: Histogram — RdNBR distribution -------------------------------------</span></span>
+<span id="cb73-94"><a href="#cb73-94" aria-hidden="true" tabindex="-1"></a>rdnbr_df  <span class="ot">&lt;-</span> cbi_west <span class="sc">|&gt;</span> <span class="fu">st_drop_geometry</span>() <span class="sc">|&gt;</span></span>
+<span id="cb73-95"><a href="#cb73-95" aria-hidden="true" tabindex="-1"></a>  <span class="fu">filter</span>(<span class="sc">!</span><span class="fu">is.na</span>(rdnbr), <span class="fu">is.finite</span>(rdnbr))</span>
+<span id="cb73-96"><a href="#cb73-96" aria-hidden="true" tabindex="-1"></a>rdnbr_med <span class="ot">&lt;-</span> <span class="fu">median</span>(rdnbr_df<span class="sc">$</span>rdnbr, <span class="at">na.rm =</span> <span class="cn">TRUE</span>)</span>
+<span id="cb73-97"><a href="#cb73-97" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb73-98"><a href="#cb73-98" aria-hidden="true" tabindex="-1"></a>p4c <span class="ot">&lt;-</span> <span class="fu">ggplot</span>(rdnbr_df, <span class="fu">aes</span>(<span class="at">x =</span> rdnbr)) <span class="sc">+</span></span>
+<span id="cb73-99"><a href="#cb73-99" aria-hidden="true" tabindex="-1"></a>  <span class="fu">geom_histogram</span>(<span class="at">bins =</span> <span class="dv">60</span>, <span class="at">fill =</span> <span class="st">"#4393c3"</span>, <span class="at">color =</span> <span class="st">"white"</span>,</span>
+<span id="cb73-100"><a href="#cb73-100" aria-hidden="true" tabindex="-1"></a>                 <span class="at">linewidth =</span> <span class="fl">0.2</span>, <span class="at">alpha =</span> <span class="fl">0.85</span>) <span class="sc">+</span></span>
+<span id="cb73-101"><a href="#cb73-101" aria-hidden="true" tabindex="-1"></a>  <span class="fu">geom_vline</span>(<span class="at">xintercept =</span> <span class="dv">0</span>,</span>
+<span id="cb73-102"><a href="#cb73-102" aria-hidden="true" tabindex="-1"></a>             <span class="at">color =</span> <span class="st">"black"</span>, <span class="at">linewidth =</span> <span class="fl">0.6</span>, <span class="at">linetype =</span> <span class="st">"dotted"</span>) <span class="sc">+</span></span>
+<span id="cb73-103"><a href="#cb73-103" aria-hidden="true" tabindex="-1"></a>  <span class="fu">geom_vline</span>(<span class="at">xintercept =</span> rdnbr_med,</span>
+<span id="cb73-104"><a href="#cb73-104" aria-hidden="true" tabindex="-1"></a>             <span class="at">color =</span> <span class="st">"#4d4d4d"</span>, <span class="at">linewidth =</span> <span class="dv">1</span>, <span class="at">linetype =</span> <span class="st">"dashed"</span>) <span class="sc">+</span></span>
+<span id="cb73-105"><a href="#cb73-105" aria-hidden="true" tabindex="-1"></a>  <span class="fu">annotate</span>(<span class="st">"text"</span>,</span>
+<span id="cb73-106"><a href="#cb73-106" aria-hidden="true" tabindex="-1"></a>           <span class="at">x =</span> rdnbr_med <span class="sc">+</span> <span class="dv">10</span>, <span class="at">y =</span> <span class="cn">Inf</span>, <span class="at">vjust =</span> <span class="fl">1.5</span>, <span class="at">hjust =</span> <span class="dv">0</span>,</span>
+<span id="cb73-107"><a href="#cb73-107" aria-hidden="true" tabindex="-1"></a>           <span class="at">size =</span> <span class="fl">3.5</span>, <span class="at">color =</span> <span class="st">"#4d4d4d"</span>,</span>
+<span id="cb73-108"><a href="#cb73-108" aria-hidden="true" tabindex="-1"></a>           <span class="at">label =</span> <span class="fu">paste0</span>(<span class="st">"Median: "</span>, <span class="fu">round</span>(rdnbr_med))) <span class="sc">+</span></span>
+<span id="cb73-109"><a href="#cb73-109" aria-hidden="true" tabindex="-1"></a>  <span class="fu">scale_x_continuous</span>(<span class="at">labels =</span> comma) <span class="sc">+</span></span>
+<span id="cb73-110"><a href="#cb73-110" aria-hidden="true" tabindex="-1"></a>  <span class="fu">scale_y_continuous</span>(<span class="at">labels =</span> comma, <span class="at">expand =</span> <span class="fu">c</span>(<span class="dv">0</span>, <span class="dv">0</span>)) <span class="sc">+</span></span>
+<span id="cb73-111"><a href="#cb73-111" aria-hidden="true" tabindex="-1"></a>  <span class="fu">labs</span>(</span>
+<span id="cb73-112"><a href="#cb73-112" aria-hidden="true" tabindex="-1"></a>    <span class="at">title   =</span> <span class="st">"Distribution of RdNBR at BSP CBI Field Plots — Western US"</span>,</span>
+<span id="cb73-113"><a href="#cb73-113" aria-hidden="true" tabindex="-1"></a>    <span class="at">x       =</span> <span class="st">"RdNBR (relativized dNBR; normalized for pre-fire vegetation density)"</span>,</span>
+<span id="cb73-114"><a href="#cb73-114" aria-hidden="true" tabindex="-1"></a>    <span class="at">y       =</span> <span class="st">"Number of field plots"</span>,</span>
+<span id="cb73-115"><a href="#cb73-115" aria-hidden="true" tabindex="-1"></a>    <span class="at">caption =</span> <span class="fu">paste0</span>(</span>
+<span id="cb73-116"><a href="#cb73-116" aria-hidden="true" tabindex="-1"></a>      <span class="st">"RdNBR = dNBR / sqrt(|preNBR / 1000|). "</span>,</span>
+<span id="cb73-117"><a href="#cb73-117" aria-hidden="true" tabindex="-1"></a>      <span class="st">"Dotted line = 0. Dashed line = median. "</span>,</span>
+<span id="cb73-118"><a href="#cb73-118" aria-hidden="true" tabindex="-1"></a>      <span class="st">"n = "</span>, scales<span class="sc">::</span><span class="fu">comma</span>(<span class="fu">nrow</span>(rdnbr_df)), <span class="st">" CBI field plots. "</span>,</span>
+<span id="cb73-119"><a href="#cb73-119" aria-hidden="true" tabindex="-1"></a>      <span class="st">"Ref: Miller &amp; Thode (2007)."</span></span>
+<span id="cb73-120"><a href="#cb73-120" aria-hidden="true" tabindex="-1"></a>    )</span>
+<span id="cb73-121"><a href="#cb73-121" aria-hidden="true" tabindex="-1"></a>  ) <span class="sc">+</span></span>
+<span id="cb73-122"><a href="#cb73-122" aria-hidden="true" tabindex="-1"></a>  <span class="fu">theme_minimal</span>(<span class="at">base_size =</span> <span class="dv">12</span>) <span class="sc">+</span></span>
+<span id="cb73-123"><a href="#cb73-123" aria-hidden="true" tabindex="-1"></a>  <span class="fu">theme</span>(</span>
+<span id="cb73-124"><a href="#cb73-124" aria-hidden="true" tabindex="-1"></a>    <span class="at">plot.title       =</span> <span class="fu">element_text</span>(<span class="at">face =</span> <span class="st">"bold"</span>, <span class="at">size =</span> <span class="dv">13</span>),</span>
+<span id="cb73-125"><a href="#cb73-125" aria-hidden="true" tabindex="-1"></a>    <span class="at">plot.caption     =</span> <span class="fu">element_text</span>(<span class="at">color =</span> <span class="st">"grey50"</span>, <span class="at">size =</span> <span class="dv">9</span>),</span>
+<span id="cb73-126"><a href="#cb73-126" aria-hidden="true" tabindex="-1"></a>    <span class="at">panel.grid.minor =</span> <span class="fu">element_blank</span>(),</span>
+<span id="cb73-127"><a href="#cb73-127" aria-hidden="true" tabindex="-1"></a>    <span class="at">axis.title       =</span> <span class="fu">element_text</span>(<span class="at">size =</span> <span class="dv">11</span>),</span>
+<span id="cb73-128"><a href="#cb73-128" aria-hidden="true" tabindex="-1"></a>    <span class="at">axis.text        =</span> <span class="fu">element_text</span>(<span class="at">size =</span> <span class="dv">10</span>)</span>
+<span id="cb73-129"><a href="#cb73-129" aria-hidden="true" tabindex="-1"></a>  )</span>
+<span id="cb73-130"><a href="#cb73-130" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb73-131"><a href="#cb73-131" aria-hidden="true" tabindex="-1"></a><span class="fu">print</span>(p4a)</span></code></pre></div><button title="Copy to Clipboard" class="code-copy-button"><i class="bi"></i></button></div>
 </details>
 <div class="cell-output-display">
 <div>
@@ -922,7 +997,7 @@ Important
 </div>
 <details class="code-fold">
 <summary>Code</summary>
-<div class="code-copy-outer-scaffold"><div class="sourceCode cell-code" id="cb72"><pre class="sourceCode r code-with-copy"><code class="sourceCode r"><span id="cb72-1"><a href="#cb72-1" aria-hidden="true" tabindex="-1"></a><span class="fu">print</span>(p4b)</span></code></pre></div><button title="Copy to Clipboard" class="code-copy-button"><i class="bi"></i></button></div>
+<div class="code-copy-outer-scaffold"><div class="sourceCode cell-code" id="cb74"><pre class="sourceCode r code-with-copy"><code class="sourceCode r"><span id="cb74-1"><a href="#cb74-1" aria-hidden="true" tabindex="-1"></a><span class="fu">print</span>(p4b)</span></code></pre></div><button title="Copy to Clipboard" class="code-copy-button"><i class="bi"></i></button></div>
 </details>
 <div class="cell-output-display">
 <div>
@@ -933,7 +1008,7 @@ Important
 </div>
 <details class="code-fold">
 <summary>Code</summary>
-<div class="code-copy-outer-scaffold"><div class="sourceCode cell-code" id="cb73"><pre class="sourceCode r code-with-copy"><code class="sourceCode r"><span id="cb73-1"><a href="#cb73-1" aria-hidden="true" tabindex="-1"></a><span class="fu">print</span>(p4c)</span></code></pre></div><button title="Copy to Clipboard" class="code-copy-button"><i class="bi"></i></button></div>
+<div class="code-copy-outer-scaffold"><div class="sourceCode cell-code" id="cb75"><pre class="sourceCode r code-with-copy"><code class="sourceCode r"><span id="cb75-1"><a href="#cb75-1" aria-hidden="true" tabindex="-1"></a><span class="fu">print</span>(p4c)</span></code></pre></div><button title="Copy to Clipboard" class="code-copy-button"><i class="bi"></i></button></div>
 </details>
 <div class="cell-output-display">
 <div>
@@ -944,36 +1019,38 @@ Important
 </div>
 <details class="code-fold">
 <summary>Code</summary>
-<div class="code-copy-outer-scaffold"><div class="sourceCode cell-code" id="cb74"><pre class="sourceCode r code-with-copy"><code class="sourceCode r"><span id="cb74-1"><a href="#cb74-1" aria-hidden="true" tabindex="-1"></a><span class="fu">ggsave</span>(<span class="fu">here</span>(<span class="st">"figures/severity_high_t_distribution.png"</span>),</span>
-<span id="cb74-2"><a href="#cb74-2" aria-hidden="true" tabindex="-1"></a>       <span class="at">plot =</span> p4a, <span class="at">width =</span> <span class="dv">8</span>, <span class="at">height =</span> <span class="dv">6</span>, <span class="at">dpi =</span> <span class="dv">300</span>, <span class="at">bg =</span> <span class="st">"white"</span>)</span>
-<span id="cb74-3"><a href="#cb74-3" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb74-4"><a href="#cb74-4" aria-hidden="true" tabindex="-1"></a><span class="fu">ggsave</span>(<span class="fu">here</span>(<span class="st">"figures/severity_dnbr_offset.png"</span>),</span>
-<span id="cb74-5"><a href="#cb74-5" aria-hidden="true" tabindex="-1"></a>       <span class="at">plot =</span> p4b, <span class="at">width =</span> <span class="dv">8</span>, <span class="at">height =</span> <span class="dv">6</span>, <span class="at">dpi =</span> <span class="dv">300</span>, <span class="at">bg =</span> <span class="st">"white"</span>)</span>
-<span id="cb74-6"><a href="#cb74-6" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb74-7"><a href="#cb74-7" aria-hidden="true" tabindex="-1"></a><span class="fu">ggsave</span>(<span class="fu">here</span>(<span class="st">"figures/severity_high_t_vs_size.png"</span>),</span>
-<span id="cb74-8"><a href="#cb74-8" aria-hidden="true" tabindex="-1"></a>       <span class="at">plot =</span> p4c, <span class="at">width =</span> <span class="dv">8</span>, <span class="at">height =</span> <span class="dv">6</span>, <span class="at">dpi =</span> <span class="dv">300</span>, <span class="at">bg =</span> <span class="st">"white"</span>)</span>
-<span id="cb74-9"><a href="#cb74-9" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb74-10"><a href="#cb74-10" aria-hidden="true" tabindex="-1"></a>img_dims <span class="ot">&lt;-</span> <span class="fu">dim</span>(png<span class="sc">::</span><span class="fu">readPNG</span>(<span class="fu">here</span>(<span class="st">"figures/severity_high_t_distribution.png"</span>)))</span>
-<span id="cb74-11"><a href="#cb74-11" aria-hidden="true" tabindex="-1"></a><span class="fu">cat</span>(<span class="st">"Plot 4a saved — dimensions (px):"</span>, img_dims[<span class="dv">2</span>], <span class="st">"x"</span>, img_dims[<span class="dv">1</span>], <span class="st">"</span><span class="sc">\n</span><span class="st">"</span>)</span></code></pre></div><button title="Copy to Clipboard" class="code-copy-button"><i class="bi"></i></button></div>
+<div class="code-copy-outer-scaffold"><div class="sourceCode cell-code" id="cb76"><pre class="sourceCode r code-with-copy"><code class="sourceCode r"><span id="cb76-1"><a href="#cb76-1" aria-hidden="true" tabindex="-1"></a><span class="co"># --- QA: confirm non-empty plots and reasonable value ranges -----------------</span></span>
+<span id="cb76-2"><a href="#cb76-2" aria-hidden="true" tabindex="-1"></a><span class="fu">stopifnot</span>(<span class="st">"dNBR histogram has no data"</span>  <span class="ot">=</span> <span class="fu">nrow</span>(cbi_west) <span class="sc">&gt;</span> <span class="dv">0</span>)</span>
+<span id="cb76-3"><a href="#cb76-3" aria-hidden="true" tabindex="-1"></a><span class="fu">stopifnot</span>(<span class="st">"RdNBR histogram has no data"</span> <span class="ot">=</span> <span class="fu">nrow</span>(rdnbr_df) <span class="sc">&gt;</span> <span class="dv">0</span>)</span>
+<span id="cb76-4"><a href="#cb76-4" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb76-5"><a href="#cb76-5" aria-hidden="true" tabindex="-1"></a><span class="fu">ggsave</span>(<span class="fu">here</span>(<span class="st">"figures/severity_dnbr_map.png"</span>),</span>
+<span id="cb76-6"><a href="#cb76-6" aria-hidden="true" tabindex="-1"></a>       <span class="at">plot =</span> p4a, <span class="at">width =</span> <span class="dv">10</span>, <span class="at">height =</span> <span class="dv">9</span>, <span class="at">dpi =</span> <span class="dv">300</span>, <span class="at">bg =</span> <span class="st">"white"</span>)</span>
+<span id="cb76-7"><a href="#cb76-7" aria-hidden="true" tabindex="-1"></a><span class="fu">ggsave</span>(<span class="fu">here</span>(<span class="st">"figures/severity_dnbr_histogram.png"</span>),</span>
+<span id="cb76-8"><a href="#cb76-8" aria-hidden="true" tabindex="-1"></a>       <span class="at">plot =</span> p4b, <span class="at">width =</span> <span class="dv">9</span>,  <span class="at">height =</span> <span class="dv">6</span>, <span class="at">dpi =</span> <span class="dv">300</span>, <span class="at">bg =</span> <span class="st">"white"</span>)</span>
+<span id="cb76-9"><a href="#cb76-9" aria-hidden="true" tabindex="-1"></a><span class="fu">ggsave</span>(<span class="fu">here</span>(<span class="st">"figures/severity_rdnbr_histogram.png"</span>),</span>
+<span id="cb76-10"><a href="#cb76-10" aria-hidden="true" tabindex="-1"></a>       <span class="at">plot =</span> p4c, <span class="at">width =</span> <span class="dv">9</span>,  <span class="at">height =</span> <span class="dv">6</span>, <span class="at">dpi =</span> <span class="dv">300</span>, <span class="at">bg =</span> <span class="st">"white"</span>)</span>
+<span id="cb76-11"><a href="#cb76-11" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb76-12"><a href="#cb76-12" aria-hidden="true" tabindex="-1"></a>img_dims <span class="ot">&lt;-</span> <span class="fu">dim</span>(png<span class="sc">::</span><span class="fu">readPNG</span>(<span class="fu">here</span>(<span class="st">"figures/severity_dnbr_map.png"</span>)))</span>
+<span id="cb76-13"><a href="#cb76-13" aria-hidden="true" tabindex="-1"></a><span class="fu">cat</span>(<span class="st">"Plot 4a saved — dimensions (px):"</span>, img_dims[<span class="dv">2</span>], <span class="st">"x"</span>, img_dims[<span class="dv">1</span>], <span class="st">"</span><span class="sc">\n</span><span class="st">"</span>)</span></code></pre></div><button title="Copy to Clipboard" class="code-copy-button"><i class="bi"></i></button></div>
 </details>
 <div class="cell-output cell-output-stdout">
-<pre><code>Plot 4a saved — dimensions (px): 2400 x 1800 </code></pre>
+<pre><code>Plot 4a saved — dimensions (px): 3000 x 2700 </code></pre>
 </div>
 <details class="code-fold">
 <summary>Code</summary>
-<div class="code-copy-outer-scaffold"><div class="sourceCode cell-code" id="cb76"><pre class="sourceCode r code-with-copy"><code class="sourceCode r"><span id="cb76-1"><a href="#cb76-1" aria-hidden="true" tabindex="-1"></a>img_dims <span class="ot">&lt;-</span> <span class="fu">dim</span>(png<span class="sc">::</span><span class="fu">readPNG</span>(<span class="fu">here</span>(<span class="st">"figures/severity_dnbr_offset.png"</span>)))</span>
-<span id="cb76-2"><a href="#cb76-2" aria-hidden="true" tabindex="-1"></a><span class="fu">cat</span>(<span class="st">"Plot 4b saved — dimensions (px):"</span>, img_dims[<span class="dv">2</span>], <span class="st">"x"</span>, img_dims[<span class="dv">1</span>], <span class="st">"</span><span class="sc">\n</span><span class="st">"</span>)</span></code></pre></div><button title="Copy to Clipboard" class="code-copy-button"><i class="bi"></i></button></div>
+<div class="code-copy-outer-scaffold"><div class="sourceCode cell-code" id="cb78"><pre class="sourceCode r code-with-copy"><code class="sourceCode r"><span id="cb78-1"><a href="#cb78-1" aria-hidden="true" tabindex="-1"></a>img_dims <span class="ot">&lt;-</span> <span class="fu">dim</span>(png<span class="sc">::</span><span class="fu">readPNG</span>(<span class="fu">here</span>(<span class="st">"figures/severity_dnbr_histogram.png"</span>)))</span>
+<span id="cb78-2"><a href="#cb78-2" aria-hidden="true" tabindex="-1"></a><span class="fu">cat</span>(<span class="st">"Plot 4b saved — dimensions (px):"</span>, img_dims[<span class="dv">2</span>], <span class="st">"x"</span>, img_dims[<span class="dv">1</span>], <span class="st">"</span><span class="sc">\n</span><span class="st">"</span>)</span></code></pre></div><button title="Copy to Clipboard" class="code-copy-button"><i class="bi"></i></button></div>
 </details>
 <div class="cell-output cell-output-stdout">
-<pre><code>Plot 4b saved — dimensions (px): 2400 x 1800 </code></pre>
+<pre><code>Plot 4b saved — dimensions (px): 2700 x 1800 </code></pre>
 </div>
 <details class="code-fold">
 <summary>Code</summary>
-<div class="code-copy-outer-scaffold"><div class="sourceCode cell-code" id="cb78"><pre class="sourceCode r code-with-copy"><code class="sourceCode r"><span id="cb78-1"><a href="#cb78-1" aria-hidden="true" tabindex="-1"></a>img_dims <span class="ot">&lt;-</span> <span class="fu">dim</span>(png<span class="sc">::</span><span class="fu">readPNG</span>(<span class="fu">here</span>(<span class="st">"figures/severity_high_t_vs_size.png"</span>)))</span>
-<span id="cb78-2"><a href="#cb78-2" aria-hidden="true" tabindex="-1"></a><span class="fu">cat</span>(<span class="st">"Plot 4c saved — dimensions (px):"</span>, img_dims[<span class="dv">2</span>], <span class="st">"x"</span>, img_dims[<span class="dv">1</span>], <span class="st">"</span><span class="sc">\n</span><span class="st">"</span>)</span></code></pre></div><button title="Copy to Clipboard" class="code-copy-button"><i class="bi"></i></button></div>
+<div class="code-copy-outer-scaffold"><div class="sourceCode cell-code" id="cb80"><pre class="sourceCode r code-with-copy"><code class="sourceCode r"><span id="cb80-1"><a href="#cb80-1" aria-hidden="true" tabindex="-1"></a>img_dims <span class="ot">&lt;-</span> <span class="fu">dim</span>(png<span class="sc">::</span><span class="fu">readPNG</span>(<span class="fu">here</span>(<span class="st">"figures/severity_rdnbr_histogram.png"</span>)))</span>
+<span id="cb80-2"><a href="#cb80-2" aria-hidden="true" tabindex="-1"></a><span class="fu">cat</span>(<span class="st">"Plot 4c saved — dimensions (px):"</span>, img_dims[<span class="dv">2</span>], <span class="st">"x"</span>, img_dims[<span class="dv">1</span>], <span class="st">"</span><span class="sc">\n</span><span class="st">"</span>)</span></code></pre></div><button title="Copy to Clipboard" class="code-copy-button"><i class="bi"></i></button></div>
 </details>
 <div class="cell-output cell-output-stdout">
-<pre><code>Plot 4c saved — dimensions (px): 2400 x 1800 </code></pre>
+<pre><code>Plot 4c saved — dimensions (px): 2700 x 1800 </code></pre>
 </div>
 </div>
 <hr>
@@ -983,20 +1060,23 @@ Important
 <div class="cell">
 <details class="code-fold">
 <summary>Code</summary>
-<div class="code-copy-outer-scaffold"><div class="sourceCode cell-code" id="cb80"><pre class="sourceCode r code-with-copy"><code class="sourceCode r"><span id="cb80-1"><a href="#cb80-1" aria-hidden="true" tabindex="-1"></a><span class="co"># Quick summary table of what was found — useful for NOTES.md</span></span>
-<span id="cb80-2"><a href="#cb80-2" aria-hidden="true" tabindex="-1"></a>n_valid_thresh  <span class="ot">&lt;-</span> <span class="fu">sum</span>(mtbs_west<span class="sc">$</span>thresholds_valid, <span class="at">na.rm =</span> <span class="cn">TRUE</span>)</span>
-<span id="cb80-3"><a href="#cb80-3" aria-hidden="true" tabindex="-1"></a>median_high_t   <span class="ot">&lt;-</span> <span class="fu">median</span>(sev_burned<span class="sc">$</span>high_t, <span class="at">na.rm =</span> <span class="cn">TRUE</span>)</span>
-<span id="cb80-4"><a href="#cb80-4" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb80-5"><a href="#cb80-5" aria-hidden="true" tabindex="-1"></a>summary_tbl <span class="ot">&lt;-</span> tibble<span class="sc">::</span><span class="fu">tribble</span>(</span>
-<span id="cb80-6"><a href="#cb80-6" aria-hidden="true" tabindex="-1"></a>  <span class="sc">~</span>Metric,                                <span class="sc">~</span>Value,</span>
-<span id="cb80-7"><a href="#cb80-7" aria-hidden="true" tabindex="-1"></a>  <span class="st">"Total wildfires (2000–2023)"</span>,          scales<span class="sc">::</span><span class="fu">comma</span>(n_fires_total),</span>
-<span id="cb80-8"><a href="#cb80-8" aria-hidden="true" tabindex="-1"></a>  <span class="st">"States covered"</span>,                       <span class="fu">paste</span>(present_states, <span class="at">collapse =</span> <span class="st">", "</span>),</span>
-<span id="cb80-9"><a href="#cb80-9" aria-hidden="true" tabindex="-1"></a>  <span class="st">"Median fire size"</span>,                     <span class="fu">paste</span>(scales<span class="sc">::</span><span class="fu">comma</span>(size_stats<span class="sc">$</span>median_ac), <span class="st">"acres"</span>),</span>
-<span id="cb80-10"><a href="#cb80-10" aria-hidden="true" tabindex="-1"></a>  <span class="st">"Fires with valid severity thresholds"</span>, scales<span class="sc">::</span><span class="fu">comma</span>(n_valid_thresh),</span>
-<span id="cb80-11"><a href="#cb80-11" aria-hidden="true" tabindex="-1"></a>  <span class="st">"Median High_T threshold (dNBR units)"</span>, <span class="fu">as.character</span>(<span class="fu">round</span>(median_high_t))</span>
-<span id="cb80-12"><a href="#cb80-12" aria-hidden="true" tabindex="-1"></a>)</span>
-<span id="cb80-13"><a href="#cb80-13" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb80-14"><a href="#cb80-14" aria-hidden="true" tabindex="-1"></a>knitr<span class="sc">::</span><span class="fu">kable</span>(summary_tbl, <span class="at">col.names =</span> <span class="fu">c</span>(<span class="st">"Metric"</span>, <span class="st">"Value"</span>), <span class="at">align =</span> <span class="st">"lr"</span>)</span></code></pre></div><button title="Copy to Clipboard" class="code-copy-button"><i class="bi"></i></button></div>
+<div class="code-copy-outer-scaffold"><div class="sourceCode cell-code" id="cb82"><pre class="sourceCode r code-with-copy"><code class="sourceCode r"><span id="cb82-1"><a href="#cb82-1" aria-hidden="true" tabindex="-1"></a><span class="co"># Quick summary table of what was found — useful for NOTES.md</span></span>
+<span id="cb82-2"><a href="#cb82-2" aria-hidden="true" tabindex="-1"></a>n_valid_thresh <span class="ot">&lt;-</span> <span class="fu">sum</span>(mtbs_west<span class="sc">$</span>thresholds_valid, <span class="at">na.rm =</span> <span class="cn">TRUE</span>)</span>
+<span id="cb82-3"><a href="#cb82-3" aria-hidden="true" tabindex="-1"></a>median_dnbr    <span class="ot">&lt;-</span> <span class="fu">median</span>(cbi_west<span class="sc">$</span>dnbr_val, <span class="at">na.rm =</span> <span class="cn">TRUE</span>)</span>
+<span id="cb82-4"><a href="#cb82-4" aria-hidden="true" tabindex="-1"></a>median_rdnbr   <span class="ot">&lt;-</span> <span class="fu">median</span>(rdnbr_df<span class="sc">$</span>rdnbr,    <span class="at">na.rm =</span> <span class="cn">TRUE</span>)</span>
+<span id="cb82-5"><a href="#cb82-5" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb82-6"><a href="#cb82-6" aria-hidden="true" tabindex="-1"></a>summary_tbl <span class="ot">&lt;-</span> tibble<span class="sc">::</span><span class="fu">tribble</span>(</span>
+<span id="cb82-7"><a href="#cb82-7" aria-hidden="true" tabindex="-1"></a>  <span class="sc">~</span>Metric,                                <span class="sc">~</span>Value,</span>
+<span id="cb82-8"><a href="#cb82-8" aria-hidden="true" tabindex="-1"></a>  <span class="st">"Total wildfires (2000–2023)"</span>,          scales<span class="sc">::</span><span class="fu">comma</span>(n_fires_total),</span>
+<span id="cb82-9"><a href="#cb82-9" aria-hidden="true" tabindex="-1"></a>  <span class="st">"States covered"</span>,                       <span class="fu">paste</span>(present_states, <span class="at">collapse =</span> <span class="st">", "</span>),</span>
+<span id="cb82-10"><a href="#cb82-10" aria-hidden="true" tabindex="-1"></a>  <span class="st">"Median fire size"</span>,                     <span class="fu">paste</span>(scales<span class="sc">::</span><span class="fu">comma</span>(size_stats<span class="sc">$</span>median_ac), <span class="st">"acres"</span>),</span>
+<span id="cb82-11"><a href="#cb82-11" aria-hidden="true" tabindex="-1"></a>  <span class="st">"Fires with valid severity thresholds"</span>, scales<span class="sc">::</span><span class="fu">comma</span>(n_valid_thresh),</span>
+<span id="cb82-12"><a href="#cb82-12" aria-hidden="true" tabindex="-1"></a>  <span class="st">"CBI field plots (Western US)"</span>,         scales<span class="sc">::</span><span class="fu">comma</span>(<span class="fu">nrow</span>(cbi_west)),</span>
+<span id="cb82-13"><a href="#cb82-13" aria-hidden="true" tabindex="-1"></a>  <span class="st">"Median dNBR (CBI plots)"</span>,             <span class="fu">as.character</span>(<span class="fu">round</span>(median_dnbr)),</span>
+<span id="cb82-14"><a href="#cb82-14" aria-hidden="true" tabindex="-1"></a>  <span class="st">"Median RdNBR (CBI plots)"</span>,            <span class="fu">as.character</span>(<span class="fu">round</span>(median_rdnbr))</span>
+<span id="cb82-15"><a href="#cb82-15" aria-hidden="true" tabindex="-1"></a>)</span>
+<span id="cb82-16"><a href="#cb82-16" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb82-17"><a href="#cb82-17" aria-hidden="true" tabindex="-1"></a>knitr<span class="sc">::</span><span class="fu">kable</span>(summary_tbl, <span class="at">col.names =</span> <span class="fu">c</span>(<span class="st">"Metric"</span>, <span class="st">"Value"</span>), <span class="at">align =</span> <span class="st">"lr"</span>)</span></code></pre></div><button title="Copy to Clipboard" class="code-copy-button"><i class="bi"></i></button></div>
 </details>
 <div class="cell-output-display">
 <table class="caption-top table table-sm table-striped small">
@@ -1028,8 +1108,16 @@ Important
 <td style="text-align: right;">4,065</td>
 </tr>
 <tr class="odd">
-<td style="text-align: left;">Median High_T threshold (dNBR units)</td>
-<td style="text-align: right;">515</td>
+<td style="text-align: left;">CBI field plots (Western US)</td>
+<td style="text-align: right;">4,777</td>
+</tr>
+<tr class="even">
+<td style="text-align: left;">Median dNBR (CBI plots)</td>
+<td style="text-align: right;">203</td>
+</tr>
+<tr class="odd">
+<td style="text-align: left;">Median RdNBR (CBI plots)</td>
+<td style="text-align: right;">364</td>
 </tr>
 </tbody>
 </table>

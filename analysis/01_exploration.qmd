@@ -465,52 +465,147 @@ cat("Plot 3 saved — dimensions (px):", img_dims[2], "x", img_dims[1], "\n")
 
 ---
 
-## Plot 4 — Burn Severity Threshold Distributions
-
-The MTBS perimeter shapefile stores fire-specific dNBR threshold values, not per-class area percentages. Three plots describe what we can characterize from these fields:
-
-- **4a** — Distribution of `High_T` (Moderate→High boundary). Fires with a lower `High_T` value have more pixels classified as high severity (the dNBR bar is set lower).
-- **4b** — Distribution of `dNBR_offst` (mean dNBR in unburned reference pixels outside the perimeter). Larger positive values indicate greater pre→post spectral change in the surrounding landscape.
-- **4c** — `High_T` vs. fire size: whether larger fires tend to have systematically different severity thresholds.
-
-::: callout-important
-**Per-class area breakdowns (% low / % moderate / % high) are not available in the perimeter shapefile.** These require the individual fire severity rasters distributed separately by MTBS (one raster per fire). Download and process those rasters before reporting severity area statistics.
-:::
+## Plot 4 — Burn Severity: dNBR and RdNBR Distributions
 
 ```{r plot4-severity}
-# sev_burned is derived in the severity-sanity chunk: fires with valid,
-# monotone (positive-dNBR) thresholds — the relevant class for biomass analysis.
-offst_valid <- mtbs_west |>
-  st_drop_geometry() |>
-  filter(!dnbr_offst %in% c(-9999, 9999))
+# =============================================================================
+# BURN SEVERITY METRICS — dNBR vs. RdNBR
+#
+# dNBR  (differenced Normalized Burn Ratio):
+#   dNBR = (preFireNBR − postFireNBR) × 1000
+#   Captures spectral change caused by fire. Positive values = vegetation
+#   loss (burning). Stored in MTBS/BSP as integer index units (×1000 scale),
+#   so values typically range from −500 (increased greenness) to 1300+ (high
+#   severity). A useful absolute measure of spectral change per fire pixel.
+#
+#   LIMITATION: pre-fire biomass confounds cross-fire comparison. A dNBR of
+#   300 in dense old-growth forest represents less relative canopy destruction
+#   than 300 in sparse shrubland, because old-growth had more NBR to lose.
+#
+# RdNBR (Relativized dNBR; Miller & Thode 2007):
+#   RdNBR = dNBR / sqrt(|preFireNBR / 1000|)
+#   Divides by the square root of pre-fire NBR (rescaled to the 0–1 range),
+#   normalizing for vegetation density before the fire. This makes severity
+#   more comparable across fires in different biomes and vegetation types —
+#   the preferred continuous treatment variable for a cross-fire DiD study.
+#
+# Data: USGS Burn Severity Program (BSP) CBI field plots — geospatially
+# validated measurement points sampled within fire perimeters by field crews.
+# BSP stores raw dNBR and pre-fire NBR per plot, enabling RdNBR computation.
+# These are the only per-point raw dNBR observations available in this
+# download without fetching individual MTBS fire severity rasters.
+# =============================================================================
 
-cat("Fires with burned-orientation thresholds:", nrow(sev_burned), "/", nrow(mtbs_west), "\n")
-cat("Fires with valid dNBR offset:", nrow(offst_valid), "/", nrow(mtbs_west), "\n")
+BSP_PATH <- here("data/raw/mtbs/burn_severity_perimeter_data/bsp_perims_DD.shp")
 
-# QA: must have data to plot
-stopifnot("No burned-orientation threshold rows to plot" = nrow(sev_burned) > 0)
-stopifnot("No valid dNBR offset rows to plot" = nrow(offst_valid) > 0)
+bsp_raw <- st_read(BSP_PATH, quiet = TRUE)
+names(bsp_raw) <- tolower(names(bsp_raw))
 
-# --- 4a: Distribution of High_T threshold values ----------------------------
-high_t_median <- median(sev_burned$high_t, na.rm = TRUE)
+# Keep only CBI field plots with valid dNBR and pre-fire NBR.
+# Exclude sentinel 9999 (no data) and |preNBR| ≤ 10 (avoids RdNBR blow-up
+# from near-zero pre-fire NBR in bare/sparse areas).
+cbi_raw <- bsp_raw |>
+  filter(
+    map_prog   == "CBI",
+    !is.na(dnbr_val),  !is.na(prenbr_val),
+    dnbr_val   != 9999, prenbr_val != 9999,
+    abs(prenbr_val) > 10
+  ) |>
+  mutate(
+    # RdNBR: normalize by sqrt(|preNBR|) on the 0–1 NBR scale
+    rdnbr = dnbr_val / sqrt(abs(prenbr_val / 1000))
+  )
 
-p4a <- ggplot(sev_burned, aes(x = high_t)) +
+# Spatial filter to Western US (BSP is NAD83, matches western_states_sf CRS)
+cbi_raw  <- st_transform(cbi_raw, st_crs(western_states_sf))
+cbi_west <- st_filter(cbi_raw, western_states_sf)
+
+cat("CBI field plots (Western US, valid dNBR + preNBR):", nrow(cbi_west), "\n")
+cat("dNBR  range:", range(cbi_west$dnbr_val),            "\n")
+cat("RdNBR range:", round(range(cbi_west$rdnbr, na.rm = TRUE), 1), "\n")
+
+# --- Sanity checks -----------------------------------------------------------
+stopifnot("No CBI plots in Western US"         = nrow(cbi_west) > 0)
+stopifnot("All dNBR values identical"          = sd(cbi_west$dnbr_val) > 0)
+n_rdnbr_na <- sum(is.na(cbi_west$rdnbr) | !is.finite(cbi_west$rdnbr))
+if (n_rdnbr_na > 0)
+  message(n_rdnbr_na, " RdNBR values are NA/Inf (pre-fire NBR near zero)")
+
+# For mapping: extract centroids from mixed-geometry BSP features
+cbi_pts_alb <- cbi_west |>
+  st_centroid() |>
+  st_transform(crs_albers)   # crs_albers defined in Plot 1 chunk
+
+# Color scale limits: clip to 2nd–98th percentile to prevent outliers from
+# collapsing the colour range
+dnbr_lims <- quantile(cbi_west$dnbr_val, c(0.02, 0.98), na.rm = TRUE)
+
+# --- 4a: Map — CBI field plots colored by dNBR -------------------------------
+p4a <- ggplot() +
+  geom_sf(data = western_states_alb,
+          fill = "grey96", color = "grey50", linewidth = 0.4) +
+  geom_sf(data = mtbs_west_alb,
+          fill = "grey80", color = NA, alpha = 0.45) +
+  geom_sf(data = cbi_pts_alb,
+          aes(color = dnbr_val), size = 1.1, alpha = 0.8) +
+  scale_color_viridis_c(
+    name      = "dNBR\n(index units)",
+    option    = "inferno",
+    direction = -1,
+    limits    = dnbr_lims,
+    oob       = scales::squish,
+    labels    = comma
+  ) +
+  annotation_scale(location = "bl", width_hint = 0.25, text_cex = 0.85) +
+  annotation_north_arrow(
+    location = "tr", which_north = "true",
+    style    = north_arrow_minimal(text_size = 10)
+  ) +
+  labs(
+    title    = "BSP CBI Field Plot Locations — Colored by Raw dNBR",
+    subtitle = glue("{scales::comma(nrow(cbi_west))} validated field plots, Western US (1994–2017)"),
+    caption  = paste0(
+      "Grey polygons = MTBS fire perimeters. ",
+      "Source: USGS Burn Severity Program (BSP) CBI field plots. ",
+      "Color clipped to 2nd–98th percentile."
+    )
+  ) +
+  theme_void(base_size = 12) +
+  theme(
+    plot.title    = element_text(face = "bold", size = 14),
+    plot.subtitle = element_text(color = "grey40", margin = margin(b = 6)),
+    plot.caption  = element_text(color = "grey50", size = 9),
+    legend.position = "bottom",
+    legend.title  = element_text(size = 11, face = "bold"),
+    legend.text   = element_text(size = 10),
+    plot.margin   = margin(10, 10, 10, 10)
+  ) +
+  guides(color = guide_colorbar(barwidth = 12, barheight = 0.8))
+
+# --- 4b: Histogram — dNBR distribution --------------------------------------
+dnbr_med <- median(cbi_west$dnbr_val, na.rm = TRUE)
+
+p4b <- ggplot(cbi_west |> st_drop_geometry(), aes(x = dnbr_val)) +
   geom_histogram(bins = 60, fill = "#d73027", color = "white",
                  linewidth = 0.2, alpha = 0.85) +
-  geom_vline(xintercept = high_t_median,
+  geom_vline(xintercept = 0,
+             color = "black", linewidth = 0.6, linetype = "dotted") +
+  geom_vline(xintercept = dnbr_med,
              color = "#4d4d4d", linewidth = 1, linetype = "dashed") +
   annotate("text",
-           x = high_t_median + 10, y = Inf, vjust = 1.5, hjust = 0,
+           x = dnbr_med + 15, y = Inf, vjust = 1.5, hjust = 0,
            size = 3.5, color = "#4d4d4d",
-           label = paste0("Median: ", round(high_t_median))) +
+           label = paste0("Median: ", round(dnbr_med))) +
   scale_x_continuous(labels = comma) +
   scale_y_continuous(labels = comma, expand = c(0, 0)) +
   labs(
-    title   = "Distribution of Moderate→High dNBR Threshold (High_T) Across Fires",
-    x       = "Moderate/High dNBR threshold (index units)",
-    y       = "Number of fires",
-    caption = paste0("Lower High_T = fires where more pixels are classified as high severity. ",
-                     "n = ", scales::comma(nrow(sev_burned)), " burned-orientation fires.")
+    title   = "Distribution of Raw dNBR at BSP CBI Field Plots — Western US",
+    x       = "dNBR (index units;  positive = burning,  negative = increased greenness)",
+    y       = "Number of field plots",
+    caption = paste0(
+      "Dotted line = 0 (no change). Dashed line = median. ",
+      "n = ", scales::comma(nrow(cbi_west)), " CBI field plots."
+    )
   ) +
   theme_minimal(base_size = 12) +
   theme(
@@ -521,51 +616,34 @@ p4a <- ggplot(sev_burned, aes(x = high_t)) +
     axis.text        = element_text(size = 10)
   )
 
-# --- 4b: Distribution of dNBR offset ----------------------------------------
-offst_median <- median(offst_valid$dnbr_offst, na.rm = TRUE)
+# --- 4c: Histogram — RdNBR distribution -------------------------------------
+rdnbr_df  <- cbi_west |> st_drop_geometry() |>
+  filter(!is.na(rdnbr), is.finite(rdnbr))
+rdnbr_med <- median(rdnbr_df$rdnbr, na.rm = TRUE)
 
-p4b <- ggplot(offst_valid, aes(x = dnbr_offst)) +
+p4c <- ggplot(rdnbr_df, aes(x = rdnbr)) +
   geom_histogram(bins = 60, fill = "#4393c3", color = "white",
                  linewidth = 0.2, alpha = 0.85) +
-  geom_vline(xintercept = offst_median,
+  geom_vline(xintercept = 0,
+             color = "black", linewidth = 0.6, linetype = "dotted") +
+  geom_vline(xintercept = rdnbr_med,
              color = "#4d4d4d", linewidth = 1, linetype = "dashed") +
   annotate("text",
-           x = offst_median + 2, y = Inf, vjust = 1.5, hjust = 0,
+           x = rdnbr_med + 10, y = Inf, vjust = 1.5, hjust = 0,
            size = 3.5, color = "#4d4d4d",
-           label = paste0("Median: ", round(offst_median, 1))) +
+           label = paste0("Median: ", round(rdnbr_med))) +
   scale_x_continuous(labels = comma) +
   scale_y_continuous(labels = comma, expand = c(0, 0)) +
   labs(
-    title   = "Distribution of dNBR Offset (Mean dNBR in Unburned Reference Area)",
-    x       = "dNBR offset (index units)",
-    y       = "Number of fires",
-    caption = paste0("Values near 0 = little background spectral change; ",
-                     "large values = substantial pre/post change in surrounding area. ",
-                     "n = ", scales::comma(nrow(offst_valid)), " fires with valid offset.")
-  ) +
-  theme_minimal(base_size = 12) +
-  theme(
-    plot.title       = element_text(face = "bold", size = 13),
-    plot.caption     = element_text(color = "grey50", size = 9),
-    panel.grid.minor = element_blank(),
-    axis.title       = element_text(size = 11),
-    axis.text        = element_text(size = 10)
-  )
-
-# --- 4c: High_T vs. fire size ------------------------------------------------
-p4c <- ggplot(sev_burned, aes(x = burnbndac, y = high_t)) +
-  geom_point(alpha = 0.25, size = 0.8, color = "#d73027") +
-  geom_smooth(method = "loess", se = TRUE,
-              color = "#4d4d4d", fill = "#4d4d4d", alpha = 0.15,
-              linewidth = 0.8) +
-  scale_x_log10(labels = label_comma(),
-                breaks  = c(1000, 5000, 10000, 50000, 100000, 500000)) +
-  scale_y_continuous(labels = comma) +
-  labs(
-    title   = "Moderate→High dNBR Threshold vs. Fire Size",
-    x       = "Fire size (acres, log₁₀ scale)",
-    y       = "High_T (dNBR threshold, index units)",
-    caption = "Grey band = loess ± 95% CI. No strong size–threshold relationship expected."
+    title   = "Distribution of RdNBR at BSP CBI Field Plots — Western US",
+    x       = "RdNBR (relativized dNBR; normalized for pre-fire vegetation density)",
+    y       = "Number of field plots",
+    caption = paste0(
+      "RdNBR = dNBR / sqrt(|preNBR / 1000|). ",
+      "Dotted line = 0. Dashed line = median. ",
+      "n = ", scales::comma(nrow(rdnbr_df)), " CBI field plots. ",
+      "Ref: Miller & Thode (2007)."
+    )
   ) +
   theme_minimal(base_size = 12) +
   theme(
@@ -580,20 +658,22 @@ print(p4a)
 print(p4b)
 print(p4c)
 
-ggsave(here("figures/severity_high_t_distribution.png"),
-       plot = p4a, width = 8, height = 6, dpi = 300, bg = "white")
+# --- QA: confirm non-empty plots and reasonable value ranges -----------------
+stopifnot("dNBR histogram has no data"  = nrow(cbi_west) > 0)
+stopifnot("RdNBR histogram has no data" = nrow(rdnbr_df) > 0)
 
-ggsave(here("figures/severity_dnbr_offset.png"),
-       plot = p4b, width = 8, height = 6, dpi = 300, bg = "white")
+ggsave(here("figures/severity_dnbr_map.png"),
+       plot = p4a, width = 10, height = 9, dpi = 300, bg = "white")
+ggsave(here("figures/severity_dnbr_histogram.png"),
+       plot = p4b, width = 9,  height = 6, dpi = 300, bg = "white")
+ggsave(here("figures/severity_rdnbr_histogram.png"),
+       plot = p4c, width = 9,  height = 6, dpi = 300, bg = "white")
 
-ggsave(here("figures/severity_high_t_vs_size.png"),
-       plot = p4c, width = 8, height = 6, dpi = 300, bg = "white")
-
-img_dims <- dim(png::readPNG(here("figures/severity_high_t_distribution.png")))
+img_dims <- dim(png::readPNG(here("figures/severity_dnbr_map.png")))
 cat("Plot 4a saved — dimensions (px):", img_dims[2], "x", img_dims[1], "\n")
-img_dims <- dim(png::readPNG(here("figures/severity_dnbr_offset.png")))
+img_dims <- dim(png::readPNG(here("figures/severity_dnbr_histogram.png")))
 cat("Plot 4b saved — dimensions (px):", img_dims[2], "x", img_dims[1], "\n")
-img_dims <- dim(png::readPNG(here("figures/severity_high_t_vs_size.png")))
+img_dims <- dim(png::readPNG(here("figures/severity_rdnbr_histogram.png")))
 cat("Plot 4c saved — dimensions (px):", img_dims[2], "x", img_dims[1], "\n")
 ```
 
@@ -603,8 +683,9 @@ cat("Plot 4c saved — dimensions (px):", img_dims[2], "x", img_dims[1], "\n")
 
 ```{r summary-table}
 # Quick summary table of what was found — useful for NOTES.md
-n_valid_thresh  <- sum(mtbs_west$thresholds_valid, na.rm = TRUE)
-median_high_t   <- median(sev_burned$high_t, na.rm = TRUE)
+n_valid_thresh <- sum(mtbs_west$thresholds_valid, na.rm = TRUE)
+median_dnbr    <- median(cbi_west$dnbr_val, na.rm = TRUE)
+median_rdnbr   <- median(rdnbr_df$rdnbr,    na.rm = TRUE)
 
 summary_tbl <- tibble::tribble(
   ~Metric,                                ~Value,
@@ -612,7 +693,9 @@ summary_tbl <- tibble::tribble(
   "States covered",                       paste(present_states, collapse = ", "),
   "Median fire size",                     paste(scales::comma(size_stats$median_ac), "acres"),
   "Fires with valid severity thresholds", scales::comma(n_valid_thresh),
-  "Median High_T threshold (dNBR units)", as.character(round(median_high_t))
+  "CBI field plots (Western US)",         scales::comma(nrow(cbi_west)),
+  "Median dNBR (CBI plots)",             as.character(round(median_dnbr)),
+  "Median RdNBR (CBI plots)",            as.character(round(median_rdnbr))
 )
 
 knitr::kable(summary_tbl, col.names = c("Metric", "Value"), align = "lr")
