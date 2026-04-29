@@ -12,7 +12,19 @@
       "Bash(\"/c/Program Files/RStudio/resources/app/bin/quarto/bin/quarto.exe\" render \"C:/Users/shaht/OneDrive/Documents/MESM UCSB/BACI/analysis/01_exploration.qmd\")",
       "WebFetch(domain:emapr.github.io)",
       "Bash(mkdir -p \"C:/Users/shaht/OneDrive/Documents/MESM UCSB/BACI/scripts/python\")",
-      "Bash(mkdir -p \"C:/Users/shaht/OneDrive/Documents/MESM UCSB/BACI/output\")"
+      "Bash(mkdir -p \"C:/Users/shaht/OneDrive/Documents/MESM UCSB/BACI/output\")",
+      "Bash(\"C:/Users/shaht/anaconda3/python.exe\" -c \"import ee; print\\('ee version:', ee.__version__\\)\")",
+      "Bash(C:/Users/shaht/anaconda3/python.exe -c ' *)",
+      "Bash(quarto render *)",
+      "Bash(\"/c/Program Files/RStudio/resources/app/bin/quarto/bin/quarto.exe\" render analysis/01_exploration.qmd)",
+      "Bash(\"C:/Users/shaht/anaconda3/python.exe\" scripts/python/01_extract_biomass_gee.py)",
+      "Bash(C:/Users/shaht/anaconda3/python.exe *)",
+      "Bash(\"C:/Users/shaht/anaconda3/python.exe\" -c \"import geopandas\")",
+      "Bash(\"C:/Users/shaht/anaconda3/python.exe\" -m pip list)",
+      "Bash(C:/Users/shaht/anaconda3/Scripts/conda.exe env *)",
+      "Bash(C:/Users/shaht/anaconda3/envs/wildfire/python.exe *)",
+      "Bash(\"C:/Users/shaht/anaconda3/envs/wildfire/python.exe\" -m pip list)",
+      "Bash(\"C:/Users/shaht/anaconda3/python.exe\" -m pip install geopandas)"
     ]
   }
 }
