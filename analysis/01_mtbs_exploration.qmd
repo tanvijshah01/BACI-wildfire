@@ -72,7 +72,7 @@ options(tigris_use_cache = TRUE)  # cache Census downloads locally
 sf_use_s2(FALSE)
 
 # Anchor here() to the project root (one level up from analysis/)
-here::i_am("analysis/01_exploration.qmd")
+here::i_am("analysis/01_mtbs_exploration.qmd")
 
 # --- Study parameters (all hardcoded values in one place) -------------------
 WESTERN_STATES <- c("AZ", "CA", "CO", "ID", "MT", "NV", "NM", "OR", "UT", "WA", "WY")
