@@ -22,7 +22,7 @@ execute:
 # 1.  Setup — packages, paths, study parameters
 # 2.  GEE extraction — run Python script if CSV not yet generated
 # 3.  Load and validate biomass_timeseries.csv (sanity checks)
-# 4.  Plot 5 — Mean fitted NBR over time (2000–2023)
+# 4.  Plot 5 — Mean fitted NBR over time (1984–2023)
 # 5.  Plot 6 — Biomass before and after fire (event-study plot)
 # =============================================================================
 ```
@@ -50,7 +50,7 @@ library(patchwork)
 here::i_am("analysis/02_biomass_exploration.qmd")
 
 # ── Study parameters (must match 01_extract_biomass_gee.py) ─────────────────
-START_YEAR <- 2000
+START_YEAR <- 1984   # matches extraction script (full Landsat 5 archive)
 END_YEAR   <- 2023
 
 # ── Paths ────────────────────────────────────────────────────────────────────

@@ -1,26 +1,30 @@
 # =============================================================================
 # 01_extract_biomass_gee.py
-# Extract annual fitted NBR (biomass proxy) from LandTrendR / Google Earth Engine
-# for MTBS wildfire perimeters in the 11 Western US states, 2000-2023.
+# Extract annual mean NBR (biomass proxy) from Landsat / Google Earth Engine
+# for MTBS wildfire perimeters, 1984-2023.
 #
 # SCRIPT OUTLINE
 # 1.  Setup — imports, paths, study parameters
 # 2.  GEE authentication and initialization
 # 3.  Load and filter MTBS fire perimeters
 # 4.  Sample fires for EDA (stratified by year)
-# 5.  Landsat collection builder (harmonized across missions)
-# 6.  LandTrendR extraction function (per fire)
-# 7.  Run extraction loop and save to output/biomass_timeseries.csv
+# 5.  Landsat annual composite builder (harmonized across missions)
+# 6.  Build GEE FeatureCollection of sampled fire polygons
+# 7.  Extract annual mean NBR (reduceRegions per year — one GEE call per year)
+# 8.  Save to output/biomass_timeseries.csv
 #
 # BEFORE RUNNING:
-#   earthengine authenticate        (one-time browser login)
-#   Set GEE_PROJECT below to your Google Earth Engine project ID.
+#   earthengine authenticate        (one-time browser login — stores project in credentials)
 #
 # OUTPUT:
 #   output/biomass_timeseries.csv
 #   Columns: event_id, fire_year, year, fitted_nbr
-#   fitted_nbr is in INVERTED NBR space (loss = positive, as required by LT).
+#   fitted_nbr is raw (unsmoothed) inverted NBR: higher = more vegetation loss.
 #   Negate when displaying: display_nbr = -fitted_nbr
+#
+# NOTE: This EDA script uses raw annual Landsat composites rather than
+# LandTrendR fitted values. LandTrendR can be enabled for the final analysis
+# to suppress inter-annual noise.
 # =============================================================================
 
 # ─── 1. SETUP ─────────────────────────────────────────────────────────────────
@@ -32,31 +36,17 @@ import numpy as np
 from pathlib import Path
 import sys
 
-# ── User must set their GEE project ID here ──────────────────────────────────
-GEE_PROJECT = "your-gee-project-id"   # ← CHANGE THIS
-
 # ── Resolve project root (two levels up from scripts/python/) ─────────────────
 PROJ_ROOT = Path(__file__).resolve().parent.parent.parent
 
 # ── Study parameters ──────────────────────────────────────────────────────────
-START_YEAR  = 2000
+START_YEAR  = 1984       # Full Landsat 5 TM archive — gives pre-fire baseline for all MTBS fires
 END_YEAR    = 2023
 START_DAY   = "07-01"   # July–September: peak summer growing season, Western US
 END_DAY     = "09-30"
-N_SAMPLE    = 200       # fires to sample for EDA; increase for full analysis
+N_SAMPLE    = 100       # ~2-3 fires per year for CA-only EDA; increase for full analysis
+STATES      = ["CA"]               # California pilot; expand to all 11 states for full analysis
 SCALE       = 90        # pixel resolution for reduceRegion (90m faster, 30m precise)
-
-# LandTrendR algorithm parameters (see https://emapr.github.io/LT-GEE/)
-RUN_PARAMS = {
-    "maxSegments":            6,     # max temporal breakpoints per pixel
-    "spikeThreshold":         0.9,   # dampens single-year spikes (1.0 = no dampening)
-    "vertexCountOvershoot":   3,     # allows initial overshoot before pruning
-    "preventOneYearRecovery": False, # allow recovery segments shorter than 1 year
-    "recoveryThreshold":      0.25,  # max recovery rate (1/0.25 = 4-year minimum recovery)
-    "pvalThreshold":          0.1,   # model fit p-value threshold
-    "bestModelProportion":    1.25,  # model selection tolerance
-    "minObservationsNeeded":  6,     # minimum annual obs required to run LT
-}
 
 # Western US approximate bounding box (pre-filter before spatial join in R)
 WEST_LAT = (31.0, 49.0)
@@ -64,10 +54,12 @@ WEST_LON = (-124.5, -103.0)
 
 
 # ─── 2. GEE AUTHENTICATION ────────────────────────────────────────────────────
+GEE_PROJECT = "emlab-gcp"   # Google Cloud project linked to GEE account
+
 print("Initializing Google Earth Engine...")
 try:
     ee.Initialize(project=GEE_PROJECT)
-    print("  GEE initialized successfully.")
+    print(f"  GEE initialized (project: {GEE_PROJECT}).")
 except Exception as e:
     print(f"\nERROR: Could not initialize GEE.\n{e}")
     print("\nFix: Run `earthengine authenticate` in your terminal, then retry.")
@@ -89,9 +81,10 @@ mtbs = (mtbs_raw
     .loc[mtbs_raw["year"].between(START_YEAR, END_YEAR)]
     .loc[mtbs_raw["burnbndlat"].between(*WEST_LAT)]
     .loc[mtbs_raw["burnbndlon"].between(*WEST_LON)]
+    .loc[mtbs_raw["event_id"].str[:2].isin(STATES)]   # restrict to EDA states
     .reset_index(drop=True)
 )
-print(f"  Fires after filter: {len(mtbs)}")
+print(f"  Fires after filter ({', '.join(STATES)}): {len(mtbs)}")
 
 # Sanity check: year range
 assert mtbs["year"].between(START_YEAR, END_YEAR).all(), "Year range out of bounds"
@@ -108,7 +101,7 @@ sample = (mtbs
 print(f"  Sampled {len(sample)} fires across {sample['year'].nunique()} years for EDA")
 
 
-# ─── 5. LANDSAT COLLECTION BUILDER ────────────────────────────────────────────
+# ─── 5. LANDSAT ANNUAL COMPOSITE BUILDER ──────────────────────────────────────
 def mask_landsat_c2(image):
     """Mask cloud and cloud shadow using QA_PIXEL band (Landsat Collection 2)."""
     qa     = image.select("QA_PIXEL")
@@ -119,15 +112,17 @@ def mask_landsat_c2(image):
 
 def get_annual_nbr_image(year, aoi):
     """
-    Build annual median NBR composite for one year, spatially clipped to aoi.
+    Build annual median NBR composite for one year over aoi.
 
     Mission selection:
-      2022+  → Landsat 9  (OLI-2, bands SR_B5=NIR, SR_B7=SWIR2)
-      2013+  → Landsat 8  (OLI,   bands SR_B5=NIR, SR_B7=SWIR2)
-      2000-12→ Landsat 5  (TM,    bands SR_B4=NIR, SR_B7=SWIR2)
+      2022+  → Landsat 9  (OLI-2, SR_B5=NIR, SR_B7=SWIR2)
+      2013+  → Landsat 8  (OLI,   SR_B5=NIR, SR_B7=SWIR2)
+      ≤2012  → Landsat 5  (TM,    SR_B4=NIR, SR_B7=SWIR2)
+               Landsat 5 preferred over L7 to avoid SLC-off gaps (post-2003)
 
-    NBR is INVERTED (SWIR2 - NIR) so vegetation loss = positive delta,
-    which is the convention required by LandTrendR.
+    NBR is INVERTED: (SWIR2 − NIR) / (SWIR2 + NIR) so that vegetation loss
+    is positive, matching the LandTrendR convention for future use.
+    Returns a masked image when no cloud-free scenes exist for this year/aoi.
     """
     date_start = f"{year}-{START_DAY}"
     date_end   = f"{year}-{END_DAY}"
@@ -145,130 +140,94 @@ def get_annual_nbr_image(year, aoi):
                 .map(mask_landsat_c2)
                 .select(["SR_B5", "SR_B7"], ["NIR", "SWIR2"]))
     else:
-        # Landsat 5 — preferred over L7 to avoid SLC-off data gaps (post-2003)
         coll = (ee.ImageCollection("LANDSAT/LT05/C02/T1_L2")
                 .filterDate(date_start, date_end)
                 .filterBounds(aoi)
                 .map(mask_landsat_c2)
                 .select(["SR_B4", "SR_B7"], ["NIR", "SWIR2"]))
 
-    # Annual median composite → inverted NBR
-    composite  = coll.median()
-    nbr_inv    = composite.normalizedDifference(["SWIR2", "NIR"]).rename("NBR")
+    # Merge a fully-masked placeholder so the collection always has the right
+    # band names even when no real scenes exist (prevents band-not-found errors).
+    placeholder = (ee.Image.constant([0, 0])
+                   .rename(["NIR", "SWIR2"])
+                   .updateMask(ee.Image.constant(0)))
+    composite = coll.merge(ee.ImageCollection([placeholder])).median()
 
-    return (nbr_inv
-            .set("system:time_start", ee.Date.fromYMD(year, 7, 1).millis())
-            .set("year", year))
-
-
-def build_lt_collection(aoi):
-    """
-    Build annual NBR ImageCollection (START_YEAR to END_YEAR) for LandTrendR.
-    One image per year; band ordering: NBR first (required by LT API).
-    """
-    images = [get_annual_nbr_image(y, aoi) for y in range(START_YEAR, END_YEAR + 1)]
-    return ee.ImageCollection(images)
+    # Inverted NBR: higher = more vegetation loss
+    return composite.normalizedDifference(["SWIR2", "NIR"]).rename("NBR")
 
 
-# ─── 6. LANDTRENDR EXTRACTION FUNCTION ────────────────────────────────────────
-def extract_fire_nbr(row):
-    """
-    Run LandTrendR for one fire perimeter and return mean fitted NBR per year.
-
-    LandTrendr band structure (axis 0):
-      Row 0: year of observation
-      Row 1: source (observed) spectral value
-      Row 2: fitted (segmented) spectral value   ← we extract this row
-      Row 3: is-vertex flag
-
-    Parameters
-    ----------
-    row : GeoDataFrame row with fields event_id, ig_date, geometry
-
-    Returns
-    -------
-    list of dicts: {event_id, fire_year, year, fitted_nbr}
-    """
-    fire_geom = ee.Geometry(row.geometry.__geo_interface__)
-    fire_id   = row["event_id"]
-    fire_year = int(row["ig_date"][:4])
-
-    # Build annual collection constrained to this fire's extent
-    lt_coll = build_lt_collection(fire_geom)
-
-    # Run LandTrendR segmentation
-    lt_result = ee.Algorithms.TemporalSegmentation.LandTrendr(
-        **{**RUN_PARAMS, "timeSeries": lt_coll}
+# ─── 6. BUILD GEE FEATURE COLLECTION FROM SAMPLED FIRES ──────────────────────
+print(f"\nBuilding GEE FeatureCollection from {len(sample)} sampled fires...")
+features = [
+    ee.Feature(
+        ee.Geometry(row.geometry.__geo_interface__),
+        {"event_id": row["event_id"], "fire_year": int(row["ig_date"][:4])}
     )
-
-    # Extract fitted values from LandTrendr band
-    # arraySlice(0, 2, 3) → select row 2 (fitted values)
-    # arrayProject([1])   → project to time axis (one value per year)
-    # arrayFlatten        → convert to image with one band per year
-    year_labels = [f"yr_{y}" for y in range(START_YEAR, END_YEAR + 1)]
-    fitted_stack = (lt_result
-                    .select("LandTrendr")
-                    .arraySlice(0, 2, 3)
-                    .arrayProject([1])
-                    .arrayFlatten([year_labels]))
-
-    # Mean fitted NBR over the fire polygon (synchronous call — suitable for EDA)
-    mean_nbr = fitted_stack.reduceRegion(
-        reducer   = ee.Reducer.mean(),
-        geometry  = fire_geom,
-        scale     = SCALE,
-        maxPixels = int(1e8)
-    ).getInfo()
-
-    # Build per-year records
-    records = []
-    for y in range(START_YEAR, END_YEAR + 1):
-        records.append({
-            "event_id":   fire_id,
-            "fire_year":  fire_year,
-            "year":       y,
-            "fitted_nbr": mean_nbr.get(f"yr_{y}", None)
-        })
-    return records
+    for _, row in sample.iterrows()
+]
+fires_fc = ee.FeatureCollection(features)
+fires_aoi = fires_fc.geometry().bounds()   # bounding box of fires — avoids self-touching edge errors in exact union
 
 
-# ─── 7. RUN EXTRACTION LOOP ────────────────────────────────────────────────────
+# ─── 7. EXTRACT ANNUAL MEAN NBR (reduceRegions per year) ──────────────────────
+# One GEE call per year processes all fires at once — 40 calls total
+# instead of 40 × N_fires calls in the per-fire loop approach.
 OUT_PATH = PROJ_ROOT / "output/biomass_timeseries.csv"
 
 if OUT_PATH.exists():
     print(f"\nCSV already exists at {OUT_PATH} — delete it to re-run extraction.")
 else:
-    print(f"\nExtracting LandTrendR biomass for {len(sample)} fires...")
+    n_years = END_YEAR - START_YEAR + 1
+    print(f"\nExtracting annual NBR for {len(sample)} fires × {n_years} years...")
     print(f"  Scale: {SCALE}m | Years: {START_YEAR}–{END_YEAR} | Window: {START_DAY}–{END_DAY}")
+    print(f"  Method: raw annual Landsat composites (EDA mode — no LandTrendR smoothing)")
 
     all_records = []
     errors      = []
 
-    for i, (_, row) in enumerate(sample.iterrows(), 1):
+    for y in range(START_YEAR, END_YEAR + 1):
         try:
-            records = extract_fire_nbr(row)
-            all_records.extend(records)
+            nbr_img = get_annual_nbr_image(y, fires_aoi)
+
+            # reduceRegions: mean NBR over each fire polygon in one server-side call
+            result = nbr_img.reduceRegions(
+                collection = fires_fc,
+                reducer    = ee.Reducer.mean(),
+                scale      = SCALE
+            ).getInfo()
+
+            for feat in result["features"]:
+                props = feat["properties"]
+                all_records.append({
+                    "event_id":   props.get("event_id"),
+                    "fire_year":  props.get("fire_year"),
+                    "year":       y,
+                    "fitted_nbr": props.get("mean")  # reduceRegions with ee.Reducer.mean() uses "mean" as the key
+                })
         except Exception as e:
-            errors.append({"event_id": row["event_id"], "error": str(e)})
+            errors.append({"year": y, "error": str(e)})
 
-        if i % 25 == 0 or i == len(sample):
-            print(f"  {i}/{len(sample)} fires processed...")
+        n_done = y - START_YEAR + 1
+        if n_done % 5 == 0 or y == END_YEAR:
+            print(f"  {n_done}/{n_years} years processed ({y})...")
 
+    # ─── 8. SAVE AND VALIDATE ─────────────────────────────────────────────────
     df = pd.DataFrame(all_records)
     df.to_csv(OUT_PATH, index=False)
 
-    print(f"\nSaved {len(df)} records ({len(sample)} fires × {END_YEAR - START_YEAR + 1} years)")
+    print(f"\nSaved {len(df)} records ({len(sample)} fires × {n_years} years)")
     print(f"Output: {OUT_PATH}")
 
     if errors:
-        print(f"\nWARNING: {len(errors)} fires failed:")
+        print(f"\nWARNING: {len(errors)} years failed:")
         for e in errors[:5]:
             print(f"  {e}")
 
-    # Sanity check on output
     df_check = pd.read_csv(OUT_PATH)
     assert set(["event_id", "fire_year", "year", "fitted_nbr"]).issubset(df_check.columns)
-    assert df_check["year"].between(START_YEAR, END_YEAR).all()
+    assert df_check["year"].between(START_YEAR, END_YEAR).all(), \
+        f"Years outside {START_YEAR}–{END_YEAR}"
     n_non_null = df_check["fitted_nbr"].notna().sum()
     pct_valid  = 100 * n_non_null / len(df_check)
     print(f"\nData quality: {n_non_null:,} / {len(df_check):,} records have valid NBR ({pct_valid:.1f}%)")
