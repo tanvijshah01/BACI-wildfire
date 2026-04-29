@@ -1,9 +1,10 @@
 ---
-title: "EDA: Biomass Time Series — LandTrendR / GEE"
+title: "EDA: Biomass Time Series — Raw Landsat / GEE"
 subtitle: "Plot 5 — Biomass change over time | Plot 6 — Before and after fire"
 date: today
 format:
   html:
+    embed-resources: true
     toc: true
     toc-depth: 3
     code-fold: true
@@ -22,7 +23,7 @@ execute:
 # 1.  Setup — packages, paths, study parameters
 # 2.  GEE extraction — run Python script if CSV not yet generated
 # 3.  Load and validate biomass_timeseries.csv (sanity checks)
-# 4.  Plot 5 — Mean fitted NBR over time (1984–2023)
+# 4.  Plot 5 — Mean annual NBR over time (1984–2023)
 # 5.  Plot 6 — Biomass before and after fire (event-study plot)
 # =============================================================================
 ```
@@ -64,7 +65,7 @@ dir.create(here("output"),  showWarnings = FALSE)
 
 ## 2. GEE Extraction
 
-The biomass time series is extracted using the **LandTrendR** spectral-temporal segmentation algorithm in Google Earth Engine. The extraction script is `scripts/python/01_extract_biomass_gee.py`.
+The biomass time series is extracted using raw annual **Landsat** composites via Google Earth Engine. The extraction script is `scripts/python/01_extract_biomass_gee.py`.
 
 Before rendering this document for the first time:
 
@@ -136,7 +137,7 @@ if (pct_valid < 50) {
 ```
 
 ```{r prepare-biomass}
-# Convert fitted_nbr from LandTrendR space (inverted: loss = positive)
+# Convert fitted_nbr from inverted convention (loss = positive)
 # back to natural NBR scale (higher = more vegetation = more biomass)
 # display_nbr = -fitted_nbr
 biomass <- biomass_raw |>
@@ -165,14 +166,14 @@ ggplot(example_fire, aes(x = year, y = display_nbr)) +
 
 ::: callout-note
 **Dataset:** `r n_fires` fires × `r n_years` years = `r scales::comma(nrow(biomass_raw))` records  (`r scales::percent(pct_valid/100, accuracy=0.1)` with valid NBR values).
-Fitted NBR is displayed in natural scale (higher = more vegetation). The LandTrendR fitted values are in inverted space internally — see `01_extract_biomass_gee.py` for details.
+NBR is displayed in natural scale (higher = more vegetation). The extraction script uses an inverted convention internally — see `01_extract_biomass_gee.py` for details.
 :::
 
 ---
 
 ## Plot 5 — Biomass Change Over Time
 
-Mean annual fitted NBR across all sampled fire sites, 2000–2023. Shows the overall trend in biomass conditions across the Western US fire landscape.
+Mean annual NBR across all sampled California fire sites, 1984–2023. Shows the overall trend in vegetation conditions across the study region.
 
 ```{r plot5-biomass-trend}
 # Aggregate by year: mean ± SE across all fire sites
@@ -207,10 +208,10 @@ p5 <- ggplot(annual_nbr, aes(x = year, y = mean_nbr)) +
   ) +
   scale_y_continuous(labels = number_format(accuracy = 0.001)) +
   labs(
-    title    = "Annual Mean Fitted NBR — Western US Wildfire Sites (2000–2023)",
-    subtitle = glue("LandTrendR fitted values across {n_fires} sampled MTBS wildfire perimeters"),
+    title    = "Annual Mean NBR — California Wildfire Sites (1984–2023)",
+    subtitle = glue("Raw annual Landsat composites across {n_fires} sampled MTBS wildfire perimeters"),
     x        = "Year",
-    y        = "Mean fitted NBR",
+    y        = "Mean annual NBR (Landsat composite)",
     caption  = paste(
       "NBR displayed in natural scale (higher = more vegetation).",
       "Shaded band = ± 1 SE. Dashed line = linear trend.",
@@ -244,7 +245,7 @@ cat("Plot 5 saved — dimensions (px):", img_dims[2], "x", img_dims[1], "\n")
 
 ## Plot 6 — Biomass Before and After Fire Events
 
-Event-study plot showing mean fitted NBR relative to the fire year (year 0). Each fire contributes one time series centered on its ignition year. This is the EDA preview of the core identification pattern the Callaway-Sant'Anna estimator will formally test.
+Event-study plot showing mean annual NBR relative to the fire year (year 0). Each fire contributes one time series centered on its ignition year. This is the EDA preview of the core identification pattern the Callaway-Sant'Anna estimator will formally test.
 
 ```{r plot6-before-after}
 # Compute relative year and filter to event window
@@ -297,11 +298,11 @@ p6 <- ggplot(event_mean, aes(x = rel_year, y = mean_nbr)) +
     title    = "Biomass Before and After Wildfire Events",
     subtitle = glue("Event-study window: −5 to +10 years relative to fire ignition"),
     x        = "Years relative to fire",
-    y        = "Mean fitted NBR",
+    y        = "Mean annual NBR (Landsat composite)",
     caption  = paste(
       "Each fire contributes one trajectory centered on its ignition year.",
       "Shaded band = ± 1 SE.",
-      "Source: USGS MTBS + LandTrendR via Google Earth Engine."
+      "Source: USGS MTBS + Landsat via Google Earth Engine."
     )
   ) +
   theme_minimal(base_size = 12) +
@@ -342,8 +343,8 @@ p6_compact <- p6 + labs(subtitle = NULL, caption = NULL)
 
 combined <- p5_compact / p6_compact +
   plot_annotation(
-    title   = "Wildfire Biomass EDA — LandTrendR / GEE",
-    caption = "Source: USGS MTBS + Landsat via Google Earth Engine. LandTrendR fitted NBR."
+    title   = "Wildfire Biomass EDA — California (1984–2023)",
+    caption = "Source: USGS MTBS + Landsat via Google Earth Engine. Raw annual composites."
   )
 
 print(combined)

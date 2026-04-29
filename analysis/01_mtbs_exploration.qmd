@@ -4,6 +4,7 @@ subtitle: "Exploratory data analysis, pre-biomass-extraction phase"
 date: today
 format:
   html:
+    embed-resources: true
     toc: true
     toc-depth: 3
     code-fold: true
@@ -768,7 +769,7 @@ if (pct_valid < 50) {
 ```
 
 ```{r prepare-biomass}
-# Convert from LandTrendR inverted space (loss = positive) to display scale
+# Convert from inverted NBR convention (loss = positive) to display scale
 # (higher = more vegetation = more biomass)
 biomass <- biomass_raw |>
   mutate(display_nbr = -fitted_nbr) |>
