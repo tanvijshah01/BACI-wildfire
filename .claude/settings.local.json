@@ -24,7 +24,13 @@
       "Bash(C:/Users/shaht/anaconda3/Scripts/conda.exe env *)",
       "Bash(C:/Users/shaht/anaconda3/envs/wildfire/python.exe *)",
       "Bash(\"C:/Users/shaht/anaconda3/envs/wildfire/python.exe\" -m pip list)",
-      "Bash(\"C:/Users/shaht/anaconda3/python.exe\" -m pip install geopandas)"
+      "Bash(\"C:/Users/shaht/anaconda3/python.exe\" -m pip install geopandas)",
+      "WebSearch",
+      "WebFetch(domain:emapr.ceoas.oregonstate.edu)",
+      "WebFetch(domain:daac.ornl.gov)",
+      "WebFetch(domain:data.ornldaac.earthdata.nasa.gov)",
+      "WebFetch(domain:lemma.forestry.oregonstate.edu)",
+      "WebFetch(domain:lemmadownload.forestry.oregonstate.edu)"
     ]
   }
 }

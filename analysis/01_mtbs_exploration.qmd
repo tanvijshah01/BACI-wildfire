@@ -14,23 +14,26 @@ format:
 execute:
   warning: false
   message: false
-  cache: false
+  cache: true
 ---
 
 ```{r}
 # =============================================================================
 # SCRIPT OUTLINE
 # 1. Setup — packages, paths, study parameters
-# 2. Load MTBS data + sanity checks
-# 3. Filter to study region (11 Western states) and period (2000–2023)
-# 4. Plot 1 — Fire locations map (spatial distribution, colored by assessment type)
-# 5. Plot 2 — Fires per year (temporal trend)
-# 6. Plot 3 — Fire size distribution
-# 7. Plot 4 — Severity threshold distributions (dNBR thresholds + dNBR offset)
-# 8. Step 3 — GEE biomass extraction (run Python script if CSV missing)
-# 9. Load and validate biomass_timeseries.csv
-# 10. Plot 5 — Annual mean NBR over time (1984–2023)
-# 11. Plot 6 — Biomass before and after fire events (event-study)
+# 2. MTBS data collection methodology (NBR, dNBR, per-fire calibration, severity classes)
+# 3. Load, inspect, and filter MTBS data
+#    3.1 Fire locations map (all fires, colored by assessment type)
+#    3.2 Fires per year — all wildfires (temporal trend)
+#    3.3 Assessment type summary (bar chart by category)
+#    3.4 Extended assessment fires only (map)
+#    3.5 Fires per year — all fires vs. extended only (side-by-side comparison)
+#    3.6 Fire size distribution — all fires vs. extended only (comparison)
+#    3.7 Burn severity — BSP CBI dataset description, field table, perimeter map,
+#        dNBR and RdNBR distributions (all CBI plots)
+# 4. GEE biomass extraction (run Python script if CSV missing)
+#    4.1 Annual mean NBR over time (1984–2023)
+#    4.2 Biomass before and after fire events (event-study)
 #
 # NOTE ON SEVERITY FIELDS:
 # The MTBS perimeter shapefile contains Low_T / Mod_T / High_T as dNBR THRESHOLD
@@ -62,7 +65,7 @@ library(here)              # project-relative paths
 library(scales)            # axis formatting (comma, log)
 library(lubridate)         # date parsing
 library(glue)              # string interpolation
-library(patchwork)         # combine plots (Plots 5+6)
+library(patchwork)         # combine plots
 library(png)               # resolution check for saved figures
 
 options(tigris_use_cache = TRUE)  # cache Census downloads locally
@@ -100,7 +103,68 @@ dir.create(here("figures"), showWarnings = FALSE)
 
 ---
 
-## 2. Load and Inspect MTBS Data
+## 2. MTBS Data Collection Methodology
+
+The Monitoring Trends in Burn Severity (MTBS) program is a joint USGS–USDA Forest Service initiative that consistently maps the location, extent, and severity of all large wildland fires in the United States from 1984 to present (Eidenshink et al., 2007). Burn severity is assessed using multitemporal Landsat satellite imagery (TM, ETM+, OLI; more recently also Sentinel-2A/2B) at 30-meter spatial resolution.
+
+### Normalized Burn Ratio and dNBR
+
+Burn severity is derived from the **Normalized Burn Ratio (NBR)**, which exploits the contrasting spectral response of near-infrared (NIR) and shortwave-infrared (SWIR) reflectance to fire:
+
+$$\text{NBR} = \frac{\text{NIR} - \text{SWIR}}{\text{NIR} + \text{SWIR}}$$
+
+Healthy, photosynthetically active vegetation produces high NIR and low SWIR reflectance, yielding a high NBR. Fire removes canopy and litter and chars the soil surface — NIR reflectance drops, SWIR rises — so post-fire NBR is lower than pre-fire NBR. The **differenced NBR (dNBR)** captures this spectral change between a pre-fire and post-fire image pair:
+
+$$\text{dNBR} = (\text{NBR}_{\text{pre}} - \text{NBR}_{\text{post}}) \times 1000$$
+
+The ×1000 scaling converts the dimensionless 0–1 NBR difference to integer index units (typically ranging from −500 to +1300 across fire-affected areas). **Positive dNBR = vegetation loss (burning); negative dNBR = vegetation gain (increased greenness).** These values are stored in the BSP dataset as `dnbr_val`, with the corresponding pre- and post-fire NBR in `prenbr_val` and `posnbr_val`.
+
+### Per-Fire Threshold Calibration
+
+A defining feature of the MTBS methodology is that **severity thresholds are calibrated separately for each fire** rather than fixed universally. For each event, an MTBS analyst selects an unburned reference area adjacent to the fire perimeter and computes the mean (`dnbr_offst`) and standard deviation (`dnbr_stddv`) of dNBR in that background region. The severity class breakpoints — `low_t` (Unburned/Low boundary), `mod_t` (Low/Moderate boundary), and `high_t` (Moderate/High boundary) — are then set relative to this per-fire background, accounting for local variation in vegetation type, pre-fire phenology, and atmospheric/sensor conditions.
+
+This is why the threshold fields contain fire-specific index values that differ across rows and cannot be compared directly as percentages or universal cut-points. Fires with identical `high_t` values are not necessarily of the same absolute severity.
+
+### Burn Severity Classes
+
+Each pixel within an MTBS fire perimeter is assigned to one of five severity classes:
+
+| Class | dNBR range | Ecological interpretation |
+|---|---|---|
+| Increased Greenness | dNBR < 0 | Post-fire vegetation is *more* vigorous than pre-fire |
+| Unburned / Low | 0 ≤ dNBR < `low_t` | No detectable spectral change or surface scorch only |
+| Low | `low_t` ≤ dNBR < `mod_t` | Surface burning; little overstory damage |
+| Moderate | `mod_t` ≤ dNBR < `high_t` | Mixed canopy damage; partial tree mortality |
+| High | dNBR ≥ `high_t` | Near-complete canopy consumption |
+
+**Increased Greenness** is a valid and ecologically meaningful class. It occurs when post-fire NBR exceeds pre-fire NBR — most commonly when: (1) the pre-fire image was acquired during drought or late-season senescence, and the post-fire image captured a subsequent peak-greenness flush; or (2) fire removed woody overstory and stimulated a dense herbaceous understory response. For this biomass recovery study, increased-greenness fires represent a qualitatively different treatment (stimulation, not damage) and are excluded from the primary DiD analysis.
+
+### Assessment Types and Image Timing
+
+The `asmnt_type` field records the timing and availability of the post-fire image used for burn severity mapping:
+
+| Value | Definition |
+|---|---|
+| **Initial** | Post-fire imagery acquired shortly after containment |
+| **Extended** | Post-fire imagery acquired during the next seasonal peak-of-green — allows vegetation to stabilize and reduces confusion between ash and low-severity burning; generally preferred for severity characterization |
+| **Emergency** | Imagery acquired during the active incident; used for real-time suppression support, least reliable for severity classification |
+| **_(SS)_ suffix** | Single-scene assessment — no usable pre-fire image was available; dNBR cannot be computed; severity is based on post-fire NBR alone |
+
+Single-scene (`SS`) assessments lack a pre-fire baseline and produce unreliable dNBR and threshold values. These are flagged and excluded from severity analyses below.
+
+### Fire Size Thresholds and Temporal Coverage
+
+MTBS maps fires meeting minimum size thresholds: **≥ 1,000 acres in the western United States** and ≥ 500 acres in the eastern United States (Eidenshink et al., 2007). The program covers 1984–present, anchored by the continuous Landsat 5 TM archive. This study applies the 1,000-acre threshold uniformly across the 11 Western states and restricts the analysis window to 2000–2023 to align with available biomass data.
+
+::: {.callout-note}
+**Primary data reference:** Eidenshink, J., Schwind, B., Brewer, K., Zhu, Z. L., Quayle, B., & Howard, S. (2007). A project for monitoring trends in burn severity. *Fire Ecology*, 3(1), 3–21. <https://www.mtbs.gov/sites/mtbs/files/inline-files/Eidenshink-final.pdf>
+
+**Dataset DOI:** <https://doi.org/10.5066/P9IED7RZ>
+:::
+
+---
+
+## 3. Load, Inspect, and Filter MTBS Data
 
 ```{r load-mtbs}
 # Load the raw shapefile
@@ -148,9 +212,7 @@ cat("Fires with valid thresholds:", sum(mtbs_parsed$thresholds_valid),
     "/", nrow(mtbs_parsed), "\n")
 ```
 
----
-
-## 3. Filter to Study Region and Period
+### Filter to Study Region and Period
 
 ```{r get-state-boundaries}
 # Download Western US state boundaries (cb = TRUE for simplified cartographic)
@@ -272,11 +334,11 @@ cat("\ndNBR offset range (valid fires):", range(valid_offst$dnbr_offst), "\n")
 
 ---
 
-## Plot 1 — Fire Locations Map
+### 3.1 Fire Locations Map
 
-Spatial distribution of MTBS wildfire perimeters across the 11 Western states, colored by mapping assessment type (Initial vs Extended). Initial assessments use imagery shortly after containment; Extended assessments use a later peak-greenness post-fire image for more accurate severity calibration. This map confirms spatial coverage and that the state filter worked correctly.
+Spatial distribution of MTBS wildfire perimeters across the 11 Western states, colored by mapping assessment type. Initial assessments use imagery shortly after containment; Extended assessments use a later peak-greenness post-fire image for more accurate severity calibration. This map confirms spatial coverage and that the state filter worked correctly.
 
-```{r plot1-map, fig.height=9}
+```{r plot-3-1-map, fig.height=9}
 # Use Albers Equal Area projection for the map display — avoids distortion
 # across the latitudinal spread of the Western US
 crs_albers <- 5070  # EPSG:5070 (Conus Albers Equal Area)
@@ -294,10 +356,8 @@ present_asmnt <- sort(unique(mtbs_west_alb$asmnt_type))
 cat("Assessment types present:", paste(present_asmnt, collapse = ", "), "\n")
 
 p1 <- ggplot() +
-  # State boundaries as base layer
   geom_sf(data = western_states_alb,
           fill = "grey96", color = "grey50", linewidth = 0.4) +
-  # Fire perimeters, semi-transparent so overlapping fires are visible
   geom_sf(data = mtbs_west_alb,
           aes(fill = asmnt_type),
           color = NA, alpha = 0.65) +
@@ -306,7 +366,6 @@ p1 <- ggplot() +
     values = ASMT_COLORS,
     na.value = "#cccccc"
   ) +
-  # Scale bar (bottom-left) and north arrow (top-right)
   annotation_scale(location = "bl", width_hint = 0.25, text_cex = 0.85) +
   annotation_north_arrow(
     location = "tr", which_north = "true",
@@ -331,29 +390,25 @@ p1 <- ggplot() +
 
 print(p1)
 
-# --- QA: confirm legend is visible and plot non-empty -----------
-stopifnot("Plot 1 has no data" = nrow(mtbs_west_alb) > 0)
+stopifnot("Plot 3.1 has no data" = nrow(mtbs_west_alb) > 0)
 
 ggsave(here("figures/fire_locations_map.png"),
        plot = p1, width = 10, height = 9, dpi = 300, bg = "white")
-
-# Confirm output resolution
 img_dims <- dim(png::readPNG(here("figures/fire_locations_map.png")))
-cat("Plot 1 saved — dimensions (px):", img_dims[2], "x", img_dims[1], "\n")
+cat("Plot 3.1 saved — dimensions (px):", img_dims[2], "x", img_dims[1], "\n")
 ```
 
 ---
 
-## Plot 2 — Fires Per Year (Temporal Trend)
+### 3.2 Fires Per Year — All Wildfires
 
 Annual wildfire count across the Western US, 2000–2023, with a linear trend line. This reveals whether fire frequency is increasing over time — a key consideration for the staggered DiD design (more treatment cohorts = better identification).
 
-```{r plot2-fires-per-year}
+```{r plot-3-2-fires-per-year}
 fires_per_year <- mtbs_west |>
   st_drop_geometry() |>
   count(year, name = "n_fires")
 
-# Sanity check: should have one row per year across the full range
 expected_years <- YEAR_MIN:YEAR_MAX
 missing_years  <- setdiff(expected_years, fires_per_year$year)
 if (length(missing_years) > 0) {
@@ -364,93 +419,16 @@ if (length(missing_years) > 0) {
 
 p2 <- ggplot(fires_per_year, aes(x = year, y = n_fires)) +
   geom_col(fill = "#fc8d59", color = "white", linewidth = 0.3, alpha = 0.85) +
-  # Linear trend line to visualize direction of change
   geom_smooth(method = "lm", se = TRUE,
-              color = "#d73027", fill = "#d73027", alpha = 0.15,
-              linewidth = 1) +
-  scale_x_continuous(
-    breaks = seq(YEAR_MIN, YEAR_MAX, by = 2),
-    expand = c(0.01, 0)
-  ) +
-  scale_y_continuous(
-    labels = comma,
-    expand = c(0, 0),
-    limits = c(0, max(fires_per_year$n_fires) * 1.15)
-  ) +
+              color = "#d73027", fill = "#d73027", alpha = 0.15, linewidth = 1) +
+  scale_x_continuous(breaks = seq(YEAR_MIN, YEAR_MAX, by = 2), expand = c(0.01, 0)) +
+  scale_y_continuous(labels = comma, expand = c(0, 0),
+                     limits = c(0, max(fires_per_year$n_fires) * 1.15)) +
   labs(
     title   = "Annual Wildfire Count — Western United States",
     x       = "Year",
     y       = "Number of wildfires",
     caption = "Source: USGS MTBS. Wildfires ≥ 1,000 acres only. Red band = 95% CI around linear trend."
-  ) +
-  theme_minimal(base_size = 12) +
-  theme(
-    plot.title      = element_text(face = "bold", size = 14),
-    plot.caption    = element_text(color = "grey50", size = 9),
-    panel.grid.minor = element_blank(),
-    axis.title      = element_text(size = 11),
-    axis.text       = element_text(size = 10)
-  )
-
-print(p2)
-
-# --- QA ---
-stopifnot("Y-axis must not be all zeros" = max(fires_per_year$n_fires) > 0)
-stopifnot("X-axis must span 2000-2023"   = range(fires_per_year$year) == c(YEAR_MIN, YEAR_MAX))
-
-ggsave(here("figures/fires_per_year.png"),
-       plot = p2, width = 10, height = 6, dpi = 300, bg = "white")
-
-img_dims <- dim(png::readPNG(here("figures/fires_per_year.png")))
-cat("Plot 2 saved — dimensions (px):", img_dims[2], "x", img_dims[1], "\n")
-```
-
----
-
-## Plot 3 — Fire Size Distribution
-
-Histogram of fire sizes (acres) on a log₁₀ scale. The log scale is necessary because fire sizes span several orders of magnitude. This informs the minimum fire size threshold decision — at what size does the biomass signal become detectable?
-
-```{r plot3-fire-size}
-# Summary stats to annotate the plot
-size_stats <- mtbs_west |>
-  st_drop_geometry() |>
-  summarise(
-    median_ac = median(burnbndac, na.rm = TRUE),
-    mean_ac   = mean(burnbndac, na.rm = TRUE),
-    p95_ac    = quantile(burnbndac, 0.95, na.rm = TRUE)
-  )
-
-cat("Fire size summary:\n")
-cat("  Median:", scales::comma(size_stats$median_ac), "acres\n")
-cat("  Mean:  ", scales::comma(round(size_stats$mean_ac)), "acres\n")
-cat("  95th %:", scales::comma(size_stats$p95_ac), "acres\n")
-
-# Sanity check: no negative or zero acre values
-n_bad <- sum(mtbs_west$burnbndac <= 0, na.rm = TRUE)
-if (n_bad > 0) warning(paste(n_bad, "fires have burnbndac <= 0"))
-
-p3 <- ggplot(mtbs_west |> st_drop_geometry(),
-             aes(x = burnbndac)) +
-  geom_histogram(bins = 60, fill = "#fc8d59", color = "white",
-                 linewidth = 0.2, alpha = 0.9) +
-  # Mark median with a vertical line
-  geom_vline(xintercept = size_stats$median_ac,
-             color = "#d73027", linewidth = 1, linetype = "dashed") +
-  annotate("text",
-           x = size_stats$median_ac * 1.5,
-           y = Inf, vjust = 1.5, hjust = 0, size = 3.5, color = "#d73027",
-           label = paste0("Median: ", scales::comma(size_stats$median_ac), " ac")) +
-  scale_x_log10(
-    labels = label_comma(),
-    breaks = c(1000, 5000, 10000, 50000, 100000, 500000)
-  ) +
-  scale_y_continuous(labels = comma, expand = c(0, 0)) +
-  labs(
-    title   = "Distribution of Wildfire Sizes — Western United States (2000–2023)",
-    x       = "Fire size (acres, log₁₀ scale)",
-    y       = "Number of fires",
-    caption = "Source: USGS MTBS. Dashed line = median fire size."
   ) +
   theme_minimal(base_size = 12) +
   theme(
@@ -461,48 +439,322 @@ p3 <- ggplot(mtbs_west |> st_drop_geometry(),
     axis.text        = element_text(size = 10)
   )
 
-print(p3)
+print(p2)
 
-ggsave(here("figures/fire_size_distribution.png"),
-       plot = p3, width = 10, height = 6, dpi = 300, bg = "white")
+stopifnot("Y-axis must not be all zeros" = max(fires_per_year$n_fires) > 0)
+stopifnot("X-axis must span 2000-2023"   = range(fires_per_year$year) == c(YEAR_MIN, YEAR_MAX))
 
-img_dims <- dim(png::readPNG(here("figures/fire_size_distribution.png")))
-cat("Plot 3 saved — dimensions (px):", img_dims[2], "x", img_dims[1], "\n")
+ggsave(here("figures/fires_per_year.png"),
+       plot = p2, width = 10, height = 6, dpi = 300, bg = "white")
+img_dims <- dim(png::readPNG(here("figures/fires_per_year.png")))
+cat("Plot 3.2 saved — dimensions (px):", img_dims[2], "x", img_dims[1], "\n")
 ```
 
 ---
 
-## Plot 4 — Burn Severity: dNBR and RdNBR Distributions
+### 3.3 Assessment Type Summary
 
-```{r plot4-severity}
-# =============================================================================
-# BURN SEVERITY METRICS — dNBR vs. RdNBR
-#
-# dNBR  (differenced Normalized Burn Ratio):
-#   dNBR = (preFireNBR − postFireNBR) × 1000
-#   Captures spectral change caused by fire. Positive values = vegetation
-#   loss (burning). Stored in MTBS/BSP as integer index units (×1000 scale),
-#   so values typically range from −500 (increased greenness) to 1300+ (high
-#   severity). A useful absolute measure of spectral change per fire pixel.
-#
-#   LIMITATION: pre-fire biomass confounds cross-fire comparison. A dNBR of
-#   300 in dense old-growth forest represents less relative canopy destruction
-#   than 300 in sparse shrubland, because old-growth had more NBR to lose.
-#
-# RdNBR (Relativized dNBR; Miller & Thode 2007):
-#   RdNBR = dNBR / sqrt(|preFireNBR / 1000|)
-#   Divides by the square root of pre-fire NBR (rescaled to the 0–1 range),
-#   normalizing for vegetation density before the fire. This makes severity
-#   more comparable across fires in different biomes and vegetation types —
-#   the preferred continuous treatment variable for a cross-fire DiD study.
-#
-# Data: USGS Burn Severity Program (BSP) CBI field plots — geospatially
-# validated measurement points sampled within fire perimeters by field crews.
-# BSP stores raw dNBR and pre-fire NBR per plot, enabling RdNBR computation.
-# These are the only per-point raw dNBR observations available in this
-# download without fetching individual MTBS fire severity rasters.
-# =============================================================================
+Count of fires in each MTBS assessment type category. Extended imagery is acquired at seasonal peak-of-green and gives the most reliable dNBR signal; SS (single-scene) variants lack a pre-fire image entirely and produce unreliable severity thresholds.
 
+```{r plot-3-3-asmnt-summary}
+asmnt_summary <- mtbs_west |>
+  st_drop_geometry() |>
+  mutate(asmnt_type = trimws(asmnt_type)) |>
+  count(asmnt_type, name = "n_fires") |>
+  arrange(desc(n_fires)) |>
+  mutate(asmnt_type = factor(asmnt_type, levels = asmnt_type))
+
+cat("Assessment type breakdown:\n")
+print(asmnt_summary)
+
+p1b <- ggplot(asmnt_summary, aes(x = asmnt_type, y = n_fires, fill = asmnt_type)) +
+  geom_col(alpha = 0.85, width = 0.7) +
+  geom_text(aes(label = scales::comma(n_fires)),
+            vjust = -0.5, size = 3.8, fontface = "bold") +
+  scale_fill_manual(values = ASMT_COLORS, na.value = "#cccccc", guide = "none") +
+  scale_y_continuous(labels = comma, expand = c(0, 0),
+                     limits = c(0, max(asmnt_summary$n_fires) * 1.18)) +
+  labs(
+    title   = "Wildfire Count by Assessment Type — Western US (2000–2023)",
+    x       = "Assessment type",
+    y       = "Number of fires",
+    caption = paste(
+      "SS = single-scene: no pre-fire image available; dNBR cannot be computed and severity thresholds are unreliable.",
+      "\nExtended assessments use post-fire peak-of-green imagery and are preferred for severity characterization.",
+      "\nSource: USGS MTBS."
+    )
+  ) +
+  theme_minimal(base_size = 12) +
+  theme(
+    plot.title         = element_text(face = "bold", size = 14),
+    plot.caption       = element_text(color = "grey50", size = 9),
+    panel.grid.minor   = element_blank(),
+    panel.grid.major.x = element_blank(),
+    axis.title         = element_text(size = 11),
+    axis.text.x        = element_text(size = 10),
+    axis.text.y        = element_text(size = 10)
+  )
+
+print(p1b)
+
+ggsave(here("figures/asmnt_type_summary.png"),
+       plot = p1b, width = 9, height = 6, dpi = 300, bg = "white")
+img_dims <- dim(png::readPNG(here("figures/asmnt_type_summary.png")))
+cat("Plot 3.3 saved — dimensions (px):", img_dims[2], "x", img_dims[1], "\n")
+```
+
+---
+
+### 3.4 Extended Assessment Fires Only
+
+Map of MTBS wildfire perimeters restricted to `asmnt_type == "Extended"` — the subset with the most reliable burn severity characterization. The subtitle reports the total count and share of all fires, making the sample-size cost of this restriction explicit.
+
+```{r plot-3-4-extended-map, fig.height=9}
+# Restrict to Extended only — exclude Extended (SS) which has no pre-fire image
+mtbs_extended_alb  <- mtbs_west_alb |> filter(asmnt_type == "Extended")
+mtbs_extended_west <- mtbs_west |>
+  mutate(asmnt_type = trimws(asmnt_type)) |>
+  filter(asmnt_type == "Extended")
+
+n_extended   <- nrow(mtbs_extended_alb)
+pct_extended <- round(100 * n_extended / n_fires_total, 1)
+
+cat("Extended-only fires:", scales::comma(n_extended),
+    glue::glue("({pct_extended}% of {scales::comma(n_fires_total)} total)\n"))
+
+stopifnot("No Extended fires found" = n_extended > 0)
+
+p1c <- ggplot() +
+  geom_sf(data = western_states_alb,
+          fill = "grey96", color = "grey50", linewidth = 0.4) +
+  geom_sf(data = mtbs_extended_alb,
+          fill = "#d6604d", color = NA, alpha = 0.65) +
+  annotation_scale(location = "bl", width_hint = 0.25, text_cex = 0.85) +
+  annotation_north_arrow(
+    location = "tr", which_north = "true",
+    style    = north_arrow_minimal(text_size = 10)
+  ) +
+  labs(
+    title    = "MTBS Wildfire Perimeters — Extended Assessments Only",
+    subtitle = glue::glue(
+      "{scales::comma(n_extended)} wildfires ",
+      "({pct_extended}% of {scales::comma(n_fires_total)} total), ",
+      "Western US (2000–2023)"
+    ),
+    caption  = paste(
+      "Extended assessments use post-fire imagery acquired at seasonal peak-of-green,",
+      "providing more reliable burn severity characterization than Initial assessments.",
+      "Source: USGS MTBS (Eidenshink et al., 2007)."
+    )
+  ) +
+  theme_void(base_size = 12) +
+  theme(
+    plot.title    = element_text(face = "bold", size = 14),
+    plot.subtitle = element_text(color = "grey40", margin = margin(b = 6)),
+    plot.caption  = element_text(color = "grey50", size = 9),
+    plot.margin   = margin(10, 10, 10, 10)
+  )
+
+print(p1c)
+
+ggsave(here("figures/fire_locations_extended_only.png"),
+       plot = p1c, width = 10, height = 9, dpi = 300, bg = "white")
+img_dims <- dim(png::readPNG(here("figures/fire_locations_extended_only.png")))
+cat("Plot 3.4 saved — dimensions (px):", img_dims[2], "x", img_dims[1], "\n")
+```
+
+---
+
+### 3.5 Fires Per Year — All Fires and Extended Only
+
+Side-by-side comparison of annual wildfire counts for all assessments vs. Extended-only. Shared y-axis allows direct visual comparison of the temporal pattern and confirms whether restricting to Extended assessments introduces temporal bias in the study sample.
+
+```{r plot-3-5-fires-per-year-comparison}
+fires_per_year_ext <- mtbs_extended_west |>
+  st_drop_geometry() |>
+  count(year, name = "n_fires") |>
+  complete(year = YEAR_MIN:YEAR_MAX, fill = list(n_fires = 0))
+
+# Shared y-axis ceiling for fair visual comparison
+y_max_35 <- max(max(fires_per_year$n_fires), max(fires_per_year_ext$n_fires)) * 1.15
+
+theme_bar <- theme_minimal(base_size = 12) +
+  theme(plot.title       = element_text(face = "bold", size = 13),
+        panel.grid.minor = element_blank(),
+        axis.title       = element_text(size = 11),
+        axis.text        = element_text(size = 10))
+
+p35_all <- ggplot(fires_per_year, aes(x = year, y = n_fires)) +
+  geom_col(fill = "#fc8d59", color = "white", linewidth = 0.3, alpha = 0.85) +
+  geom_smooth(method = "lm", se = TRUE,
+              color = "#d73027", fill = "#d73027", alpha = 0.15, linewidth = 1) +
+  scale_x_continuous(breaks = seq(YEAR_MIN, YEAR_MAX, by = 4), expand = c(0.01, 0)) +
+  scale_y_continuous(labels = comma, expand = c(0, 0), limits = c(0, y_max_35)) +
+  labs(title = glue("All Assessments  (n = {scales::comma(n_fires_total)})"),
+       x = "Year", y = "Number of fires") +
+  theme_bar
+
+p35_ext <- ggplot(fires_per_year_ext, aes(x = year, y = n_fires)) +
+  geom_col(fill = "#d6604d", color = "white", linewidth = 0.3, alpha = 0.85) +
+  geom_smooth(method = "lm", se = TRUE,
+              color = "#a50026", fill = "#a50026", alpha = 0.15, linewidth = 1) +
+  scale_x_continuous(breaks = seq(YEAR_MIN, YEAR_MAX, by = 4), expand = c(0.01, 0)) +
+  scale_y_continuous(labels = comma, expand = c(0, 0), limits = c(0, y_max_35)) +
+  labs(title = glue("Extended Only  (n = {scales::comma(n_extended)})"),
+       x = "Year", y = "Number of fires") +
+  theme_bar
+
+p35 <- (p35_all | p35_ext) +
+  plot_annotation(
+    title    = "Fires Per Year — All Assessments vs. Extended Only",
+    subtitle = glue("Western US (2000–2023); shared y-axis for visual comparison"),
+    caption  = "Source: USGS MTBS. Shaded band = 95% CI around linear trend.",
+    theme    = theme(
+      plot.title    = element_text(face = "bold", size = 14),
+      plot.subtitle = element_text(color = "grey40"),
+      plot.caption  = element_text(color = "grey50", size = 9)
+    )
+  )
+
+print(p35)
+
+ggsave(here("figures/fires_per_year_comparison.png"),
+       plot = p35, width = 14, height = 6, dpi = 300, bg = "white")
+img_dims <- dim(png::readPNG(here("figures/fires_per_year_comparison.png")))
+cat("Plot 3.5 saved — dimensions (px):", img_dims[2], "x", img_dims[1], "\n")
+```
+
+---
+
+### 3.6 Fire Size Distribution
+
+Histograms of fire sizes on a log₁₀ scale — all assessments vs. Extended only. Log scale is necessary because fire sizes span several orders of magnitude. This informs the minimum fire size threshold decision and checks whether restricting to Extended assessments biases the size distribution.
+
+```{r plot-3-6-fire-size}
+size_stats <- mtbs_west |>
+  st_drop_geometry() |>
+  summarise(median_ac = median(burnbndac, na.rm = TRUE),
+            mean_ac   = mean(burnbndac, na.rm = TRUE),
+            p95_ac    = quantile(burnbndac, 0.95, na.rm = TRUE))
+
+size_stats_ext <- mtbs_extended_west |>
+  st_drop_geometry() |>
+  summarise(median_ac = median(burnbndac, na.rm = TRUE),
+            mean_ac   = mean(burnbndac, na.rm = TRUE),
+            p95_ac    = quantile(burnbndac, 0.95, na.rm = TRUE))
+
+cat("Fire size summary — All:\n")
+cat("  Median:", scales::comma(size_stats$median_ac), "ac  Mean:",
+    scales::comma(round(size_stats$mean_ac)), "ac\n")
+cat("Fire size summary — Extended only:\n")
+cat("  Median:", scales::comma(size_stats_ext$median_ac), "ac  Mean:",
+    scales::comma(round(size_stats_ext$mean_ac)), "ac\n")
+
+n_bad <- sum(mtbs_west$burnbndac <= 0, na.rm = TRUE)
+if (n_bad > 0) warning(paste(n_bad, "fires have burnbndac <= 0"))
+
+x_breaks_size <- c(1000, 5000, 10000, 50000, 100000, 500000)
+
+theme_hist <- theme_minimal(base_size = 12) +
+  theme(plot.title       = element_text(face = "bold", size = 13),
+        panel.grid.minor = element_blank(),
+        axis.title       = element_text(size = 11),
+        axis.text        = element_text(size = 10))
+
+p36_all <- ggplot(mtbs_west |> st_drop_geometry(), aes(x = burnbndac)) +
+  geom_histogram(bins = 60, fill = "#fc8d59", color = "white",
+                 linewidth = 0.2, alpha = 0.9) +
+  geom_vline(xintercept = size_stats$median_ac,
+             color = "#d73027", linewidth = 1, linetype = "dashed") +
+  annotate("text", x = size_stats$median_ac * 1.5, y = Inf,
+           vjust = 1.5, hjust = 0, size = 3.5, color = "#d73027",
+           label = paste0("Median: ", scales::comma(size_stats$median_ac), " ac")) +
+  scale_x_log10(labels = label_comma(), breaks = x_breaks_size) +
+  scale_y_continuous(labels = comma, expand = c(0, 0)) +
+  labs(title = glue("All Assessments  (n = {scales::comma(n_fires_total)})"),
+       x = "Fire size (acres, log₁₀ scale)", y = "Number of fires") +
+  theme_hist
+
+p36_ext <- ggplot(mtbs_extended_west |> st_drop_geometry(), aes(x = burnbndac)) +
+  geom_histogram(bins = 60, fill = "#d6604d", color = "white",
+                 linewidth = 0.2, alpha = 0.9) +
+  geom_vline(xintercept = size_stats_ext$median_ac,
+             color = "#a50026", linewidth = 1, linetype = "dashed") +
+  annotate("text", x = size_stats_ext$median_ac * 1.5, y = Inf,
+           vjust = 1.5, hjust = 0, size = 3.5, color = "#a50026",
+           label = paste0("Median: ", scales::comma(size_stats_ext$median_ac), " ac")) +
+  scale_x_log10(labels = label_comma(), breaks = x_breaks_size) +
+  scale_y_continuous(labels = comma, expand = c(0, 0)) +
+  labs(title = glue("Extended Only  (n = {scales::comma(n_extended)})"),
+       x = "Fire size (acres, log₁₀ scale)", y = "Number of fires") +
+  theme_hist
+
+p36 <- (p36_all | p36_ext) +
+  plot_annotation(
+    title    = "Fire Size Distribution — All Assessments vs. Extended Only",
+    subtitle = "Western US (2000–2023), log₁₀ scale; dashed line = median fire size",
+    caption  = "Source: USGS MTBS.",
+    theme    = theme(
+      plot.title    = element_text(face = "bold", size = 14),
+      plot.subtitle = element_text(color = "grey40"),
+      plot.caption  = element_text(color = "grey50", size = 9)
+    )
+  )
+
+print(p36)
+
+ggsave(here("figures/fire_size_comparison.png"),
+       plot = p36, width = 14, height = 6, dpi = 300, bg = "white")
+img_dims <- dim(png::readPNG(here("figures/fire_size_comparison.png")))
+cat("Plot 3.6 saved — dimensions (px):", img_dims[2], "x", img_dims[1], "\n")
+```
+
+---
+
+### 3.7 Burn Severity — dNBR and RdNBR
+
+#### About the BSP CBI Dataset
+
+The burn severity data in this section comes from the **USGS Burn Severity Program (BSP)** perimeter shapefile at `data/raw/mtbs/burn_severity_perimeter_data/bsp_perims_DD.shp`. This file is part of the same USGS download package as the MTBS data but is a distinct, larger file: it collects fire perimeters mapped under **multiple sub-programs**, identified by the `map_prog` field. Filtering to `map_prog == "CBI"` selects fires where field crews deployed to conduct **Composite Burn Index (CBI) assessments** — the ground-validated subset of the BSP database.
+
+CBI is a standardized field protocol in which trained observers rate burn effects across five vegetation strata (substrate and litter, herbs and low shrubs, tall shrubs and small trees, intermediate trees, large trees) on a 0–3 continuous scale at 30m plots inside the fire perimeter. An overall CBI score is a weighted average across strata. These fires are chosen for ground assessment when satellite imagery alone is insufficient or when ongoing research requires field validation.
+
+#### How BSP CBI Perimeters Differ from MTBS
+
+The BSP CBI perimeters are **not the same fires** as the MTBS perimeters used in sections 3.1–3.6:
+
+| Feature | MTBS | BSP CBI (`map_prog == "CBI"`) |
+|---|---|---|
+| Fire count | ~30,390 (1984–present) | CBI-assessed subset of BSP's ~52,741 total fires |
+| Minimum size | ≥ 1,000 ac (West), ≥ 500 ac (East) | No fixed threshold — smaller fires included |
+| Assessment method | Satellite only (Landsat / Sentinel dNBR) | Satellite + CBI ground plots |
+| Severity fields | dNBR threshold values (`low_t`, `mod_t`, `high_t`) | Actual spectral values (`dnbr_val`, `prenbr_val`, `posnbr_val`) |
+| Event ID match with MTBS | — | Largely non-overlapping; joining on `event_id` returns near-zero matches |
+| Temporal span | 1984–present | ~1994–2017 (field crew deployment period) |
+
+Because the fire sets are largely separate, restricting BSP CBI fires to those with Extended MTBS assessments (by `event_id` join) would return near-empty results — the Extended/Initial distinction is a satellite image-timing concept that does not transfer to CBI field data.
+
+#### BSP CBI Field Definitions
+
+Key fields after `names(bsp_raw) <- tolower(names(bsp_raw))`:
+
+| Field | Description |
+|---|---|
+| `event_id` | Unique fire ID: state code + centroid lat/lon (3 decimal places) + ignition date (YYYYMMDD) |
+| `incid_name` | Fire incident name ("UNNAMED" if not on record) |
+| `incid_type` | Incident type: Wildfire, Prescribed Fire, Wildland Fire Use, Unknown |
+| `map_prog` | Mapping protocol. `"CBI"` = fires with CBI ground assessment; others include MTBS, RAVG, BAER, NPS |
+| `asmnt_type` | Satellite assessment timing: Initial, Extended, Emergency; (SS) = no pre-fire image |
+| `ig_date` | Ignition date (YYYY-MM-DD) |
+| `burnbndac` | Perimeter area in acres |
+| `dnbr_offst` | Mean dNBR in the unburned reference area — the per-fire background offset. Sentinel ±9999 = no data. |
+| `dnbr_stddv` | Standard deviation of dNBR in the unburned reference area |
+| `low_t` / `mod_t` / `high_t` | Per-fire dNBR thresholds for severity class boundaries (same calibration protocol as MTBS) |
+| `dnbr_val` | **Actual dNBR value** for the fire — the raw severity signal, distinct from the threshold fields above |
+| `prenbr_val` | **Pre-fire NBR × 1000** — vegetation density before the fire. Records with `|prenbr_val| ≤ 10` are excluded to prevent near-zero division in RdNBR. |
+| `posnbr_val` | **Post-fire NBR × 1000** — vegetation state after fire; `dnbr_val ≈ prenbr_val − posnbr_val` |
+
+```{r plot-3-7-severity-load}
 BSP_PATH <- here("data/raw/mtbs/burn_severity_perimeter_data/bsp_perims_DD.shp")
 
 bsp_raw <- st_read(BSP_PATH, quiet = TRUE)
@@ -518,36 +770,97 @@ cbi_raw <- bsp_raw |>
     dnbr_val   != 9999, prenbr_val != 9999,
     abs(prenbr_val) > 10
   ) |>
-  mutate(
-    # RdNBR: normalize by sqrt(|preNBR|) on the 0–1 NBR scale
-    rdnbr = dnbr_val / sqrt(abs(prenbr_val / 1000))
-  )
+  mutate(rdnbr = dnbr_val / sqrt(abs(prenbr_val / 1000)))
 
-# Spatial filter to Western US (BSP is NAD83, matches western_states_sf CRS)
+# Spatial filter to Western US
 cbi_raw  <- st_transform(cbi_raw, st_crs(western_states_sf))
 cbi_west <- st_filter(cbi_raw, western_states_sf)
 
-cat("CBI field plots (Western US, valid dNBR + preNBR):", nrow(cbi_west), "\n")
-cat("dNBR  range:", range(cbi_west$dnbr_val),            "\n")
+cat("CBI geometry type:            ", as.character(unique(st_geometry_type(cbi_west))), "\n")
+cat("CBI field plots — Western US:", nrow(cbi_west), "\n")
+cat("dNBR  range:", range(cbi_west$dnbr_val),                      "\n")
 cat("RdNBR range:", round(range(cbi_west$rdnbr, na.rm = TRUE), 1), "\n")
 
-# --- Sanity checks -----------------------------------------------------------
-stopifnot("No CBI plots in Western US"         = nrow(cbi_west) > 0)
-stopifnot("All dNBR values identical"          = sd(cbi_west$dnbr_val) > 0)
+stopifnot("No CBI plots in Western US" = nrow(cbi_west) > 0)
+stopifnot("All dNBR values identical"  = sd(cbi_west$dnbr_val) > 0)
 n_rdnbr_na <- sum(is.na(cbi_west$rdnbr) | !is.finite(cbi_west$rdnbr))
 if (n_rdnbr_na > 0)
   message(n_rdnbr_na, " RdNBR values are NA/Inf (pre-fire NBR near zero)")
+```
 
-# For mapping: extract centroids from mixed-geometry BSP features
+The map below shows BSP CBI fire locations (blue dots, plotted at centroids) overlaid on MTBS fire perimeters (grey), confirming that the two datasets cover largely different fires.
+
+```{r plot-3-7-bsp-perimeter-map, fig.height=9}
+# Use centroids for rendering — CBI records may be small polygons or points,
+# both of which are sub-pixel at Western US scale. Centroid + color is the
+# same pattern used in plot-3-7-severity-map.
+bsp_cbi_pts <- cbi_west |> st_centroid() |> st_transform(crs_albers)
+
+p_bsp <- ggplot() +
+  geom_sf(data = western_states_alb,
+          fill = "grey96", color = "grey50", linewidth = 0.4) +
+  geom_sf(data = mtbs_west_alb,
+          fill = "grey70", color = NA, alpha = 0.55) +
+  geom_sf(data = bsp_cbi_pts,
+          color = "#4393c3", size = 0.8, alpha = 0.8) +
+  annotation_scale(location = "bl", width_hint = 0.25, text_cex = 0.85) +
+  annotation_north_arrow(location = "tr", which_north = "true",
+                         style = north_arrow_minimal(text_size = 10)) +
+  labs(
+    title    = "BSP CBI Fire Locations vs. MTBS Fire Perimeters — Western US",
+    subtitle = glue(
+      "{scales::comma(nrow(cbi_west))} BSP CBI fire locations (blue dots) over ",
+      "{scales::comma(n_fires_total)} MTBS wildfires (grey, 2000–2023)"
+    ),
+    caption = paste(
+      "Grey polygons = MTBS satellite-assessed wildfires (≥ 1,000 acres, Western US, 2000–2023).",
+      "Blue dots = BSP fires with CBI field assessment (map_prog = 'CBI', ~1994–2017), plotted at centroids.",
+      "The two datasets are largely non-overlapping — event_id joins return near-zero matches.",
+      "Source: USGS Burn Severity Program."
+    )
+  ) +
+  theme_void(base_size = 12) +
+  theme(
+    plot.title    = element_text(face = "bold", size = 14),
+    plot.subtitle = element_text(color = "grey40", margin = margin(b = 6)),
+    plot.caption  = element_text(color = "grey50", size = 9),
+    plot.margin   = margin(10, 10, 10, 10)
+  )
+
+print(p_bsp)
+
+stopifnot("No BSP CBI locations to map" = nrow(bsp_cbi_pts) > 0)
+
+ggsave(here("figures/bsp_cbi_perimeter_map.png"),
+       plot = p_bsp, width = 10, height = 9, dpi = 300, bg = "white")
+img_dims <- dim(png::readPNG(here("figures/bsp_cbi_perimeter_map.png")))
+cat("BSP location map saved — dimensions (px):", img_dims[2], "x", img_dims[1], "\n")
+```
+
+#### Severity Index Distributions — dNBR and RdNBR
+
+The spectral indices used to characterize burn severity within BSP CBI fire perimeters are derived from Landsat imagery (see **Section 2** for the full NBR derivation) and stored in the `dnbr_val` and computed `rdnbr` fields.
+
+**dNBR** (differenced Normalized Burn Ratio) measures *absolute* spectral change caused by fire:
+
+$$\text{dNBR} = (\text{NBR}_{\text{pre}} - \text{NBR}_{\text{post}}) \times 1000$$
+
+Positive values indicate vegetation loss; higher values indicate more severe burning. Raw dNBR is useful within a single fire but poorly suited for cross-fire comparison because its magnitude depends on pre-fire vegetation density — a dNBR of 400 in dense old-growth represents far less relative canopy loss than 400 in sparse shrubland.
+
+**RdNBR** (Relativized dNBR; Miller & Thode, 2007) corrects for pre-fire vegetation density:
+
+$$\text{RdNBR} = \frac{\text{dNBR}}{\sqrt{|\text{NBR}_{\text{pre}} / 1000|}}$$
+
+This rescaling makes severity comparable across fires and biomes and is the preferred continuous treatment variable for the cross-fire DiD analysis. Records with `|prenbr_val| ≤ 10` are excluded to avoid near-zero division.
+
+```{r plot-3-7-severity-map, fig.height=9}
+# Map of all CBI field plots colored by dNBR
 cbi_pts_alb <- cbi_west |>
   st_centroid() |>
-  st_transform(crs_albers)   # crs_albers defined in Plot 1 chunk
+  st_transform(crs_albers)
 
-# Color scale limits: clip to 2nd–98th percentile to prevent outliers from
-# collapsing the colour range
 dnbr_lims <- quantile(cbi_west$dnbr_val, c(0.02, 0.98), na.rm = TRUE)
 
-# --- 4a: Map — CBI field plots colored by dNBR -------------------------------
 p4a <- ggplot() +
   geom_sf(data = western_states_alb,
           fill = "grey96", color = "grey50", linewidth = 0.4) +
@@ -557,131 +870,109 @@ p4a <- ggplot() +
           aes(color = dnbr_val), size = 1.1, alpha = 0.8) +
   scale_color_viridis_c(
     name      = "dNBR\n(index units)",
-    option    = "inferno",
-    direction = -1,
-    limits    = dnbr_lims,
-    oob       = scales::squish,
-    labels    = comma
+    option    = "inferno", direction = -1,
+    limits    = dnbr_lims, oob = scales::squish, labels = comma
   ) +
   annotation_scale(location = "bl", width_hint = 0.25, text_cex = 0.85) +
-  annotation_north_arrow(
-    location = "tr", which_north = "true",
-    style    = north_arrow_minimal(text_size = 10)
-  ) +
+  annotation_north_arrow(location = "tr", which_north = "true",
+                         style = north_arrow_minimal(text_size = 10)) +
   labs(
     title    = "BSP CBI Field Plot Locations — Colored by Raw dNBR",
     subtitle = glue("{scales::comma(nrow(cbi_west))} validated field plots, Western US (1994–2017)"),
-    caption  = paste0(
-      "Grey polygons = MTBS fire perimeters. ",
-      "Source: USGS Burn Severity Program (BSP) CBI field plots. ",
-      "Color clipped to 2nd–98th percentile."
-    )
+    caption  = paste0("Grey polygons = MTBS fire perimeters. ",
+                      "Source: USGS Burn Severity Program (BSP). ",
+                      "Color clipped to 2nd–98th percentile.")
   ) +
   theme_void(base_size = 12) +
   theme(
-    plot.title    = element_text(face = "bold", size = 14),
-    plot.subtitle = element_text(color = "grey40", margin = margin(b = 6)),
-    plot.caption  = element_text(color = "grey50", size = 9),
+    plot.title      = element_text(face = "bold", size = 14),
+    plot.subtitle   = element_text(color = "grey40", margin = margin(b = 6)),
+    plot.caption    = element_text(color = "grey50", size = 9),
     legend.position = "bottom",
-    legend.title  = element_text(size = 11, face = "bold"),
-    legend.text   = element_text(size = 10),
-    plot.margin   = margin(10, 10, 10, 10)
+    legend.title    = element_text(size = 11, face = "bold"),
+    legend.text     = element_text(size = 10),
+    plot.margin     = margin(10, 10, 10, 10)
   ) +
   guides(color = guide_colorbar(barwidth = 12, barheight = 0.8))
 
-# --- 4b: Histogram — dNBR distribution --------------------------------------
-dnbr_med <- median(cbi_west$dnbr_val, na.rm = TRUE)
+print(p4a)
+
+ggsave(here("figures/severity_dnbr_map.png"),
+       plot = p4a, width = 10, height = 9, dpi = 300, bg = "white")
+img_dims <- dim(png::readPNG(here("figures/severity_dnbr_map.png")))
+cat("Plot 3.7 map saved — dimensions (px):", img_dims[2], "x", img_dims[1], "\n")
+```
+
+```{r plot-3-7-dnbr-comparison}
+rdnbr_df_all <- cbi_west |> st_drop_geometry() |> filter(is.finite(rdnbr))
+
+dnbr_med_all <- median(cbi_west$dnbr_val, na.rm = TRUE)
+
+theme_sev <- theme_minimal(base_size = 12) +
+  theme(plot.title       = element_text(face = "bold", size = 13),
+        plot.caption     = element_text(color = "grey50", size = 9),
+        panel.grid.minor = element_blank(),
+        axis.title       = element_text(size = 11),
+        axis.text        = element_text(size = 10))
 
 p4b <- ggplot(cbi_west |> st_drop_geometry(), aes(x = dnbr_val)) +
   geom_histogram(bins = 60, fill = "#d73027", color = "white",
                  linewidth = 0.2, alpha = 0.85) +
-  geom_vline(xintercept = 0,
-             color = "black", linewidth = 0.6, linetype = "dotted") +
-  geom_vline(xintercept = dnbr_med,
-             color = "#4d4d4d", linewidth = 1, linetype = "dashed") +
-  annotate("text",
-           x = dnbr_med + 15, y = Inf, vjust = 1.5, hjust = 0,
-           size = 3.5, color = "#4d4d4d",
-           label = paste0("Median: ", round(dnbr_med))) +
+  geom_vline(xintercept = 0, color = "black", linewidth = 0.6, linetype = "dotted") +
+  geom_vline(xintercept = dnbr_med_all, color = "#4d4d4d", linewidth = 1, linetype = "dashed") +
+  annotate("text", x = dnbr_med_all + 15, y = Inf, vjust = 1.5, hjust = 0,
+           size = 3.5, color = "#4d4d4d", label = paste0("Median: ", round(dnbr_med_all))) +
   scale_x_continuous(labels = comma) +
   scale_y_continuous(labels = comma, expand = c(0, 0)) +
   labs(
-    title   = "Distribution of Raw dNBR at BSP CBI Field Plots — Western US",
-    x       = "dNBR (index units;  positive = burning,  negative = increased greenness)",
+    title   = glue("dNBR Distribution — BSP CBI Field Plots, Western US  (n = {scales::comma(nrow(cbi_west))})"),
+    subtitle = "Dotted line = 0; dashed line = median. Positive dNBR = burning; negative = increased greenness.",
+    x       = "dNBR (index units)",
     y       = "Number of field plots",
-    caption = paste0(
-      "Dotted line = 0 (no change). Dashed line = median. ",
-      "n = ", scales::comma(nrow(cbi_west)), " CBI field plots."
-    )
+    caption = "Source: USGS Burn Severity Program (BSP). Field plots with map_prog = 'CBI', 1994–2017."
   ) +
-  theme_minimal(base_size = 12) +
-  theme(
-    plot.title       = element_text(face = "bold", size = 13),
-    plot.caption     = element_text(color = "grey50", size = 9),
-    panel.grid.minor = element_blank(),
-    axis.title       = element_text(size = 11),
-    axis.text        = element_text(size = 10)
-  )
+  theme_sev
 
-# --- 4c: Histogram — RdNBR distribution -------------------------------------
-rdnbr_df  <- cbi_west |> st_drop_geometry() |>
-  filter(!is.na(rdnbr), is.finite(rdnbr))
-rdnbr_med <- median(rdnbr_df$rdnbr, na.rm = TRUE)
+print(p4b)
 
-p4c <- ggplot(rdnbr_df, aes(x = rdnbr)) +
+stopifnot("dNBR histogram has no data" = nrow(cbi_west) > 0)
+
+ggsave(here("figures/severity_dnbr_histogram.png"),
+       plot = p4b, width = 10, height = 6, dpi = 300, bg = "white")
+img_dims <- dim(png::readPNG(here("figures/severity_dnbr_histogram.png")))
+cat("Plot 3.7 dNBR saved — dimensions (px):", img_dims[2], "x", img_dims[1], "\n")
+```
+
+```{r plot-3-7-rdnbr-comparison}
+rdnbr_med_all <- median(rdnbr_df_all$rdnbr, na.rm = TRUE)
+
+p4c <- ggplot(rdnbr_df_all, aes(x = rdnbr)) +
   geom_histogram(bins = 60, fill = "#4393c3", color = "white",
                  linewidth = 0.2, alpha = 0.85) +
-  geom_vline(xintercept = 0,
-             color = "black", linewidth = 0.6, linetype = "dotted") +
-  geom_vline(xintercept = rdnbr_med,
-             color = "#4d4d4d", linewidth = 1, linetype = "dashed") +
-  annotate("text",
-           x = rdnbr_med + 10, y = Inf, vjust = 1.5, hjust = 0,
-           size = 3.5, color = "#4d4d4d",
-           label = paste0("Median: ", round(rdnbr_med))) +
+  geom_vline(xintercept = 0, color = "black", linewidth = 0.6, linetype = "dotted") +
+  geom_vline(xintercept = rdnbr_med_all, color = "#4d4d4d", linewidth = 1, linetype = "dashed") +
+  annotate("text", x = rdnbr_med_all + 10, y = Inf, vjust = 1.5, hjust = 0,
+           size = 3.5, color = "#4d4d4d", label = paste0("Median: ", round(rdnbr_med_all))) +
   scale_x_continuous(labels = comma) +
   scale_y_continuous(labels = comma, expand = c(0, 0)) +
   labs(
-    title   = "Distribution of RdNBR at BSP CBI Field Plots — Western US",
-    x       = "RdNBR (relativized dNBR; normalized for pre-fire vegetation density)",
-    y       = "Number of field plots",
-    caption = paste0(
-      "RdNBR = dNBR / sqrt(|preNBR / 1000|). ",
-      "Dotted line = 0. Dashed line = median. ",
-      "n = ", scales::comma(nrow(rdnbr_df)), " CBI field plots. ",
-      "Ref: Miller & Thode (2007)."
-    )
+    title    = glue("RdNBR Distribution — BSP CBI Field Plots, Western US  (n = {scales::comma(nrow(rdnbr_df_all))})"),
+    subtitle = "RdNBR = dNBR / √|preNBR / 1000|. Dotted = 0; dashed = median. Ref: Miller & Thode (2007).",
+    x        = "RdNBR (relativized dNBR)",
+    y        = "Number of field plots",
+    caption  = "Source: USGS Burn Severity Program (BSP). Field plots with map_prog = 'CBI', 1994–2017."
   ) +
-  theme_minimal(base_size = 12) +
-  theme(
-    plot.title       = element_text(face = "bold", size = 13),
-    plot.caption     = element_text(color = "grey50", size = 9),
-    panel.grid.minor = element_blank(),
-    axis.title       = element_text(size = 11),
-    axis.text        = element_text(size = 10)
-  )
+  theme_sev
 
-print(p4a)
-print(p4b)
 print(p4c)
 
-# --- QA: confirm non-empty plots and reasonable value ranges -----------------
 stopifnot("dNBR histogram has no data"  = nrow(cbi_west) > 0)
-stopifnot("RdNBR histogram has no data" = nrow(rdnbr_df) > 0)
+stopifnot("RdNBR histogram has no data" = nrow(rdnbr_df_all) > 0)
 
-ggsave(here("figures/severity_dnbr_map.png"),
-       plot = p4a, width = 10, height = 9, dpi = 300, bg = "white")
-ggsave(here("figures/severity_dnbr_histogram.png"),
-       plot = p4b, width = 9,  height = 6, dpi = 300, bg = "white")
 ggsave(here("figures/severity_rdnbr_histogram.png"),
-       plot = p4c, width = 9,  height = 6, dpi = 300, bg = "white")
-
-img_dims <- dim(png::readPNG(here("figures/severity_dnbr_map.png")))
-cat("Plot 4a saved — dimensions (px):", img_dims[2], "x", img_dims[1], "\n")
-img_dims <- dim(png::readPNG(here("figures/severity_dnbr_histogram.png")))
-cat("Plot 4b saved — dimensions (px):", img_dims[2], "x", img_dims[1], "\n")
+       plot = p4c, width = 10, height = 6, dpi = 300, bg = "white")
 img_dims <- dim(png::readPNG(here("figures/severity_rdnbr_histogram.png")))
-cat("Plot 4c saved — dimensions (px):", img_dims[2], "x", img_dims[1], "\n")
+cat("Plot 3.7 RdNBR saved — dimensions (px):", img_dims[2], "x", img_dims[1], "\n")
 ```
 
 ---
@@ -689,20 +980,21 @@ cat("Plot 4c saved — dimensions (px):", img_dims[2], "x", img_dims[1], "\n")
 ## Summary
 
 ```{r summary-table}
-# Quick summary table of what was found — useful for NOTES.md
 n_valid_thresh <- sum(mtbs_west$thresholds_valid, na.rm = TRUE)
 median_dnbr    <- median(cbi_west$dnbr_val, na.rm = TRUE)
-median_rdnbr   <- median(rdnbr_df$rdnbr,    na.rm = TRUE)
+median_rdnbr   <- median(rdnbr_df_all$rdnbr, na.rm = TRUE)
 
 summary_tbl <- tibble::tribble(
-  ~Metric,                                ~Value,
-  "Total wildfires (2000–2023)",          scales::comma(n_fires_total),
-  "States covered",                       paste(present_states, collapse = ", "),
-  "Median fire size",                     paste(scales::comma(size_stats$median_ac), "acres"),
-  "Fires with valid severity thresholds", scales::comma(n_valid_thresh),
-  "CBI field plots (Western US)",         scales::comma(nrow(cbi_west)),
-  "Median dNBR (CBI plots)",             as.character(round(median_dnbr)),
-  "Median RdNBR (CBI plots)",            as.character(round(median_rdnbr))
+  ~Metric,                                        ~Value,
+  "Total wildfires (2000–2023)",                  scales::comma(n_fires_total),
+  "Extended assessment fires",                    glue("{scales::comma(n_extended)} ({pct_extended}%)"),
+  "States covered",                               paste(present_states, collapse = ", "),
+  "Median fire size — all",                       paste(scales::comma(size_stats$median_ac), "acres"),
+  "Median fire size — Extended only",             paste(scales::comma(size_stats_ext$median_ac), "acres"),
+  "Fires with valid severity thresholds",         scales::comma(n_valid_thresh),
+  "CBI field plots — Western US",                 scales::comma(nrow(cbi_west)),
+  "Median dNBR (CBI plots)",                      as.character(round(median_dnbr)),
+  "Median RdNBR (all CBI plots)",                 as.character(round(median_rdnbr))
 )
 
 knitr::kable(summary_tbl, col.names = c("Metric", "Value"), align = "lr")
@@ -710,7 +1002,7 @@ knitr::kable(summary_tbl, col.names = c("Metric", "Value"), align = "lr")
 
 ---
 
-## Step 3 — GEE Biomass Extraction
+## 4. GEE Biomass Extraction
 
 ```{r biomass-setup}
 START_YEAR_BIO <- 1984
@@ -797,9 +1089,9 @@ ggplot(example_fire, aes(x = year, y = display_nbr)) +
 
 ---
 
-## Plot 5 — Annual Mean NBR Over Time
+### 4.1 Annual Mean NBR Over Time
 
-```{r plot5-biomass-trend}
+```{r plot-4-1-biomass-trend}
 annual_nbr <- biomass |>
   group_by(year) |>
   summarise(
@@ -818,20 +1110,15 @@ p5 <- ggplot(annual_nbr, aes(x = year, y = mean_nbr)) +
   geom_point(color = "#2c7bb6", size = 2.5) +
   geom_smooth(method = "lm", se = FALSE,
               color = "black", linetype = "dashed", linewidth = 0.8) +
-  scale_x_continuous(
-    breaks = seq(START_YEAR_BIO, END_YEAR_BIO, by = 5),
-    expand = c(0.01, 0)
-  ) +
+  scale_x_continuous(breaks = seq(START_YEAR_BIO, END_YEAR_BIO, by = 5),
+                     expand = c(0.01, 0)) +
   scale_y_continuous(labels = number_format(accuracy = 0.001)) +
   labs(
     title    = glue("Annual Mean NBR — {STATE_LABEL} Wildfire Sites ({START_YEAR_BIO}–{END_YEAR_BIO})"),
     subtitle = glue("Raw annual Landsat composites across {n_fires_bio} sampled MTBS fire perimeters"),
     x        = "Year",
     y        = "Mean NBR (display scale — higher = more vegetation)",
-    caption  = paste(
-      "Shaded band = ± 1 SE. Dashed line = linear trend.",
-      "Source: USGS MTBS + Landsat via Google Earth Engine."
-    )
+    caption  = "Shaded band = ± 1 SE. Dashed line = linear trend. Source: USGS MTBS + Landsat via Google Earth Engine."
   ) +
   theme_minimal(base_size = 12) +
   theme(
@@ -850,14 +1137,14 @@ stopifnot("Y-axis is all zero — check NBR sign" = !all(annual_nbr$mean_nbr == 
 ggsave(here("figures/biomass_trend_over_time.png"),
        plot = p5, width = 10, height = 6, dpi = 300, bg = "white")
 img_dims <- dim(png::readPNG(here("figures/biomass_trend_over_time.png")))
-cat("Plot 5 saved — dimensions (px):", img_dims[2], "x", img_dims[1], "\n")
+cat("Plot 4.1 saved — dimensions (px):", img_dims[2], "x", img_dims[1], "\n")
 ```
 
 ---
 
-## Plot 6 — Biomass Before and After Fire Events
+### 4.2 Biomass Before and After Fire Events
 
-```{r plot6-before-after}
+```{r plot-4-2-before-after}
 biomass_event <- biomass |>
   mutate(rel_year = year - fire_year) |>
   filter(rel_year >= -5, rel_year <= 10)
@@ -871,20 +1158,16 @@ event_mean <- biomass_event |>
     .groups  = "drop"
   )
 
-cat("Fires contributing at rel_year =  0:",
-    event_mean$n_fires[event_mean$rel_year == 0], "\n")
-cat("Fires contributing at rel_year = -5:",
-    event_mean$n_fires[event_mean$rel_year == -5], "\n")
-cat("Fires contributing at rel_year = +10:",
-    event_mean$n_fires[event_mean$rel_year == 10], "\n")
+cat("Fires contributing at rel_year =  0:", event_mean$n_fires[event_mean$rel_year == 0],  "\n")
+cat("Fires contributing at rel_year = -5:", event_mean$n_fires[event_mean$rel_year == -5], "\n")
+cat("Fires contributing at rel_year = +10:", event_mean$n_fires[event_mean$rel_year == 10], "\n")
 
 p6 <- ggplot(event_mean, aes(x = rel_year, y = mean_nbr)) +
   geom_ribbon(aes(ymin = mean_nbr - se_nbr, ymax = mean_nbr + se_nbr),
               fill = "#d73027", alpha = 0.2) +
   geom_line(color = "#d73027", linewidth = 1) +
   geom_point(color = "#d73027", size = 2.5) +
-  geom_vline(xintercept = 0,
-             linetype = "dashed", linewidth = 0.9, color = "grey30") +
+  geom_vline(xintercept = 0, linetype = "dashed", linewidth = 0.9, color = "grey30") +
   annotate("text", x = 0.2, y = Inf, vjust = 1.5, hjust = 0,
            label = "Fire year", color = "grey30", size = 3.5) +
   scale_x_continuous(
@@ -897,11 +1180,7 @@ p6 <- ggplot(event_mean, aes(x = rel_year, y = mean_nbr)) +
     subtitle = "Event-study window: −5 to +10 years relative to fire ignition",
     x        = "Years relative to fire",
     y        = "Mean NBR (display scale)",
-    caption  = paste(
-      "Each fire contributes one trajectory centered on its ignition year.",
-      "Shaded band = ± 1 SE.",
-      "Source: USGS MTBS + Landsat via Google Earth Engine."
-    )
+    caption  = "Each fire contributes one trajectory centered on its ignition year. Shaded band = ± 1 SE. Source: USGS MTBS + Landsat via Google Earth Engine."
   ) +
   theme_minimal(base_size = 12) +
   theme(
@@ -922,7 +1201,7 @@ stopifnot("CI should not be wider than ± 0.5 NBR" =
 ggsave(here("figures/biomass_before_after_fire.png"),
        plot = p6, width = 10, height = 6, dpi = 300, bg = "white")
 img_dims <- dim(png::readPNG(here("figures/biomass_before_after_fire.png")))
-cat("Plot 6 saved — dimensions (px):", img_dims[2], "x", img_dims[1], "\n")
+cat("Plot 4.2 saved — dimensions (px):", img_dims[2], "x", img_dims[1], "\n")
 ```
 
 ---
