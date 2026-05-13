@@ -30,7 +30,31 @@
       "WebFetch(domain:daac.ornl.gov)",
       "WebFetch(domain:data.ornldaac.earthdata.nasa.gov)",
       "WebFetch(domain:lemma.forestry.oregonstate.edu)",
-      "WebFetch(domain:lemmadownload.forestry.oregonstate.edu)"
+      "WebFetch(domain:lemmadownload.forestry.oregonstate.edu)",
+      "WebFetch(domain:github.com)",
+      "WebFetch(domain:iopscience.iop.org)",
+      "Bash(Get-ChildItem -Path \"C:\\\\Users\\\\shaht\\\\Documents\\\\Projects\\\\BACI_local\\\\BACI\\\\analysis\" -Directory)",
+      "Bash(Select-Object Name)",
+      "WebFetch(domain:app.earthmover.io)",
+      "WebFetch(domain:ctrees.org)",
+      "WebFetch(domain:docs.earthmover.io)",
+      "Bash(C:\\\\Users\\\\shaht\\\\anaconda3\\\\python.exe *)",
+      "PowerShell(& \"C:\\\\Users\\\\shaht\\\\anaconda3\\\\python.exe\" -c \"import sys; print\\('Executable:', sys.executable\\); print\\('Version:', sys.version\\)\")",
+      "PowerShell(& \"C:\\\\Users\\\\shaht\\\\anaconda3\\\\Scripts\\\\conda.exe\" env list)",
+      "PowerShell(& \"C:\\\\Users\\\\shaht\\\\anaconda3\\\\envs\\\\wildfire\\\\python.exe\" -c \"import sys; print\\('Version:', sys.version\\); import pkg_resources; pkgs = ['earthengine-api', 'geemap', 'geopandas', 'zarr', 'arraylake', 'xarray']; [print\\(p, ':', pkg_resources.get_distribution\\(p\\).version\\) if p in {d.project_name for d in pkg_resources.working_set} else print\\(p, ': NOT INSTALLED'\\) for p in pkgs]\")",
+      "PowerShell(& \"C:\\\\Users\\\\shaht\\\\anaconda3\\\\Scripts\\\\conda.exe\" run -n wildfire pip list)",
+      "Bash(Get-ChildItem -Force)",
+      "Bash(Select-Object Name, PSIsContainer)",
+      "Bash(Get-ChildItem \"C:\\\\Users\\\\shaht\\\\Documents\\\\Projects\\\\BACI_local\\\\BACI\\\\data\\\\raw\\\\emapr_biomass\" -Recurse)",
+      "Bash(Select-Object FullName, Length, LastWriteTime)",
+      "Bash(Format-Table -AutoSize)",
+      "PowerShell(Get-ChildItem \"C:\\\\Users\\\\shaht\\\\Documents\\\\Projects\\\\BACI_local\\\\BACI\\\\data\\\\raw\\\\emapr_biomass\" -Recurse | Select-Object FullName, @{N='SizeMB';E={[math]::Round\\($_.Length/1MB,1\\)}}, LastWriteTime | Format-Table -AutoSize)",
+      "PowerShell(Get-ChildItem \"C:\\\\Users\\\\shaht\\\\Documents\\\\Projects\\\\BACI_local\\\\BACI\\\\data\" -Recurse | Select-Object FullName, @{N='SizeMB';E={[math]::Round\\($_.Length/1MB,1\\)}} | Format-Table -AutoSize)",
+      "PowerShell(cmd /c \"dir C:\\\\Users\\\\shaht\\\\Documents\\\\Projects\\\\BACI_local\\\\BACI\\\\output\\\\\")",
+      "PowerShell(& \"C:\\\\Users\\\\shaht\\\\anaconda3\\\\python.exe\" \"C:\\\\Users\\\\shaht\\\\Documents\\\\Projects\\\\BACI_local\\\\BACI\\\\scripts\\\\python\\\\03_download_ctrees_ca.py\" 2>&1)",
+      "PowerShell(& \"C:\\\\Users\\\\shaht\\\\anaconda3\\\\python.exe\" -c \"import rasterio; print\\(rasterio.__version__\\)\")",
+      "PowerShell(Get-Command *)",
+      "PowerShell(ls \"C:\\\\Program Files\\\\Quarto\" -ErrorAction SilentlyContinue; ls \"$env:LOCALAPPDATA\\\\Programs\\\\Quarto\" -ErrorAction SilentlyContinue; ls \"C:\\\\Users\\\\shaht\\\\AppData\\\\Local\\\\Programs\\\\Quarto\" -ErrorAction SilentlyContinue)"
     ]
   }
 }
