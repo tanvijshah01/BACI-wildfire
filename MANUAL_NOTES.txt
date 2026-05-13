@@ -1,0 +1,14 @@
+26.5.12
+
+Biomass outcome variable
+
+eMapR biomass
+- eMapR has download through GUI - must select grid cell and one year (tedious for our purposes)
+- direct download through GEE --> NBR --> must run through a model to get biomass (different approaches)
+- approach for now: just download all years, for a given region /state. 
+
+
+Ctrees biomass
+- filter to one state, for all years
+- compare to eMapR
+

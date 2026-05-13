@@ -1,0 +1,363 @@
+# =============================================================================
+# 03_download_ctrees_ca.py
+# Download Ctrees aboveground biomass data for California from the
+# ucsb-emlab/BACI-wildfires arraylake zarr store.
+#
+# SCRIPT OUTLINE
+# 1.  Setup — connect to arraylake, define parameters
+# 2.  Open zarr store and resolve CA bounding-box indices
+# 3.  Part A — Coarsened CA raster (for R mapping)
+#       Load CA data year-by-year, coarsen to ~1 km, save as NetCDF
+# 4.  Part B — Fire polygon extraction (for R event-study / DiD)
+#       Precompute rasterized polygon masks once; then extract mean AGB
+#       per fire × year using pure numpy indexing (no shapely per year).
+# 5.  Sanity checks on both outputs
+#
+# OUTPUTS
+#   output/ctrees_biomass_ca_1km.nc    — coarsened CA raster, 26 years
+#   output/biomass_fire_polygons_ctrees.csv — long panel: event_id × year × agb
+#
+# EXTRACTION METHOD (Part B)
+#   Two approaches were evaluated:
+#
+#   Approach 1 — Shapely point-in-polygon with grid thinning (abandoned):
+#     For each fire × year, build a meshgrid of pixel centres in the fire
+#     bounding box and call shapely.within() on each point. Large CA fires
+#     (e.g. August Complex, ~1M acres) have bounding boxes with millions of
+#     pixels, causing memory explosion and multi-hour runtimes even after
+#     thinning the grid to ≤80,000 test points. The thinning also introduces
+#     a sampling approximation that misses pixels at the polygon boundary.
+#
+#   Approach 2 — Rasterio scanline rasterization + precomputed masks (current):
+#     For each fire polygon, rasterio.features.rasterize() burns the polygon
+#     onto a boolean grid aligned to the CA pixel grid. This is O(pixels) via
+#     a C-level scanline algorithm — no sampling approximation, and 10-50x
+#     faster than shapely point-in-polygon for large polygons. Masks are
+#     precomputed once for all 1,064 fires before the year loop, so the
+#     26-year extraction becomes pure numpy array indexing with zero
+#     shapely/rasterio overhead per year. Falls back to matplotlib.path
+#     (C extension, vectorised) if rasterio is unavailable.
+#
+# DATASET NOTES (from 02_explore_ctrees_zarr.py)
+#   - Group:        aboveground_biomass/
+#   - Variable:     agb  shape=(26, 202500, 405000)  dtype=int16
+#   - Coordinates:  time (2000-2025), x (lon), y (lat, descending 90 to -90)
+#   - Scale factor: divide stored int16 by 10 to get Mg ha^-1
+#   - Fill value:   -9999
+#   - CRS:          WGS84 / EPSG:4326
+#   - Resolution:   ~0.000889 degrees ~= 100 m
+# =============================================================================
+
+# --- 1. SETUP -----------------------------------------------------------------
+import sys
+sys.stdout.reconfigure(encoding="utf-8")
+
+from arraylake import Client
+import zarr
+import numpy as np
+import pandas as pd
+import geopandas as gpd
+import xarray as xr
+import netCDF4          # required by xarray for NetCDF write
+import shapely
+from pathlib import Path
+
+# Try rasterio for fast scanline polygon rasterization
+try:
+    import rasterio.features
+    from rasterio.transform import from_origin as _rio_from_origin
+    USE_RASTERIO = True
+except ImportError:
+    from matplotlib.path import Path as MplPath
+    USE_RASTERIO = False
+
+PROJ_ROOT   = Path(__file__).resolve().parent.parent.parent
+OUT_NC      = PROJ_ROOT / "output" / "ctrees_biomass_ca_1km.nc"
+OUT_CSV     = PROJ_ROOT / "output" / "biomass_fire_polygons_ctrees.csv"
+MTBS_PATH   = PROJ_ROOT / "data" / "raw" / "mtbs" / "mtbs_perimeter_data" / "mtbs_perims_DD.shp"
+
+# -- Ctrees zarr parameters (from exploration script) -------------------------
+REPO_NAME    = "ucsb-emlab/BACI-wildfires"
+BRANCH       = "main"
+GROUP        = "aboveground_biomass"
+VAR          = "agb"
+SCALE_FACTOR = 10.0     # divide stored int16 by 10 -> Mg ha^-1
+FILL_VALUE   = -9999
+
+# -- California bounding box (WGS84 degrees) ----------------------------------
+CA_LON = (-124.5, -114.1)
+CA_LAT = (32.5, 42.0)
+
+# -- Coarsening factor: 11 x 0.000889 deg ~= 0.0098 deg ~= 1.1 km -----------
+COARSEN = 11
+
+# -- MTBS filter --------------------------------------------------------------
+MTBS_START = 2000
+MTBS_END   = 2025    # match Ctrees temporal range
+
+OUT_NC.parent.mkdir(parents=True, exist_ok=True)
+
+
+def coarsen_block(arr2d, factor):
+    """Block-average a 2D numpy array by `factor` in each dimension."""
+    ny, nx = arr2d.shape
+    ny_c, nx_c = ny // factor, nx // factor
+    arr2d = arr2d[: ny_c * factor, : nx_c * factor]
+    return arr2d.reshape(ny_c, factor, nx_c, factor).mean(axis=(1, 3))
+
+
+def precompute_mask(geom, x_arr, y_arr, res):
+    """
+    Rasterize a polygon onto the CA pixel grid; return (yi, xi, mask_2d).
+
+    Uses rasterio.features.rasterize() for fast C-level scanline rasterization
+    (O(pixels), no sampling approximation). Falls back to matplotlib.path if
+    rasterio is not available. Handles MultiPolygon by unioning sub-polygon
+    masks. Returns None when the polygon does not overlap the grid.
+
+    Called once per fire before the year loop; the returned mask is reused
+    across all 26 years using numpy array indexing (no shapely per year).
+
+    Parameters
+    ----------
+    geom  : shapely geometry (Polygon or MultiPolygon), WGS84
+    x_arr : 1D float64 array — x (lon) pixel centres, ascending
+    y_arr : 1D float64 array — y (lat) pixel centres, descending (N first)
+    res   : float — pixel spacing in degrees (~0.000889)
+    """
+    xmin, ymin, xmax, ymax = geom.bounds
+
+    xi = np.where((x_arr >= xmin) & (x_arr <= xmax))[0]
+    yi = np.where((y_arr >= ymin) & (y_arr <= ymax))[0]
+
+    if xi.size == 0 or yi.size == 0:
+        return None
+
+    height, width = len(yi), len(xi)
+
+    if USE_RASTERIO:
+        # from_origin(west, north, xsize, ysize): west/north are the top-left
+        # corner of the top-left pixel.  y_arr is descending so yi[0] is the
+        # northernmost row.
+        west  = float(x_arr[xi[0]]) - res / 2
+        north = float(y_arr[yi[0]]) + res / 2
+        transform = _rio_from_origin(west, north, res, res)
+        mask = rasterio.features.rasterize(
+            [(geom, 1)],
+            out_shape=(height, width),
+            transform=transform,
+            fill=0,
+            dtype=np.uint8,
+        ).astype(bool)
+    else:
+        # matplotlib.path fallback: vectorised C extension, O(pixels x edges).
+        # Thin the pixel grid if the bounding box exceeds MAX_FALLBACK points —
+        # masks are precomputed once so a generous cap (500k) keeps accuracy
+        # high while preventing multi-minute hangs on 1M-acre fires.
+        MAX_FALLBACK = 500_000
+        n_bbox = height * width
+        if n_bbox > MAX_FALLBACK:
+            step = max(1, int(np.ceil(np.sqrt(n_bbox / MAX_FALLBACK))))
+            xi = xi[::step]
+            yi = yi[::step]
+            height, width = len(yi), len(xi)
+
+        X_grid, Y_grid = np.meshgrid(x_arr[xi], y_arr[yi])
+        pts = np.column_stack([X_grid.ravel(), Y_grid.ravel()])
+
+        if geom.geom_type == "MultiPolygon":
+            in_poly = np.zeros(len(pts), dtype=bool)
+            for part in geom.geoms:
+                in_poly |= MplPath(np.array(part.exterior.coords)).contains_points(pts)
+        else:
+            in_poly = MplPath(np.array(geom.exterior.coords)).contains_points(pts)
+        mask = in_poly.reshape(height, width)
+
+    if not mask.any():
+        return None
+
+    return yi, xi, mask
+
+
+# --- 2. CONNECT TO ARRAYLAKE & RESOLVE CA INDICES ----------------------------
+print("Connecting to arraylake...", flush=True)
+try:
+    client  = Client()
+    repo    = client.get_repo(REPO_NAME)
+    session = repo.readonly_session(branch=BRANCH)
+    root    = zarr.open_group(session.store, zarr_format=3, mode="r")
+    print("  Connected.", flush=True)
+except Exception as e:
+    print(f"ERROR: {e}\nRun `arraylake auth login` and retry.")
+    sys.exit(1)
+
+agb_zarr = root[f"{GROUP}/{VAR}"]     # (26, 202500, 405000), int16
+time_raw = root[f"{GROUP}/time"][:]   # datetime64[D]
+x_all    = root[f"{GROUP}/x"][:]      # ascending, -180 to +180
+y_all    = root[f"{GROUP}/y"][:]      # descending, 90 to -90
+
+n_years = agb_zarr.shape[0]
+times   = pd.DatetimeIndex(time_raw.astype("datetime64[ns]"))
+years   = times.year.tolist()
+
+# CA index slices (y is descending so north-side has smaller index)
+x_mask = (x_all >= CA_LON[0]) & (x_all <= CA_LON[1])
+y_mask = (y_all >= CA_LAT[0]) & (y_all <= CA_LAT[1])
+
+x_idx  = np.where(x_mask)[0];  x_start, x_end = int(x_idx[0]), int(x_idx[-1]) + 1
+y_idx  = np.where(y_mask)[0];  y_start, y_end = int(y_idx[0]), int(y_idx[-1]) + 1
+
+x_ca = x_all[x_idx]   # ascending
+y_ca = y_all[y_idx]   # descending (northernmost first)
+
+print(f"  CA subset: {y_end - y_start} rows x {x_end - x_start} cols x {n_years} years")
+print(f"  Lat range: {y_ca.min():.3f} - {y_ca.max():.3f}")
+print(f"  Lon range: {x_ca.min():.3f} - {x_ca.max():.3f}")
+print(f"  Extraction backend: {'rasterio.features' if USE_RASTERIO else 'matplotlib.path (fallback)'}")
+
+
+# --- 3. PART A — COARSENED CA RASTER -----------------------------------------
+if OUT_NC.exists():
+    print(f"\nPart A: {OUT_NC.name} already exists — skipping.")
+else:
+    print(f"\nPart A: Building coarsened (~1 km) CA raster -> {OUT_NC.name}")
+    coarsened_layers = []
+
+    for t_idx, (yr, ts) in enumerate(zip(years, times)):
+        raw = agb_zarr[t_idx, y_start:y_end, x_start:x_end].astype("float32")
+        raw[raw == FILL_VALUE] = np.nan
+        raw /= SCALE_FACTOR                          # -> Mg ha^-1
+        coarsened_layers.append(coarsen_block(raw, COARSEN))
+
+        print(f"  {t_idx + 1}/{n_years} years processed ({yr})", flush=True)
+
+    # Build coarsened coordinate arrays
+    ny_c, nx_c = coarsened_layers[0].shape
+    x_c = x_ca[: nx_c * COARSEN].reshape(nx_c, COARSEN).mean(axis=1)
+    y_c = y_ca[: ny_c * COARSEN].reshape(ny_c, COARSEN).mean(axis=1)
+
+    agb_stack = np.stack(coarsened_layers, axis=0)   # (26, ny_c, nx_c)
+
+    ds_out = xr.Dataset(
+        {"agb": (["time", "y", "x"], agb_stack.astype("float32"))},
+        coords={
+            "time": times.values,
+            "y":    ("y", y_c),
+            "x":    ("x", x_c),
+        },
+        attrs={
+            "title":        "Ctrees aboveground biomass — California ~1 km",
+            "source":       "ucsb-emlab/BACI-wildfires (arraylake)",
+            "units":        "Mg ha-1",
+            "scale_note":   "Coarsened to ~1 km by block-averaging native 100 m pixels",
+            "crs":          "EPSG:4326 (WGS84)",
+        }
+    )
+    ds_out["agb"].attrs.update({"units": "Mg ha-1", "long_name": "Aboveground Biomass",
+                                "_FillValue": -9999.0})
+
+    encoding = {"agb": {"dtype": "float32", "zlib": True, "complevel": 4}}
+    ds_out.to_netcdf(OUT_NC, encoding=encoding)
+    print(f"  Saved: {OUT_NC}  ({OUT_NC.stat().st_size / 1e6:.1f} MB)")
+
+
+# --- 4. PART B — FIRE POLYGON EXTRACTION -------------------------------------
+if OUT_CSV.exists():
+    print(f"\nPart B: {OUT_CSV.name} already exists — skipping.")
+else:
+    print(f"\nPart B: Extracting AGB within MTBS CA fire polygons -> {OUT_CSV.name}")
+    assert MTBS_PATH.exists(), f"MTBS shapefile not found: {MTBS_PATH}"
+
+    # -- Load and filter MTBS California wildfires ----------------------------
+    mtbs_raw = gpd.read_file(MTBS_PATH)
+    mtbs_raw.columns = [c.lower() for c in mtbs_raw.columns]
+    mtbs_raw["fire_year"] = mtbs_raw["ig_date"].str[:4].astype(int)
+
+    mtbs_ca = (mtbs_raw
+               .loc[mtbs_raw["incid_type"] == "Wildfire"]
+               .loc[mtbs_raw["fire_year"].between(MTBS_START, MTBS_END)]
+               .loc[mtbs_raw["event_id"].str[:2] == "CA"]
+               .to_crs("EPSG:4326")
+               .reset_index(drop=True))
+
+    print(f"  CA wildfires in MTBS ({MTBS_START}-{MTBS_END}): {len(mtbs_ca)}", flush=True)
+    assert len(mtbs_ca) > 0, "No CA wildfires found — check MTBS path and filters"
+
+    # -- Precompute polygon masks (once per fire, reused across 26 years) -----
+    # This is the key optimisation: rasterize each polygon onto the CA pixel
+    # grid a single time, storing (row_indices, col_indices, boolean_mask).
+    # The year loop then uses only numpy indexing — no shapely or rasterio work.
+    RES = float(abs(x_ca[1] - x_ca[0]))   # ~0.000889 degrees
+
+    print(f"  Precomputing {len(mtbs_ca)} polygon masks...", flush=True)
+    fire_masks = []
+    for _, fire in mtbs_ca.iterrows():
+        fire_masks.append((fire, precompute_mask(fire.geometry, x_ca, y_ca, RES)))
+
+    n_with_mask = sum(1 for _, m in fire_masks if m is not None)
+    print(f"  {n_with_mask}/{len(mtbs_ca)} fire polygons overlap the CA raster grid", flush=True)
+
+    # -- Extract year by year using precomputed masks -------------------------
+    records = []
+    errors  = []
+
+    for t_idx, (yr, ts) in enumerate(zip(years, times)):
+        # One zarr read per year (the only I/O in this loop)
+        raw = agb_zarr[t_idx, y_start:y_end, x_start:x_end].astype("float32")
+        raw[raw == FILL_VALUE] = np.nan
+        raw /= SCALE_FACTOR   # -> Mg ha^-1
+
+        for fire, mask_result in fire_masks:
+            if mask_result is None:
+                mean_agb = np.nan
+            else:
+                yi, xi, mask = mask_result
+                vals = raw[np.ix_(yi, xi)][mask]
+                if vals.size > 0 and not np.all(np.isnan(vals)):
+                    mean_agb = float(np.nanmean(vals))
+                else:
+                    mean_agb = np.nan
+
+            records.append({
+                "event_id":      fire["event_id"],
+                "fire_year":     fire["fire_year"],
+                "year":          yr,
+                "agb_mean_mgha": round(mean_agb, 2) if not np.isnan(mean_agb) else np.nan,
+            })
+
+        print(f"  {t_idx + 1}/{n_years} years processed ({yr})", flush=True)
+
+    df = pd.DataFrame(records)
+    df.to_csv(OUT_CSV, index=False)
+    print(f"  Saved: {OUT_CSV}  ({len(df):,} records)")
+
+    if errors:
+        print(f"  WARNING: {len(errors)} extraction errors (first 3):")
+        for e in errors[:3]:
+            print(f"    {e}")
+
+
+# --- 5. SANITY CHECKS --------------------------------------------------------
+print("\nSanity checks...")
+
+# Part A
+ds_check = xr.open_dataset(OUT_NC)
+assert "agb" in ds_check, "NetCDF missing 'agb' variable"
+assert len(ds_check.time) == n_years, f"Expected {n_years} time steps"
+agb_vals = ds_check["agb"].values
+pct_valid = 100 * np.sum(~np.isnan(agb_vals)) / agb_vals.size
+print(f"  NetCDF: {len(ds_check.time)} years, "
+      f"{ds_check.dims['y']} x {ds_check.dims['x']} pixels, "
+      f"{pct_valid:.1f}% valid")
+assert pct_valid > 10, "Less than 10% valid pixels — check CA bbox or fill masking"
+
+# Part B
+df_check = pd.read_csv(OUT_CSV)
+assert {"event_id", "fire_year", "year", "agb_mean_mgha"}.issubset(df_check.columns)
+pct_valid_csv = 100 * df_check["agb_mean_mgha"].notna().mean()
+print(f"  CSV: {df_check['event_id'].nunique()} fires x {df_check['year'].nunique()} years "
+      f"= {len(df_check):,} records, {pct_valid_csv:.1f}% with valid AGB")
+if pct_valid_csv < 50:
+    print("  WARNING: <50% valid — check polygon alignment with Ctrees grid")
+
+print("\nDone. Outputs ready for analysis/02_ctrees_biomass_exploration.qmd")

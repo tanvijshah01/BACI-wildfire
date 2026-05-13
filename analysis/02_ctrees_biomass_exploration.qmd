@@ -1,0 +1,497 @@
+---
+title: "EDA: Ctrees Aboveground Biomass — California"
+subtitle: "Plot A — CA biomass trend | Plot B — Spatial map | Plot C — Before/after fire"
+date: today
+format:
+  html:
+    embed-resources: true
+    toc: true
+    toc-depth: 3
+    code-fold: true
+    fig-width: 10
+    fig-height: 6
+    theme: flatly
+execute:
+  warning: false
+  message: false
+  cache: false
+---
+
+```{r outline}
+# =============================================================================
+# SCRIPT OUTLINE
+# 1.  Setup — packages, paths, study parameters
+# 2.  Load and validate CA biomass raster (ctrees_biomass_ca_1km.nc)
+# 3.  Plot A — Mean annual AGB across CA over time (line graph)
+# 4.  Plot B — Spatial maps of AGB for 2000, 2020, and 2025
+# 5.  Load and validate fire polygon panel (biomass_fire_polygons_ctrees.csv)
+# 6.  Plot C — Before/after fire event study (−10 to +15 years)
+# 7.  Summary table
+# =============================================================================
+```
+
+## 1. Setup
+
+```{r setup}
+.install_if_missing <- function(pkgs) {
+  missing <- pkgs[!pkgs %in% rownames(installed.packages())]
+  if (length(missing) > 0) {
+    message("Installing: ", paste(missing, collapse = ", "))
+    install.packages(missing, repos = "https://cloud.r-project.org", quiet = TRUE)
+  }
+}
+.install_if_missing(c(
+  "tidyverse", "sf", "terra", "here", "scales", "glue",
+  "ggspatial", "patchwork", "png", "tigris"
+))
+# ggspatial loaded but not used in Sections 1-4 (annotation_scale/north_arrow
+# require coord_sf, which conflicts with geom_raster — deferred to Section 6+)
+
+library(tidyverse)
+library(sf)
+library(terra)
+library(here)
+library(scales)
+library(glue)
+library(ggspatial)
+library(patchwork)
+library(tigris)
+
+sf_use_s2(FALSE)   # GEOS planar geometry — needed for MTBS self-touching edges
+options(tigris_use_cache = TRUE)
+
+here::i_am("analysis/02_ctrees_biomass_exploration.qmd")
+
+# ── Study parameters ──────────────────────────────────────────────────────────
+EVENT_WINDOW <- c(-10, 15)   # years relative to fire for event study
+MAP_YEAR     <- 2020          # year to display in spatial map (Plot B)
+CRS_ALBERS   <- "EPSG:5070"  # Albers Equal Area for Western US maps
+
+# ── Paths ─────────────────────────────────────────────────────────────────────
+NC_PATH   <- here("output", "ctrees_biomass_ca_1km.nc")
+CSV_PATH  <- here("output", "biomass_fire_polygons_ctrees.csv")
+MTBS_PATH <- here("data", "raw", "mtbs", "mtbs_perimeter_data", "mtbs_perims_DD.shp")
+
+dir.create(here("figures"), showWarnings = FALSE)
+
+stopifnot(
+  "NetCDF not found — run scripts/python/03_download_ctrees_ca.py first" =
+    file.exists(NC_PATH)
+)
+```
+
+---
+
+## 2. Load and Validate CA Biomass Raster
+
+**Source:** Ctrees AGB, `ucsb-emlab/BACI-wildfires` (arraylake zarr store). Units: Mg ha⁻¹.
+
+**Spatial resolution — three levels:**
+
+| Stage | Resolution | How |
+|---|---|---|
+| Native Ctrees (zarr) | ~100 m (~0.000889°) | Landsat-based, WGS84 pixel grid |
+| `ctrees_biomass_ca_1km.nc` (this file) | ~1.1 km (~0.00978°) | Block-averaged 11×11 native pixels in `03_download_ctrees_ca.py` (`COARSEN = 11`) |
+| Plot B display raster | ~3.3 km (~0.0294°) | Additional 3× block-average in R (`terra::aggregate(..., fact = 3)`), for rendering only |
+
+**Why downsample from 100 m to 1.1 km?** The native CA raster is ~10,700 × 11,700 pixels per year. Loading 26 years of that in R would require several GB of RAM. The 11× block-average reduces the grid to ~971 × 1,063 pixels per year — each output pixel is the mean AGB of the 121 underlying 100 m pixels it covers. At 1.1 km, the raster is still fine-grained enough to resolve individual fire polygons (MTBS's smallest fires are ~1,000 acres ≈ 2×2 km).
+
+**Why the extra 3× in Plot B?** Plots A and C are computed from the 1.1 km NC file directly and are unaffected by this step. Plot B is a map image rendered to PNG, and `terra::plot()` of a 971 × 1,063 raster is slightly slower than needed for a display-only figure. The 3× aggregate (→ 323 × 354 pixels) speeds up rendering with no scientific consequence — it does not change what the map shows.
+
+```{r load-raster}
+agb <- terra::rast(NC_PATH)
+
+# The NC file lacks CF standard_name/units on the "x"/"y" coordinate variables,
+# so terra reads them as generic pixel indices (0 to ~1062) rather than lon/lat.
+# Labeling that index-space raster as EPSG:4326 and then masking with a lon/lat
+# polygon (−124 to −114°) silently returns all-NA because the polygon lies entirely
+# outside the 0–1062 index range. Always force the correct CA bbox to fix this;
+# pixel values are unchanged by the extent assignment.
+terra::ext(agb) <- c(-124.5, -114.1, 32.5, 42.0)
+terra::crs(agb) <- "EPSG:4326"
+
+# ── Extract year labels from time dimension ────────────────────────────────────
+agb_times <- terra::time(agb)
+if (!is.null(agb_times) && !all(is.na(agb_times))) {
+  rast_years <- as.integer(format(agb_times, "%Y"))
+} else {
+  # Fallback: parse from layer names
+  rast_years <- as.integer(
+    stringr::str_extract(names(agb), "\\d{4}")
+  )
+}
+
+n_years <- terra::nlyr(agb)
+cat("Layers (years):  ", n_years, "\n")
+cat("Year range:      ", min(rast_years), "–", max(rast_years), "\n")
+cat("Spatial extent:  ", paste(round(as.vector(terra::ext(agb)), 2), collapse = ", "), "\n")
+cat("Resolution (°):  ", round(terra::res(agb), 5), "\n")
+
+# ── Sanity checks ─────────────────────────────────────────────────────────────
+stopifnot("Expected 26 annual layers" = n_years == 26)
+stopifnot("Year range must include 2000–2025" =
+    all(c(2000, 2025) %in% rast_years))
+
+# Spot-check one layer: biomass values should be positive and plausible for CA forests
+sample_vals <- terra::values(agb[[which(rast_years == 2010)]], na.rm = TRUE)
+pct_valid   <- mean(!is.na(terra::values(agb[[1]]))) * 100
+
+cat("Valid pixels (layer 1):  ", round(pct_valid, 1), "%\n")
+cat("AGB range (2010 layer):  ",
+    round(min(sample_vals, na.rm = TRUE), 1), "–",
+    round(max(sample_vals, na.rm = TRUE), 1), "Mg ha-1\n")
+
+stopifnot("AGB values should be positive" =
+    median(sample_vals, na.rm = TRUE) > 0)
+stopifnot("AGB median should not exceed 1000 Mg ha-1 (implausible)" =
+    median(sample_vals, na.rm = TRUE) < 1000)
+```
+
+---
+
+## Plot A — Mean Annual AGB Across California (2000–2025)
+
+Mean and SE of AGB across all valid CA pixels for each year, from the ~1 km coarsened raster.
+
+```{r plot-a-trend}
+# Compute mean and SD per layer (terra::global is vectorised across layers)
+global_stats <- terra::global(agb, fun = c("mean", "sd"), na.rm = TRUE)
+global_stats <- global_stats |>
+  mutate(
+    year    = rast_years,
+    se      = sd / sqrt(terra::ncell(agb[[1]]) * pct_valid / 100)
+  )
+
+# Sanity checks
+stopifnot("Annual means must not be all NA" =
+    !all(is.na(global_stats$mean)))
+stopifnot("Annual means must be positive" =
+    all(global_stats$mean > 0, na.rm = TRUE))
+
+pA <- ggplot(global_stats, aes(x = year, y = mean)) +
+  geom_ribbon(aes(ymin = mean - se, ymax = mean + se),
+              fill = "#2c7bb6", alpha = 0.25) +
+  geom_line(color = "#2c7bb6", linewidth = 1) +
+  geom_point(color = "#2c7bb6", size = 2.5) +
+  geom_smooth(method = "lm", se = FALSE,
+              color = "black", linetype = "dashed", linewidth = 0.7) +
+  scale_x_continuous(breaks = seq(2000, 2025, by = 2)) +
+  scale_y_continuous(labels = number_format(accuracy = 0.1)) +
+  labs(
+    title    = "Mean Annual Aboveground Biomass — California (2000–2025)",
+    subtitle = "Ctrees AGB (~1 km pixel means across all valid CA pixels)",
+    x        = "Year",
+    y        = "Mean AGB (Mg ha⁻¹)",
+    caption  = paste(
+      "Source: Ctrees, ucsb-emlab/BACI-wildfires (arraylake).",
+      "Shaded band = ± 1 SE. Dashed line = linear trend."
+    )
+  ) +
+  theme_minimal(base_size = 12) +
+  theme(
+    plot.title       = element_text(face = "bold", size = 14),
+    plot.subtitle    = element_text(color = "grey40", size = 11),
+    plot.caption     = element_text(color = "grey50", size = 9),
+    panel.grid.minor = element_blank(),
+    axis.text        = element_text(size = 10)
+  )
+
+print(pA)
+
+ggsave(here("figures/ctrees_biomass_trend_ca.png"),
+       plot = pA, width = 10, height = 6, dpi = 300, bg = "white")
+img_dims <- dim(png::readPNG(here("figures/ctrees_biomass_trend_ca.png")))
+cat("Plot A saved — dimensions (px):", img_dims[2], "x", img_dims[1], "\n")
+```
+
+---
+
+## Plot B — Spatial Maps of AGB (2000, 2020, 2025)
+
+Three snapshots spanning the full temporal range of the dataset, rendered on a shared
+color scale so biomass levels are visually comparable across years.
+
+```{r plot-b-map}
+# ── CA boundary (computed once, reused for all three maps) ───────────────────
+ca_boundary <- tigris::states(cb = TRUE, year = 2022) |>
+  filter(STUSPS == "CA") |>
+  st_transform("EPSG:4326")
+ca_vect <- terra::vect(ca_boundary)
+
+# ── Helper: aggregate, mask to CA, save PNG, return path ─────────────────────
+make_agb_map <- function(yr, agb_raster, rast_years, ca_vect, agb_upper) {
+  idx <- which(rast_years == yr)
+  if (length(idx) == 0) {
+    warning(glue("Year {yr} not found in raster — skipping")); return(NULL)
+  }
+  lyr <- terra::aggregate(agb_raster[[idx]], fact = 3, fun = "mean", na.rm = TRUE)
+
+  # Rasterize CA polygon onto the display grid, then apply raster-on-raster mask
+  ca_mask <- terra::rasterize(ca_vect, lyr, field = 1, background = NA)
+  lyr     <- terra::mask(lyr, ca_mask)
+
+  n_valid <- sum(!is.na(terra::values(lyr)))
+  if (n_valid == 0) stop(glue("Year {yr}: mask returned all-NA — check raster extent"))
+
+  fpath <- here("figures", glue("ctrees_biomass_map_{yr}.png"))
+  png(fpath, width = 8, height = 9, units = "in", res = 300, bg = "white")
+  terra::plot(
+    lyr,
+    col      = hcl.colors(100, "viridis"),
+    range    = c(0, agb_upper),
+    main     = glue("Aboveground Biomass — California ({yr})"),
+    plg      = list(title = "AGB (Mg/ha)", title.cex = 0.85, cex = 0.75),
+    mar      = c(3, 3, 4, 7),
+    cex.main = 1.1
+  )
+  terra::plot(ca_vect, add = TRUE, col = NA, border = "grey20", lwd = 0.6)
+  mtext(
+    "Source: Ctrees, ucsb-emlab/BACI-wildfires (arraylake). CRS: EPSG:4326.",
+    side = 1, line = 1.8, cex = 0.65, col = "grey50"
+  )
+  dev.off()
+  fpath
+}
+
+# ── Shared color scale: 99th pct of forested pixels across all three years ───
+# Using a shared scale means the same color represents the same AGB value in
+# all three maps, making change over time directly readable.
+map_years <- c(2000, MAP_YEAR, 2025)
+all_nonzero <- unlist(lapply(map_years, function(yr) {
+  idx <- which(rast_years == yr)
+  v   <- terra::values(agb[[idx]], na.rm = TRUE)
+  v[v > 0]
+}))
+agb_upper <- quantile(all_nonzero, 0.99)
+cat("Shared color scale: 0 –", round(agb_upper, 1),
+    "Mg/ha (99th pct of forested pixels across 2000/", MAP_YEAR, "/2025)\n")
+
+# ── Render all three maps ─────────────────────────────────────────────────────
+map_paths <- lapply(map_years, make_agb_map,
+                    agb_raster  = agb,
+                    rast_years  = rast_years,
+                    ca_vect     = ca_vect,
+                    agb_upper   = agb_upper)
+
+for (p in map_paths) {
+  img_dims <- dim(png::readPNG(p))
+  cat("Saved:", basename(p), "— dimensions (px):", img_dims[2], "x", img_dims[1], "\n")
+}
+```
+
+```{r plot-b-2000, fig.cap="CA AGB — 2000 (first year)"}
+knitr::include_graphics(map_paths[[1]])
+```
+
+```{r plot-b-2020, fig.cap=glue("CA AGB — {MAP_YEAR}")}
+knitr::include_graphics(map_paths[[2]])
+```
+
+```{r plot-b-2025, fig.cap="CA AGB — 2025 (last year)"}
+knitr::include_graphics(map_paths[[3]])
+```
+
+---
+
+## 5. Load and Validate Fire Polygon Panel
+
+The `biomass_fire_polygons_ctrees.csv` was produced by `scripts/python/03_download_ctrees_ca.py`,
+which extracted mean AGB within each MTBS California wildfire polygon for each year 2000–2025.
+
+::: callout-note
+**Extraction methodology — rasterio scanline rasterization with precomputed masks**
+
+Two approaches were evaluated for extracting pixel values within fire polygons:
+
+**Approach 1 — Shapely point-in-polygon with grid thinning (abandoned):** For each fire × year combination, a meshgrid of pixel centres was built inside the polygon bounding box and tested against the polygon using `shapely.within()`. Large CA fires (e.g. the 2020 August Complex, ~1M acres) have bounding boxes containing millions of pixels. Even after thinning the test grid to a maximum of 80,000 points (`step = ceil(sqrt(n_bbox / 80_000))`), the 1,064-fire × 26-year loop ran at ~1 year per 5 minutes (projected ~130-minute total). The thinning also under-sampled polygon edges.
+
+**Approach 2 — Rasterio scanline rasterization + precomputed masks (current):** `rasterio.features.rasterize()` burns each polygon onto a boolean array aligned to the CA pixel grid using a C-level scanline algorithm — O(pixels), no sampling, handles MultiPolygon. Masks are precomputed **once** for all 1,064 fires before the year loop. Each year's extraction is then `raw[np.ix_(yi, xi)][mask]` — pure numpy indexing with no shapely or rasterio work per year. Falls back to `matplotlib.path` (C extension) if rasterio is unavailable.
+:::
+
+
+```{r load-csv}
+stopifnot(
+  "CSV not found — Part B of scripts/python/03_download_ctrees_ca.py is still running" =
+    file.exists(CSV_PATH)
+)
+
+biomass_raw <- read_csv(CSV_PATH, show_col_types = FALSE)
+
+# ── Sanity checks ──────────────────────────────────────────────────────────────
+stopifnot(
+  "Missing expected columns" =
+    all(c("event_id", "fire_year", "year", "agb_mean_mgha") %in% names(biomass_raw))
+)
+stopifnot("Year range must span 2000–2025" =
+    all(biomass_raw$year |> range() == c(2000, 2025)))
+
+n_fires  <- n_distinct(biomass_raw$event_id)
+pct_valid <- mean(!is.na(biomass_raw$agb_mean_mgha)) * 100
+
+cat("Fires in panel:          ", n_fires, "\n")
+cat("Year range:              ", min(biomass_raw$year), "–", max(biomass_raw$year), "\n")
+cat("Fire year range:         ",
+    min(biomass_raw$fire_year), "–", max(biomass_raw$fire_year), "\n")
+cat("Valid AGB records:       ",
+    scales::percent(pct_valid / 100, accuracy = 0.1), "\n")
+
+if (pct_valid < 50)
+  warning("< 50% valid records — check that fire polygons overlap the CA raster extent.")
+
+# ── Remove all-NA fires (polygon may lie outside raster extent) ───────────────
+valid_fires <- biomass_raw |>
+  group_by(event_id) |>
+  summarise(pct_valid = mean(!is.na(agb_mean_mgha))) |>
+  filter(pct_valid > 0.5) |>   # keep fires with at least 50% valid years
+  pull(event_id)
+
+biomass <- biomass_raw |>
+  filter(event_id %in% valid_fires, !is.na(agb_mean_mgha))
+
+cat("Fires retained (≥50% valid years):", n_distinct(biomass$event_id), "\n")
+cat("Records retained:                  ", nrow(biomass), "\n")
+```
+
+---
+
+## Plot C — AGB Before and After Wildfire Events
+
+Event-study plot: mean AGB relative to fire ignition year (year 0).
+Covers `r EVENT_WINDOW[1]` to +`r EVENT_WINDOW[2]` years relative to fire.
+Coverage counts per relative year show where the panel thins out at the data boundaries.
+
+```{r plot-c-event-study}
+# ── Compute relative year ──────────────────────────────────────────────────────
+biomass_event <- biomass |>
+  mutate(rel_year = year - fire_year) |>
+  filter(rel_year >= EVENT_WINDOW[1], rel_year <= EVENT_WINDOW[2])
+
+# How many fires contribute at each relative year?
+coverage <- biomass_event |>
+  group_by(rel_year) |>
+  summarise(n_fires = n_distinct(event_id), .groups = "drop")
+
+cat("Fires at rel_year = 0:   ", coverage$n_fires[coverage$rel_year == 0], "\n")
+cat("Fires at rel_year =",  EVENT_WINDOW[1], ": ",
+    coverage$n_fires[coverage$rel_year == EVENT_WINDOW[1]], "\n")
+cat("Fires at rel_year = +",  EVENT_WINDOW[2], ": ",
+    coverage$n_fires[coverage$rel_year == EVENT_WINDOW[2]], "\n")
+
+# ── Aggregate: mean ± SE by relative year ─────────────────────────────────────
+event_mean <- biomass_event |>
+  group_by(rel_year) |>
+  summarise(
+    mean_agb = mean(agb_mean_mgha),
+    se_agb   = sd(agb_mean_mgha) / sqrt(n()),
+    n_fires  = n_distinct(event_id),
+    .groups  = "drop"
+  )
+
+stopifnot("Year 0 must be present" = 0 %in% event_mean$rel_year)
+stopifnot("Mean AGB must be positive" =
+    all(event_mean$mean_agb > 0, na.rm = TRUE))
+
+pC <- ggplot(event_mean, aes(x = rel_year, y = mean_agb)) +
+  # Uncertainty band
+  geom_ribbon(aes(ymin = mean_agb - se_agb, ymax = mean_agb + se_agb),
+              fill = "#d73027", alpha = 0.2) +
+  geom_line(color = "#d73027", linewidth = 1) +
+  geom_point(color = "#d73027", size = 2.5) +
+  # Fire year marker
+  geom_vline(xintercept = 0, linetype = "dashed",
+             linewidth = 0.9, color = "grey30") +
+  annotate("text", x = 0.3, y = Inf, vjust = 1.5, hjust = 0,
+           label = "Fire year", color = "grey30", size = 3.5) +
+  # Coverage count annotation at bottom
+  geom_text(data = coverage,
+            aes(x = rel_year, y = -Inf, label = n_fires),
+            vjust = -0.5, size = 2.5, color = "grey50") +
+  annotate("text", x = EVENT_WINDOW[1], y = -Inf, vjust = -0.5, hjust = 0,
+           label = "n fires:", size = 2.5, color = "grey50") +
+  scale_x_continuous(
+    breaks = seq(EVENT_WINDOW[1], EVENT_WINDOW[2], by = 2),
+    labels = function(x) ifelse(x == 0, "0\n(fire)", as.character(x))
+  ) +
+  scale_y_continuous(labels = number_format(accuracy = 0.1)) +
+  labs(
+    title    = "Aboveground Biomass Before and After Wildfire — California",
+    subtitle = glue("Event-study window: {EVENT_WINDOW[1]} to +{EVENT_WINDOW[2]} years relative to fire ignition"),
+    x        = "Years relative to fire",
+    y        = "Mean AGB (Mg ha⁻¹)",
+    caption  = paste(
+      "Each fire contributes one trajectory centered on its ignition year.",
+      "Shaded band = ± 1 SE. n fires at each relative year shown below axis.",
+      "Source: Ctrees + USGS MTBS."
+    )
+  ) +
+  theme_minimal(base_size = 12) +
+  theme(
+    plot.title       = element_text(face = "bold", size = 14),
+    plot.subtitle    = element_text(color = "grey40", size = 11),
+    plot.caption     = element_text(color = "grey50", size = 9),
+    panel.grid.minor = element_blank(),
+    axis.text        = element_text(size = 10)
+  )
+
+print(pC)
+
+ggsave(here("figures/ctrees_biomass_event_study.png"),
+       plot = pC, width = 10, height = 6, dpi = 300, bg = "white")
+img_dims <- dim(png::readPNG(here("figures/ctrees_biomass_event_study.png")))
+cat("Plot C saved — dimensions (px):", img_dims[2], "x", img_dims[1], "\n")
+```
+
+---
+
+## Combined View
+
+```{r combined, fig.height=14}
+pA_c <- pA + labs(subtitle = NULL, caption = NULL)
+pC_c <- pC + labs(subtitle = NULL, caption = NULL)
+
+combined <- pA_c / pC_c +
+  plot_annotation(
+    title   = "Ctrees Wildfire Biomass EDA — California (2000–2025)",
+    caption = "Source: Ctrees (ucsb-emlab/BACI-wildfires) + USGS MTBS."
+  )
+
+print(combined)
+
+ggsave(here("figures/ctrees_biomass_combined.png"),
+       plot = combined, width = 10, height = 12, dpi = 300, bg = "white")
+```
+
+---
+
+## 7. Summary
+
+```{r summary-table}
+pre_fire_mean <- event_mean |>
+  filter(rel_year < 0) |>
+  summarise(mean = mean(mean_agb)) |>
+  pull(mean)
+
+at_fire <- event_mean |> filter(rel_year == 0) |> pull(mean_agb)
+at_plus5 <- event_mean |> filter(rel_year == 5) |> pull(mean_agb)
+at_plus10 <- event_mean |> filter(rel_year == 10) |> pull(mean_agb)
+
+tibble::tribble(
+  ~Metric,                                    ~Value,
+  "CA fires in panel",                        scales::comma(n_distinct(biomass$event_id)),
+  "Year range (Ctrees data)",                 glue("{min(biomass$year)}–{max(biomass$year)}"),
+  "Fire year range (MTBS)",                   glue("{min(biomass$fire_year)}–{max(biomass$fire_year)}"),
+  "Mean pre-fire AGB (rel_year < 0)",         glue("{round(pre_fire_mean, 1)} Mg ha⁻¹"),
+  "Mean AGB at year 0 (fire year)",           glue("{round(at_fire, 1)} Mg ha⁻¹"),
+  "Mean AGB at year +5",                      glue("{round(at_plus5, 1)} Mg ha⁻¹"),
+  "Mean AGB at year +10",                     if(length(at_plus10) > 0) glue("{round(at_plus10, 1)} Mg ha⁻¹") else "insufficient data"
+) |>
+  knitr::kable(col.names = c("Metric", "Value"), align = "lr")
+```
+
+::: callout-note
+**Data notes:**
+- AGB values represent the state of vegetation at or near Jan 1 of the labeled year
+  (i.e., the 2005 layer reflects late-2004 / early-2005 conditions).
+- Pre-fire years are limited by data start (2000); fires from 2000–2009 have fewer than 10 pre-fire observations.
+- Next step: join this panel with MTBS severity data and run the Callaway-Sant'Anna DiD estimator in `scripts/r/03_create_panel.R`.
+:::

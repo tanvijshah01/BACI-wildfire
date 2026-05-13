@@ -1,0 +1,435 @@
+---
+title: "EDA: eMapR Aboveground Biomass — Western US Tile Coverage"
+subtitle: "Download progress (32 tiles) | Mosaic metadata | Summary statistics | Spatial map"
+date: today
+format:
+  html:
+    embed-resources: true
+    toc: true
+    toc-depth: 3
+    code-fold: true
+    fig-width: 10
+    fig-height: 7
+    theme: flatly
+execute:
+  warning: false
+  message: false
+  cache: false
+---
+
+```{r outline}
+# =============================================================================
+# SCRIPT OUTLINE
+# 1.  Setup — packages, paths, expected tile list
+# 2.  Download progress — which of the 32 tiles are present on disk
+# 3.  Load and mosaic all present tiles
+# 4.  Summary statistics — pixel-level distribution across mosaic
+# 5.  Load state boundaries (Western US + California highlight)
+# 6.  Plot — Spatial map of mosaic with state boundaries
+# =============================================================================
+```
+
+## 1. Setup
+
+```{r setup}
+.install_if_missing <- function(pkgs) {
+  missing <- pkgs[!pkgs %in% rownames(installed.packages())]
+  if (length(missing) > 0) {
+    message("Installing: ", paste(missing, collapse = ", "))
+    install.packages(missing, repos = "https://cloud.r-project.org", quiet = TRUE)
+  }
+}
+.install_if_missing(c(
+  "terra", "sf", "here", "dplyr", "tidyr", "ggplot2",
+  "scales", "glue", "ggspatial", "patchwork", "png", "tigris", "knitr"
+))
+
+library(terra)
+library(sf)
+library(here)
+library(dplyr)
+library(tidyr)
+library(ggplot2)
+library(scales)
+library(glue)
+library(ggspatial)
+library(patchwork)
+library(tigris)
+library(knitr)
+
+sf_use_s2(FALSE)
+options(tigris_use_cache = TRUE)
+
+here::i_am("analysis/03_emapr_biomass_exploration.qmd")
+
+# ── Study parameters ──────────────────────────────────────────────────────────
+CRS_ALBERS <- "EPSG:5070"  # Albers Equal Area (CONUS) — matches Landsat ARD grid
+AGG_FACTOR <- 10           # Downsample factor for plotting: 30 m → ~300 m
+
+WESTERN_STATES <- c("WA", "OR", "CA", "ID", "NV", "MT", "WY", "UT", "CO", "AZ", "NM")
+
+# ── All 32 expected tiles for Western US study area ───────────────────────────
+EXPECTED_TILES <- c(
+  "h01v05", "h02v05", "h03v05", "h04v05",
+  "h01v06", "h02v06", "h03v06", "h04v06",
+  "h01v07", "h02v07", "h03v07", "h04v07",
+  "h01v08", "h03v08", "h04v08",
+  "h02v09", "h03v09", "h04v09",
+  "h02v10", "h03v10", "h04v10", "h05v10",
+  "h02v11", "h03v11", "h04v11", "h05v11",
+  "h02v12", "h03v12", "h04v12", "h05v12",
+  "h04v13", "h05v13"
+)
+
+# ── Paths ─────────────────────────────────────────────────────────────────────
+EMAPR_DIR <- here("data", "raw", "emapr_biomass")
+
+dir.create(here("figures"), showWarnings = FALSE)
+```
+
+---
+
+## 2. Download Progress
+
+```{r download-progress}
+# ── Scan disk for present tiles ────────────────────────────────────────────────
+tif_files_all <- list.files(EMAPR_DIR, pattern = "\\.tif$", full.names = TRUE)
+
+# Extract tile ID from filename (pattern: conus_biomass_ARD_tile_hXXvYY.tif)
+present_tiles <- basename(tif_files_all) |>
+  regmatches(regexpr("h\\d{2}v\\d{2}", x = basename(tif_files_all))) |>
+  (\(x) x[nchar(x) > 0])()
+
+tif_files_present <- tif_files_all[
+  basename(tif_files_all) |>
+    grepl(pattern = paste(present_tiles, collapse = "|"))
+]
+
+n_present <- length(present_tiles)
+n_expected <- length(EXPECTED_TILES)
+missing_tiles <- setdiff(EXPECTED_TILES, present_tiles)
+
+cat(glue("Tiles present:  {n_present} of {n_expected}\n"))
+cat(glue("Tiles missing:  {length(missing_tiles)}\n\n"))
+
+stopifnot("No tiles found — check data/raw/emapr_biomass/" = n_present > 0)
+
+# ── Build progress table ───────────────────────────────────────────────────────
+file_sizes <- file.info(tif_files_all)$size / 1e6  # MB
+
+progress_df <- tibble(
+  Tile    = EXPECTED_TILES,
+  Status  = ifelse(EXPECTED_TILES %in% present_tiles, "✓ Downloaded", "✗ Missing"),
+  `Size (MB)` = ifelse(
+    EXPECTED_TILES %in% present_tiles,
+    round(file_sizes[match(
+      glue("conus_biomass_ARD_tile_{EXPECTED_TILES[EXPECTED_TILES %in% present_tiles]}.tif"),
+      basename(tif_files_all)
+    )], 1),
+    NA_real_
+  )
+)
+
+# ── Tile grid heatmap — spatial layout of download status ─────────────────────
+# Parse h and v indices from tile IDs for a grid layout
+grid_df <- progress_df |>
+  mutate(
+    h = as.integer(sub("h(\\d+)v\\d+", "\\1", Tile)),
+    v = as.integer(sub("h\\d+v(\\d+)", "\\1", Tile)),
+    downloaded = Status == "✓ Downloaded"
+  )
+
+pGrid <- ggplot(grid_df, aes(x = h, y = -v, fill = downloaded)) +
+  geom_tile(color = "white", linewidth = 0.8, width = 0.9, height = 0.9) +
+  geom_text(aes(label = Tile), size = 2.8, color = "white", fontface = "bold") +
+  scale_fill_manual(
+    values = c("TRUE" = "#2c7bb6", "FALSE" = "#d73027"),
+    labels = c("TRUE" = "Downloaded", "FALSE" = "Missing"),
+    name   = NULL
+  ) +
+  scale_x_continuous(breaks = sort(unique(grid_df$h)),
+                     labels = paste0("h0", sort(unique(grid_df$h)))) +
+  scale_y_continuous(breaks = -sort(unique(grid_df$v)),
+                     labels = paste0("v0", sort(unique(grid_df$v)))) +
+  labs(
+    title    = glue("eMapR Tile Download Progress — {n_present} of {n_expected} tiles"),
+    subtitle = "Blue = downloaded | Red = missing | Grid shows h (column) × v (row) tile addresses",
+    x        = "Horizontal tile index (h)",
+    y        = "Vertical tile index (v)"
+  ) +
+  theme_minimal(base_size = 12) +
+  theme(
+    plot.title       = element_text(face = "bold", size = 14),
+    plot.subtitle    = element_text(color = "grey40", size = 11),
+    panel.grid       = element_blank(),
+    legend.position  = "bottom",
+    axis.text        = element_text(size = 10)
+  )
+
+print(pGrid)
+
+ggsave(here("figures", "emapr_tile_download_progress.png"),
+       plot = pGrid, width = 8, height = 7, dpi = 300, bg = "white")
+img_dims <- dim(png::readPNG(here("figures", "emapr_tile_download_progress.png")))
+cat("Progress grid saved — dimensions (px):", img_dims[2], "x", img_dims[1], "\n")
+```
+
+**`r n_present` of `r n_expected` tiles downloaded.**
+
+```{r progress-table}
+progress_df |>
+  arrange(Tile) |>
+  knitr::kable(align = "lll", caption = "eMapR tile download status")
+```
+
+::: {.callout-warning collapse="true"}
+**Missing tiles (`r length(missing_tiles)` remaining)**
+
+```{r missing-list, results='asis'}
+cat(paste(missing_tiles, collapse = ", "))
+```
+:::
+
+---
+
+## 3. Load and Mosaic Present Tiles
+
+```{r load-mosaic}
+# terra::rast() on a character vector auto-mosaics tiles into a virtual raster
+# No data is loaded into RAM at this stage — terra reads on demand
+agb <- terra::rast(tif_files_present)
+
+print(agb)
+
+# ── Metadata ──────────────────────────────────────────────────────────────────
+n_layers <- terra::nlyr(agb)
+rast_crs  <- terra::crs(agb, describe = TRUE)
+rast_ext  <- terra::ext(agb)
+rast_res  <- terra::res(agb)
+
+cat("─── eMapR Mosaic ─────────────────────────────────────────────────────\n")
+cat("Tiles loaded:    ", n_present, "\n")
+cat("Layers:          ", n_layers,  "\n")
+cat("CRS:             ", rast_crs$authority, rast_crs$code, "—", rast_crs$name, "\n")
+cat("Extent (xmin, xmax, ymin, ymax):\n")
+cat("  ", paste(round(as.vector(rast_ext), 0), collapse = ", "), "\n")
+cat("Resolution (m):  ", round(rast_res, 1), "\n")
+cat("Dimensions:      ", nrow(agb), "rows ×", ncol(agb), "cols\n")
+cat("Total pixels:    ", scales::comma(terra::ncell(agb)), "\n")
+
+if (n_layers > 1) {
+  cat("Layer names (first 10):\n")
+  for (i in seq_len(min(n_layers, 10))) cat("  ", i, "—", names(agb)[i], "\n")
+  if (n_layers > 10) cat("  ... (", n_layers - 10, "more)\n")
+}
+
+# ── Select layer 1 and handle fill values ─────────────────────────────────────
+agb_layer1 <- agb[[1]]
+
+sample_raw <- terra::spatSample(agb_layer1, size = 50000, na.rm = FALSE)
+for (fill_val in c(-9999, -32768, 32767, -1)) {
+  if (any(sample_raw == fill_val, na.rm = TRUE)) {
+    cat("Fill value", fill_val, "detected — classifying as NA\n")
+    agb_layer1 <- terra::classify(agb_layer1, cbind(fill_val, NA))
+  }
+}
+```
+
+---
+
+## 4. Summary Statistics
+
+Computed on Layer 1 across all `r n_present` mosaicked tile(s).
+
+```{r summary-stats}
+gs <- terra::global(agb_layer1, fun = c("min", "max", "mean", "sd"), na.rm = TRUE)
+
+n_total <- terra::ncell(agb_layer1)
+n_valid <- terra::global(agb_layer1, fun = "notNA")[[1]]
+pct_valid <- (n_valid / n_total) * 100
+
+sample_vals <- terra::spatSample(agb_layer1, size = 200000, na.rm = TRUE)
+qs <- quantile(sample_vals, probs = c(0.05, 0.25, 0.5, 0.75, 0.95), na.rm = TRUE)
+
+cat("─── Layer 1 Pixel Statistics (", n_present, "tile(s)) ──────────────────\n")
+cat("Min:              ", round(gs$min,  2), "\n")
+cat("5th percentile:   ", round(qs[1],   2), "\n")
+cat("25th percentile:  ", round(qs[2],   2), "\n")
+cat("Median:           ", round(qs[3],   2), "\n")
+cat("75th percentile:  ", round(qs[4],   2), "\n")
+cat("95th percentile:  ", round(qs[5],   2), "\n")
+cat("Max:              ", round(gs$max,  2), "\n")
+cat("Mean:             ", round(gs$mean, 2), "\n")
+cat("SD:               ", round(gs$sd,   2), "\n")
+cat("Valid pixels:     ", round(pct_valid, 1), "% (",
+    scales::comma(n_valid), "of", scales::comma(n_total), ")\n")
+
+# ── Histogram ─────────────────────────────────────────────────────────────────
+hist_df <- data.frame(biomass = sample_vals[sample_vals > 0 & !is.na(sample_vals)])
+
+pHist <- ggplot(hist_df, aes(x = biomass)) +
+  geom_histogram(bins = 60, fill = "#2c7bb6", color = "white", alpha = 0.85) +
+  geom_vline(xintercept = median(hist_df$biomass, na.rm = TRUE),
+             color = "#d73027", linewidth = 0.9, linetype = "dashed") +
+  annotate("text",
+           x = median(hist_df$biomass, na.rm = TRUE) * 1.05,
+           y = Inf, vjust = 1.5, hjust = 0,
+           label = glue("Median: {round(median(hist_df$biomass), 1)}"),
+           color = "#d73027", size = 3.5) +
+  scale_x_continuous(labels = number_format(accuracy = 1)) +
+  scale_y_continuous(labels = comma_format()) +
+  labs(
+    title    = glue("Biomass Distribution — {n_present} tile(s) mosaicked (Layer 1)"),
+    subtitle = "Positive-value pixels only | 200k pixel random sample",
+    x        = "Biomass (units from raster metadata)",
+    y        = "Pixel count (sample)",
+    caption  = "Source: eMapR / LandTrendR, USGS Landsat ARD."
+  ) +
+  theme_minimal(base_size = 12) +
+  theme(
+    plot.title       = element_text(face = "bold", size = 14),
+    plot.subtitle    = element_text(color = "grey40", size = 11),
+    plot.caption     = element_text(color = "grey50", size = 9),
+    panel.grid.minor = element_blank(),
+    axis.text        = element_text(size = 10)
+  )
+
+print(pHist)
+
+ggsave(here("figures", "emapr_biomass_histogram.png"),
+       plot = pHist, width = 10, height = 6, dpi = 300, bg = "white")
+img_dims <- dim(png::readPNG(here("figures", "emapr_biomass_histogram.png")))
+cat("Histogram saved — dimensions (px):", img_dims[2], "x", img_dims[1], "\n")
+```
+
+---
+
+## 5. Load State Boundaries
+
+```{r state-boundaries}
+all_states <- tigris::states(cb = TRUE, year = 2022, resolution = "5m") |>
+  dplyr::filter(STUSPS %in% WESTERN_STATES) |>
+  sf::st_transform(crs = sf::st_crs(agb_layer1))
+
+ca_boundary <- all_states |> dplyr::filter(STUSPS == "CA")
+
+stopifnot("California not found in tigris states" = nrow(ca_boundary) == 1)
+stopifnot("Western states missing from tigris" = nrow(all_states) == length(WESTERN_STATES))
+
+# ── Overlap check: do any present tiles touch the Western US extent? ───────────
+west_bbox <- sf::st_bbox(all_states)
+tile_ext  <- as.vector(terra::ext(agb_layer1))
+
+x_overlap <- west_bbox["xmin"] < tile_ext[2] && west_bbox["xmax"] > tile_ext[1]
+y_overlap <- west_bbox["ymin"] < tile_ext[4] && west_bbox["ymax"] > tile_ext[3]
+
+cat("Mosaic extent — x:", round(tile_ext[1]), "to", round(tile_ext[2]), "\n")
+cat("Mosaic extent — y:", round(tile_ext[3]), "to", round(tile_ext[4]), "\n")
+cat("Western US overlap — x:", x_overlap, "| y:", y_overlap, "\n")
+
+if (!x_overlap || !y_overlap)
+  warning("Mosaic and Western US states do not overlap — check CRS alignment.")
+```
+
+---
+
+## 6. Spatial Map — Biomass with State Boundaries
+
+```{r biomass-map, fig.height=9}
+# ── Aggregate for visualization ────────────────────────────────────────────────
+agb_agg <- terra::aggregate(agb_layer1, fact = AGG_FACTOR, fun = "mean", na.rm = TRUE)
+agg_res  <- round(terra::res(agb_agg)[1])
+
+cat("Aggregated resolution (m):", agg_res, "\n")
+cat("Aggregated dimensions:    ", nrow(agb_agg), "×", ncol(agb_agg), "\n")
+
+# ── Convert to data frame ──────────────────────────────────────────────────────
+agb_df <- as.data.frame(agb_agg, xy = TRUE) |>
+  dplyr::rename(biomass = 3) |>
+  dplyr::filter(!is.na(biomass), biomass > 0)
+
+cat("Valid pixels for plotting:", scales::comma(nrow(agb_df)), "\n")
+
+cap_99 <- quantile(agb_df$biomass, 0.99, na.rm = TRUE)
+cat("99th pct (color cap):     ", round(cap_99, 1), "\n")
+
+# ── Map ───────────────────────────────────────────────────────────────────────
+map_subtitle <- glue(
+  "{n_present} of {n_expected} tiles downloaded | ",
+  "CA boundary = black | Other Western states = grey | ",
+  "Aggregated to {agg_res} m for display"
+)
+
+pMap <- ggplot() +
+  geom_raster(data = agb_df,
+              aes(x = x, y = y, fill = pmin(biomass, cap_99))) +
+  # Western states — light grey fill so missing-tile gaps are visible
+  geom_sf(data      = all_states,
+          fill      = NA,
+          color     = "grey60",
+          linewidth = 0.4,
+          inherit.aes = FALSE) +
+  # California — bold black outline on top
+  geom_sf(data      = ca_boundary,
+          fill      = NA,
+          color     = "white",
+          linewidth = 1.2,
+          inherit.aes = FALSE) +
+  geom_sf(data      = ca_boundary,
+          fill      = NA,
+          color     = "black",
+          linewidth = 0.6,
+          inherit.aes = FALSE) +
+  scale_fill_viridis_c(
+    name      = "Biomass\n(Mg ha⁻¹)",
+    option    = "viridis",
+    direction = 1,
+    na.value  = "transparent",
+    labels    = number_format(accuracy = 1)
+  ) +
+  annotation_scale(location = "bl", width_hint = 0.2, text_cex = 0.85) +
+  annotation_north_arrow(
+    location    = "tr",
+    which_north = "true",
+    style       = north_arrow_minimal(text_size = 10)
+  ) +
+  labs(
+    title   = "eMapR Aboveground Biomass — Western US (available tiles)",
+    subtitle = map_subtitle,
+    x = NULL, y = NULL,
+    caption = paste(
+      "Source: eMapR / LandTrendR, USGS Landsat ARD.",
+      "CRS: EPSG:5070 (Albers Equal Area, CONUS).",
+      "Color capped at 99th percentile."
+    )
+  ) +
+  theme_void(base_size = 12) +
+  theme(
+    plot.title        = element_text(face = "bold", size = 14, margin = margin(b = 4)),
+    plot.subtitle     = element_text(color = "grey40", size = 10, margin = margin(b = 8)),
+    plot.caption      = element_text(color = "grey50", size = 9),
+    plot.margin       = margin(10, 10, 10, 10),
+    legend.position   = "right",
+    legend.title      = element_text(size = 11),
+    legend.text       = element_text(size = 10),
+    legend.key.height = unit(1.5, "cm")
+  )
+
+print(pMap)
+
+ggsave(here("figures", "emapr_biomass_coverage_map.png"),
+       plot = pMap, width = 10, height = 9, dpi = 300, bg = "white")
+img_dims <- dim(png::readPNG(here("figures", "emapr_biomass_coverage_map.png")))
+cat("Map saved — dimensions (px):", img_dims[2], "x", img_dims[1], "\n")
+```
+
+::: callout-note
+**Coverage notes:**
+
+- The map shows only the **`r n_present` tile(s) currently on disk**; grey state outlines extend
+  beyond the raster footprint to show where data is still missing.
+- As additional tiles are downloaded to `data/raw/emapr_biomass/`, re-rendering this document
+  automatically picks them up — no code changes needed.
+- Each Landsat ARD tile is 5,000 × 5,000 pixels at 30 m native resolution (~150 × 150 km).
+- `h02v08` is intentionally absent from the 32-tile list (no study-area coverage for that cell).
+:::
