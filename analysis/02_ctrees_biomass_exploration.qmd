@@ -68,8 +68,8 @@ MAP_YEAR     <- 2020          # year to display in spatial map (Plot B)
 CRS_ALBERS   <- "EPSG:5070"  # Albers Equal Area for Western US maps
 
 # ── Paths ─────────────────────────────────────────────────────────────────────
-NC_PATH   <- here("output", "ctrees_biomass_ca_1km.nc")
-CSV_PATH  <- here("output", "biomass_fire_polygons_ctrees.csv")
+NC_PATH   <- here("data", "processed", "ctrees", "ctrees_biomass_ca_1km.nc")
+CSV_PATH  <- here("data", "processed", "ctrees", "biomass_fire_polygons_ctrees.csv")
 MTBS_PATH <- here("data", "raw", "mtbs", "mtbs_perimeter_data", "mtbs_perims_DD.shp")
 
 dir.create(here("figures"), showWarnings = FALSE)
@@ -233,6 +233,11 @@ make_agb_map <- function(yr, agb_raster, rast_years, ca_vect, agb_upper) {
   n_valid <- sum(!is.na(terra::values(lyr)))
   if (n_valid == 0) stop(glue("Year {yr}: mask returned all-NA — check raster extent"))
 
+  # Clamp values to [0, agb_upper] BEFORE plotting. terra::plot() with `range`
+  # renders out-of-range pixels as white (na.color), not as the max color.
+  # Clamping pins those pixels to agb_upper so they show as yellow, not white.
+  lyr <- terra::clamp(lyr, lower = 0, upper = agb_upper, values = TRUE)
+
   fpath <- here("figures", glue("ctrees_biomass_map_{yr}.png"))
   png(fpath, width = 8, height = 9, units = "in", res = 300, bg = "white")
   terra::plot(
@@ -240,7 +245,7 @@ make_agb_map <- function(yr, agb_raster, rast_years, ca_vect, agb_upper) {
     col      = hcl.colors(100, "viridis"),
     range    = c(0, agb_upper),
     main     = glue("Aboveground Biomass — California ({yr})"),
-    plg      = list(title = "AGB (Mg/ha)", title.cex = 0.85, cex = 0.75),
+    plg      = list(title = glue("AGB (Mg/ha)\n(capped at {round(agb_upper)} — 99th pct)"), title.cex = 0.75, cex = 0.75),
     mar      = c(3, 3, 4, 7),
     cex.main = 1.1
   )

@@ -54,7 +54,32 @@
       "PowerShell(& \"C:\\\\Users\\\\shaht\\\\anaconda3\\\\python.exe\" \"C:\\\\Users\\\\shaht\\\\Documents\\\\Projects\\\\BACI_local\\\\BACI\\\\scripts\\\\python\\\\03_download_ctrees_ca.py\" 2>&1)",
       "PowerShell(& \"C:\\\\Users\\\\shaht\\\\anaconda3\\\\python.exe\" -c \"import rasterio; print\\(rasterio.__version__\\)\")",
       "PowerShell(Get-Command *)",
-      "PowerShell(ls \"C:\\\\Program Files\\\\Quarto\" -ErrorAction SilentlyContinue; ls \"$env:LOCALAPPDATA\\\\Programs\\\\Quarto\" -ErrorAction SilentlyContinue; ls \"C:\\\\Users\\\\shaht\\\\AppData\\\\Local\\\\Programs\\\\Quarto\" -ErrorAction SilentlyContinue)"
+      "PowerShell(ls \"C:\\\\Program Files\\\\Quarto\" -ErrorAction SilentlyContinue; ls \"$env:LOCALAPPDATA\\\\Programs\\\\Quarto\" -ErrorAction SilentlyContinue; ls \"C:\\\\Users\\\\shaht\\\\AppData\\\\Local\\\\Programs\\\\Quarto\" -ErrorAction SilentlyContinue)",
+      "Bash(R *)",
+      "PowerShell(Get-ChildItem *)",
+      "Bash(Rscript -e \"rmarkdown::render\\('analysis/03_emapr_biomass_exploration.qmd'\\)\")",
+      "Bash(/c/Program Files/R/R-4.5.2/bin/Rscript.exe *)",
+      "Bash(\"/c/Program Files/R/R-4.5.2/bin/Rscript.exe\" -e \"quarto::quarto_render\\('analysis/03_emapr_biomass_exploration.qmd'\\)\")",
+      "Bash(\"/c/Program Files/R/R-4.5.2/bin/Rscript.exe\" analysis/run_03_emapr.R)",
+      "PowerShell(\\(Get-ChildItem \"C:\\\\Users\\\\shaht\\\\Documents\\\\Projects\\\\BACI_local\\\\BACI\\\\data\\\\raw\" -ErrorAction SilentlyContinue\\).Count; \\(Get-ChildItem \"C:\\\\Users\\\\shaht\\\\Documents\\\\Projects\\\\BACI_local\\\\BACI\\\\data\" -ErrorAction SilentlyContinue\\).Count)",
+      "Bash(\"C:/Program Files/R/R-4.5.2/bin/Rscript.exe\" scripts/r/00_crop_emapr_to_ca.R)",
+      "Bash(\"C:/Program Files/R/R-4.5.2/bin/Rscript.exe\" scripts/r/01_precompute_emapr_ca.R)",
+      "Bash(C:/Program Files/R/R-4.5.2/bin/Rscript.exe *)",
+      "Bash(Get-ChildItem *)",
+      "Bash(grep -E \"\\\\.rds$\")",
+      "Bash(grep \"composite_.*_ca.tif$\")",
+      "Bash(\"C:/Program Files/R/R-4.5.2/bin/Rscript.exe\" scripts/r/02_compare_biomass_ranges.R)",
+      "Bash('C:/Program Files/R/R-4.5.2/bin/Rscript.exe' -e ' *)",
+      "Bash(\"C:/Program Files/R/R-4.5.2/bin/Rscript.exe\" scripts/r/tmp_mtbs_count.R)",
+      "PowerShell(New-Item *)",
+      "Bash(\"/c/Users/shaht/AppData/Local/Programs/Quarto/bin/quarto.exe\" render *)",
+      "PowerShell(Get-Item \"C:\\\\Users\\\\shaht\\\\Documents\\\\Projects\\\\BACI_local\\\\BACI\\\\data\\\\raw\\\\emapr_biomass\\\\composite_2002_median.tif\" | Select-Object Name, @{N='GB';E={[math]::Round\\($_.Length/1GB,2\\)}})",
+      "PowerShell(Get-Item \"C:\\\\Users\\\\shaht\\\\Documents\\\\Projects\\\\BACI_local\\\\BACI\\\\data\\\\raw\\\\emapr_biomass\\\\composite_2002_median.tif\" -ErrorAction SilentlyContinue | Select-Object Name, @{N='Size_GB';E={[math]::Round\\($_.Length/1GB,2\\)}}, LastWriteTime)",
+      "PowerShell(Get-ChildItem \"C:\\\\Users\\\\shaht\\\\Documents\\\\Projects\\\\BACI_local\\\\BACI\\\\data\\\\raw\\\\emapr_biomass\" | Select-Object Name, @{N='GB';E={[math]::Round\\($_.Length/1GB,2\\)}} | Sort-Object Name)",
+      "PowerShell($dir = \"C:\\\\Users\\\\shaht\\\\Documents\\\\Projects\\\\BACI_local\\\\BACI\\\\data\\\\raw\\\\emapr_biomass\"; [System.IO.Directory]::GetFiles\\($dir\\) | ForEach-Object { [System.IO.Path]::GetFileName\\($_\\) } | Sort-Object)",
+      "PowerShell([System.IO.Directory]::GetFiles\\(\"C:\\\\Program Files\\\\R\", \"Rscript.exe\", [System.IO.SearchOption]::AllDirectories\\) 2>$null; [System.IO.Directory]::GetFiles\\(\"C:\\\\Users\\\\shaht\", \"Rscript.exe\", [System.IO.SearchOption]::AllDirectories\\) 2>$null)",
+      "PowerShell($env:PATH -split ';'; [System.IO.Directory]::GetFiles\\(\"C:\\\\Users\\\\shaht\\\\AppData\\\\Local\", \"quarto.exe\", [System.IO.SearchOption]::AllDirectories\\) 2>$null | Select-Object -First 3)",
+      "PowerShell([System.IO.Directory]::GetFiles\\(\"C:\\\\Program Files\\\\Positron\", \"quarto.exe\", [System.IO.SearchOption]::AllDirectories\\) 2>$null; [System.IO.Directory]::GetFiles\\(\"C:\\\\Program Files\", \"quarto.exe\", [System.IO.SearchOption]::AllDirectories\\) 2>$null | Select-Object -First 5)"
     ]
   }
 }

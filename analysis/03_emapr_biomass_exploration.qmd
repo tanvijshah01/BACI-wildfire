@@ -1,6 +1,6 @@
 ---
-title: "EDA: eMapR Aboveground Biomass — Western US Tile Coverage"
-subtitle: "Download progress (32 tiles) | Mosaic metadata | Summary statistics | Spatial map"
+title: "EDA: eMapR CONUS Biomass Composites — California (2000, 2001, 2003)"
+subtitle: "Load & validate | Summary statistics | Plot A — year comparison | Plot B — spatial maps"
 date: today
 format:
   html:
@@ -14,24 +14,27 @@ format:
 execute:
   warning: false
   message: false
-  cache: false
+  cache: true
 ---
 
 ```{r outline}
 # =============================================================================
 # SCRIPT OUTLINE
-# 1.  Setup — packages, paths, expected tile list
-# 2.  Download progress — which of the 32 tiles are present on disk
-# 3.  Load and mosaic all present tiles
-# 4.  Summary statistics — pixel-level distribution across mosaic
-# 5.  Load state boundaries (Western US + California highlight)
-# 6.  Plot — Spatial map of mosaic with state boundaries
+# 1.  Setup — packages, paths, study parameters
+# 2.  Load and validate three composite rasters (2000, 2001, 2003)
+# 3.  Summary statistics — pixel distributions, histogram (CA only)
+# 4.  Plot A — Mean AGB comparison across the three years (bar chart)
+# 5.  Load California boundary; crop and mask rasters
+# 6.  Plot B — Spatial maps of AGB for 2000, 2001, 2003
+# 7.  Summary table
 # =============================================================================
 ```
 
+---
+
 ## 1. Setup
 
-```{r setup}
+```{r setup, cache=FALSE}
 .install_if_missing <- function(pkgs) {
   missing <- pkgs[!pkgs %in% rownames(installed.packages())]
   if (length(missing) > 0) {
@@ -40,19 +43,17 @@ execute:
   }
 }
 .install_if_missing(c(
-  "terra", "sf", "here", "dplyr", "tidyr", "ggplot2",
-  "scales", "glue", "ggspatial", "patchwork", "png", "tigris", "knitr"
+  "terra", "sf", "here", "dplyr", "ggplot2",
+  "scales", "glue", "patchwork", "png", "tigris", "knitr"
 ))
 
 library(terra)
 library(sf)
 library(here)
 library(dplyr)
-library(tidyr)
 library(ggplot2)
 library(scales)
 library(glue)
-library(ggspatial)
 library(patchwork)
 library(tigris)
 library(knitr)
@@ -63,227 +64,138 @@ options(tigris_use_cache = TRUE)
 here::i_am("analysis/03_emapr_biomass_exploration.qmd")
 
 # ── Study parameters ──────────────────────────────────────────────────────────
-CRS_ALBERS <- "EPSG:5070"  # Albers Equal Area (CONUS) — matches Landsat ARD grid
-AGG_FACTOR <- 10           # Downsample factor for plotting: 30 m → ~300 m
-
-WESTERN_STATES <- c("WA", "OR", "CA", "ID", "NV", "MT", "WY", "UT", "CO", "AZ", "NM")
-
-# ── All 32 expected tiles for Western US study area ───────────────────────────
-EXPECTED_TILES <- c(
-  "h01v05", "h02v05", "h03v05", "h04v05",
-  "h01v06", "h02v06", "h03v06", "h04v06",
-  "h01v07", "h02v07", "h03v07", "h04v07",
-  "h01v08", "h03v08", "h04v08",
-  "h02v09", "h03v09", "h04v09",
-  "h02v10", "h03v10", "h04v10", "h05v10",
-  "h02v11", "h03v11", "h04v11", "h05v11",
-  "h02v12", "h03v12", "h04v12", "h05v12",
-  "h04v13", "h05v13"
-)
+STUDY_YEARS <- c(2000, 2001, 2003)
+AGG_FACTOR  <- 10    # 30 m native → ~300 m display resolution
+SAMPLE_N    <- 200000
 
 # ── Paths ─────────────────────────────────────────────────────────────────────
-EMAPR_DIR <- here("data", "raw", "emapr_biomass")
-
+# Use pre-cropped CA files produced by scripts/r/00_crop_emapr_to_ca.R.
+# These are ~100–300 MB each vs 27 GB for the CONUS originals.
+CA_DIR <- here("data", "processed", "emapr_biomass_ca")
 dir.create(here("figures"), showWarnings = FALSE)
-```
 
----
-
-## 2. Download Progress
-
-```{r download-progress}
-# ── Scan disk for present tiles ────────────────────────────────────────────────
-tif_files_all <- list.files(EMAPR_DIR, pattern = "\\.tif$", full.names = TRUE)
-
-# Extract tile ID from filename (pattern: conus_biomass_ARD_tile_hXXvYY.tif)
-present_tiles <- basename(tif_files_all) |>
-  regmatches(regexpr("h\\d{2}v\\d{2}", x = basename(tif_files_all))) |>
-  (\(x) x[nchar(x) > 0])()
-
-tif_files_present <- tif_files_all[
-  basename(tif_files_all) |>
-    grepl(pattern = paste(present_tiles, collapse = "|"))
-]
-
-n_present <- length(present_tiles)
-n_expected <- length(EXPECTED_TILES)
-missing_tiles <- setdiff(EXPECTED_TILES, present_tiles)
-
-cat(glue("Tiles present:  {n_present} of {n_expected}\n"))
-cat(glue("Tiles missing:  {length(missing_tiles)}\n\n"))
-
-stopifnot("No tiles found — check data/raw/emapr_biomass/" = n_present > 0)
-
-# ── Build progress table ───────────────────────────────────────────────────────
-file_sizes <- file.info(tif_files_all)$size / 1e6  # MB
-
-progress_df <- tibble(
-  Tile    = EXPECTED_TILES,
-  Status  = ifelse(EXPECTED_TILES %in% present_tiles, "✓ Downloaded", "✗ Missing"),
-  `Size (MB)` = ifelse(
-    EXPECTED_TILES %in% present_tiles,
-    round(file_sizes[match(
-      glue("conus_biomass_ARD_tile_{EXPECTED_TILES[EXPECTED_TILES %in% present_tiles]}.tif"),
-      basename(tif_files_all)
-    )], 1),
-    NA_real_
-  )
+rast_paths <- setNames(
+  file.path(CA_DIR, glue("composite_{STUDY_YEARS}_ca.tif")),
+  STUDY_YEARS
 )
 
-# ── Tile grid heatmap — spatial layout of download status ─────────────────────
-# Parse h and v indices from tile IDs for a grid layout
-grid_df <- progress_df |>
-  mutate(
-    h = as.integer(sub("h(\\d+)v\\d+", "\\1", Tile)),
-    v = as.integer(sub("h\\d+v(\\d+)", "\\1", Tile)),
-    downloaded = Status == "✓ Downloaded"
-  )
-
-pGrid <- ggplot(grid_df, aes(x = h, y = -v, fill = downloaded)) +
-  geom_tile(color = "white", linewidth = 0.8, width = 0.9, height = 0.9) +
-  geom_text(aes(label = Tile), size = 2.8, color = "white", fontface = "bold") +
-  scale_fill_manual(
-    values = c("TRUE" = "#2c7bb6", "FALSE" = "#d73027"),
-    labels = c("TRUE" = "Downloaded", "FALSE" = "Missing"),
-    name   = NULL
-  ) +
-  scale_x_continuous(breaks = sort(unique(grid_df$h)),
-                     labels = paste0("h0", sort(unique(grid_df$h)))) +
-  scale_y_continuous(breaks = -sort(unique(grid_df$v)),
-                     labels = paste0("v0", sort(unique(grid_df$v)))) +
-  labs(
-    title    = glue("eMapR Tile Download Progress — {n_present} of {n_expected} tiles"),
-    subtitle = "Blue = downloaded | Red = missing | Grid shows h (column) × v (row) tile addresses",
-    x        = "Horizontal tile index (h)",
-    y        = "Vertical tile index (v)"
-  ) +
-  theme_minimal(base_size = 12) +
-  theme(
-    plot.title       = element_text(face = "bold", size = 14),
-    plot.subtitle    = element_text(color = "grey40", size = 11),
-    panel.grid       = element_blank(),
-    legend.position  = "bottom",
-    axis.text        = element_text(size = 10)
-  )
-
-print(pGrid)
-
-ggsave(here("figures", "emapr_tile_download_progress.png"),
-       plot = pGrid, width = 8, height = 7, dpi = 300, bg = "white")
-img_dims <- dim(png::readPNG(here("figures", "emapr_tile_download_progress.png")))
-cat("Progress grid saved — dimensions (px):", img_dims[2], "x", img_dims[1], "\n")
-```
-
-**`r n_present` of `r n_expected` tiles downloaded.**
-
-```{r progress-table}
-progress_df |>
-  arrange(Tile) |>
-  knitr::kable(align = "lll", caption = "eMapR tile download status")
-```
-
-::: {.callout-warning collapse="true"}
-**Missing tiles (`r length(missing_tiles)` remaining)**
-
-```{r missing-list, results='asis'}
-cat(paste(missing_tiles, collapse = ", "))
-```
-:::
-
----
-
-## 3. Load and Mosaic Present Tiles
-
-```{r load-mosaic}
-# terra::rast() on a character vector auto-mosaics tiles into a virtual raster
-# No data is loaded into RAM at this stage — terra reads on demand
-agb <- terra::rast(tif_files_present)
-
-print(agb)
-
-# ── Metadata ──────────────────────────────────────────────────────────────────
-n_layers <- terra::nlyr(agb)
-rast_crs  <- terra::crs(agb, describe = TRUE)
-rast_ext  <- terra::ext(agb)
-rast_res  <- terra::res(agb)
-
-cat("─── eMapR Mosaic ─────────────────────────────────────────────────────\n")
-cat("Tiles loaded:    ", n_present, "\n")
-cat("Layers:          ", n_layers,  "\n")
-cat("CRS:             ", rast_crs$authority, rast_crs$code, "—", rast_crs$name, "\n")
-cat("Extent (xmin, xmax, ymin, ymax):\n")
-cat("  ", paste(round(as.vector(rast_ext), 0), collapse = ", "), "\n")
-cat("Resolution (m):  ", round(rast_res, 1), "\n")
-cat("Dimensions:      ", nrow(agb), "rows ×", ncol(agb), "cols\n")
-cat("Total pixels:    ", scales::comma(terra::ncell(agb)), "\n")
-
-if (n_layers > 1) {
-  cat("Layer names (first 10):\n")
-  for (i in seq_len(min(n_layers, 10))) cat("  ", i, "—", names(agb)[i], "\n")
-  if (n_layers > 10) cat("  ... (", n_layers - 10, "more)\n")
-}
-
-# ── Select layer 1 and handle fill values ─────────────────────────────────────
-agb_layer1 <- agb[[1]]
-
-sample_raw <- terra::spatSample(agb_layer1, size = 50000, na.rm = FALSE)
-for (fill_val in c(-9999, -32768, 32767, -1)) {
-  if (any(sample_raw == fill_val, na.rm = TRUE)) {
-    cat("Fill value", fill_val, "detected — classifying as NA\n")
-    agb_layer1 <- terra::classify(agb_layer1, cbind(fill_val, NA))
+for (yr in STUDY_YEARS) {
+  if (!file.exists(rast_paths[as.character(yr)])) {
+    stop(glue(
+      "Pre-cropped CA file not found for {yr}.\n",
+      "Run scripts/r/00_crop_emapr_to_ca.R first to generate it."
+    ))
   }
 }
+cat("All", length(STUDY_YEARS), "pre-cropped CA files found.\n")
 ```
 
 ---
 
-## 4. Summary Statistics
+## 2. Load and Validate Rasters
 
-Computed on Layer 1 across all `r n_present` mosaicked tile(s).
+These are California-clipped aboveground biomass composites pre-processed by
+`scripts/r/00_crop_emapr_to_ca.R` from the CONUS-wide eMapR / LandTrendR files.
+Cropping to CA reduces each file from ~27.7 GB to ~100–300 MB.
+Terra loads them lazily — no data enters RAM until explicitly requested.
 
-```{r summary-stats}
-gs <- terra::global(agb_layer1, fun = c("min", "max", "mean", "sd"), na.rm = TRUE)
+```{r load-validate, cache=FALSE}
+# ── Load rasters (lazy — metadata only at this stage) ─────────────────────────
+rast_list <- lapply(STUDY_YEARS, function(yr) {
+  terra::rast(rast_paths[as.character(yr)])
+})
+names(rast_list) <- STUDY_YEARS
 
-n_total <- terra::ncell(agb_layer1)
-n_valid <- terra::global(agb_layer1, fun = "notNA")[[1]]
-pct_valid <- (n_valid / n_total) * 100
+# ── Print metadata for first layer (all years share the same grid) ─────────────
+r0 <- rast_list[[1]]
+rast_crs  <- terra::crs(r0, describe = TRUE)
+rast_ext  <- terra::ext(r0)
+rast_res  <- terra::res(r0)
 
-sample_vals <- terra::spatSample(agb_layer1, size = 200000, na.rm = TRUE)
-qs <- quantile(sample_vals, probs = c(0.05, 0.25, 0.5, 0.75, 0.95), na.rm = TRUE)
+cat("─── Raster Metadata ──────────────────────────────────────────────────────\n")
+cat("Year shown:      ", STUDY_YEARS[1], "\n")
+cat("CRS:             ", rast_crs$authority, rast_crs$code, "—", rast_crs$name, "\n")
+cat("Extent (xmin, xmax, ymin, ymax):\n  ",
+    paste(round(as.vector(rast_ext), 0), collapse = ", "), "\n")
+cat("Resolution (m):  ", round(rast_res, 1), "\n")
+cat("Dimensions:      ", nrow(r0), "rows ×", ncol(r0), "cols (CA only)\n")
+cat("Total pixels:    ", scales::comma(terra::ncell(r0)), "\n")
+cat("Layers per file: ", terra::nlyr(r0), "\n")
 
-cat("─── Layer 1 Pixel Statistics (", n_present, "tile(s)) ──────────────────\n")
-cat("Min:              ", round(gs$min,  2), "\n")
-cat("5th percentile:   ", round(qs[1],   2), "\n")
-cat("25th percentile:  ", round(qs[2],   2), "\n")
-cat("Median:           ", round(qs[3],   2), "\n")
-cat("75th percentile:  ", round(qs[4],   2), "\n")
-cat("95th percentile:  ", round(qs[5],   2), "\n")
-cat("Max:              ", round(gs$max,  2), "\n")
-cat("Mean:             ", round(gs$mean, 2), "\n")
-cat("SD:               ", round(gs$sd,   2), "\n")
-cat("Valid pixels:     ", round(pct_valid, 1), "% (",
-    scales::comma(n_valid), "of", scales::comma(n_total), ")\n")
+stopifnot("Expected 1 layer per annual composite" = terra::nlyr(r0) == 1)
+stopifnot("CRS must be defined" = nchar(terra::crs(r0)) > 0)
 
-# ── Histogram ─────────────────────────────────────────────────────────────────
-hist_df <- data.frame(biomass = sample_vals[sample_vals > 0 & !is.na(sample_vals)])
+# ── Detect and reclassify fill values ─────────────────────────────────────────
+sample_raw <- terra::spatSample(r0, size = 50000, na.rm = FALSE)[[1]]
+for (fill_val in c(-9999, -32768, 32767, -1)) {
+  n_fill <- sum(sample_raw == fill_val, na.rm = TRUE)
+  if (n_fill > 0) {
+    cat("Fill value", fill_val, "detected (", n_fill, "in sample) — reclassifying to NA\n")
+    rast_list <- lapply(rast_list, function(r) {
+      terra::classify(r, cbind(fill_val, NA))
+    })
+  }
+}
+cat("Fill value check complete.\n")
+```
 
-pHist <- ggplot(hist_df, aes(x = biomass)) +
-  geom_histogram(bins = 60, fill = "#2c7bb6", color = "white", alpha = 0.85) +
-  geom_vline(xintercept = median(hist_df$biomass, na.rm = TRUE),
-             color = "#d73027", linewidth = 0.9, linetype = "dashed") +
-  annotate("text",
-           x = median(hist_df$biomass, na.rm = TRUE) * 1.05,
-           y = Inf, vjust = 1.5, hjust = 0,
-           label = glue("Median: {round(median(hist_df$biomass), 1)}"),
-           color = "#d73027", size = 3.5) +
+---
+
+## 3. Summary Statistics
+
+Statistics are computed on California pixels directly from the pre-cropped rasters,
+matching the ctrees spatial scope. `ca_vect` is still loaded for the map boundary overlay.
+
+```{r summary-stats, cache=FALSE}
+# ── California boundary for map overlay ───────────────────────────────────────
+ca_wgs84 <- tigris::states(cb = TRUE, year = 2022, resolution = "5m") |>
+  dplyr::filter(STUSPS == "CA")
+
+stopifnot("California not found in tigris" = nrow(ca_wgs84) == 1)
+
+ca_vect <- terra::vect(sf::st_transform(ca_wgs84, crs = sf::st_crs(rast_list[[1]])))
+
+# ── Load pre-computed stats (produced by scripts/r/01_precompute_emapr_ca.R) ──
+stats_list <- lapply(STUDY_YEARS, function(yr) {
+  rds_path <- file.path(CA_DIR, glue("stats_{yr}.rds"))
+  if (!file.exists(rds_path)) {
+    stop(glue("Stats not found for {yr}. Run scripts/r/01_precompute_emapr_ca.R first."))
+  }
+  s  <- readRDS(rds_path)
+  qs <- quantile(s$vals, probs = c(0.05, 0.25, 0.5, 0.75, 0.95), na.rm = TRUE)
+
+  cat(glue("\n─── {yr} ───────────────────────────────────────────────\n"))
+  cat("Valid pixels:     ", round(s$n_valid / s$n_total * 100, 1), "% (",
+      scales::comma(s$n_valid), "of", scales::comma(s$n_total), ")\n")
+  cat("5th pct:          ", round(qs[1], 2), "\n")
+  cat("25th pct:         ", round(qs[2], 2), "\n")
+  cat("Median:           ", round(qs[3], 2), "\n")
+  cat("75th pct:         ", round(qs[4], 2), "\n")
+  cat("95th pct:         ", round(qs[5], 2), "\n")
+  cat("Max:              ", round(s$max,  2), "\n")
+  cat("Mean:             ", round(s$mean, 2), "\n")
+  cat("SD:               ", round(s$sd,   2), "\n")
+  s
+})
+names(stats_list) <- STUDY_YEARS
+
+# ── Histogram — pooled across all three years ─────────────────────────────────
+hist_df <- do.call(rbind, lapply(stats_list, function(s) {
+  data.frame(biomass = s$vals, year = as.factor(s$year))
+}))
+
+pHist <- ggplot(hist_df, aes(x = biomass, fill = year)) +
+  geom_histogram(bins = 60, alpha = 0.6, position = "identity", color = NA) +
+  scale_fill_manual(values = c("2000" = "#1b7837", "2001" = "#762a83", "2003" = "#e08214")) +
   scale_x_continuous(labels = number_format(accuracy = 1)) +
   scale_y_continuous(labels = comma_format()) +
   labs(
-    title    = glue("Biomass Distribution — {n_present} tile(s) mosaicked (Layer 1)"),
-    subtitle = "Positive-value pixels only | 200k pixel random sample",
-    x        = "Biomass (units from raster metadata)",
+    title    = "Biomass Distribution — California (2000, 2001, 2003)",
+    subtitle = glue("Positive-value pixels only | {scales::comma(SAMPLE_N)} pixel sample per year"),
+    x        = "Biomass (Mg ha⁻¹)",
     y        = "Pixel count (sample)",
-    caption  = "Source: eMapR / LandTrendR, USGS Landsat ARD."
+    fill     = "Year",
+    caption  = "Source: eMapR / LandTrendR, islay.ceoas.oregonstate.edu."
   ) +
   theme_minimal(base_size = 12) +
   theme(
@@ -296,140 +208,175 @@ pHist <- ggplot(hist_df, aes(x = biomass)) +
 
 print(pHist)
 
-ggsave(here("figures", "emapr_biomass_histogram.png"),
+ggsave(here("figures", "emapr_composite_biomass_histogram.png"),
        plot = pHist, width = 10, height = 6, dpi = 300, bg = "white")
-img_dims <- dim(png::readPNG(here("figures", "emapr_biomass_histogram.png")))
+img_dims <- dim(png::readPNG(here("figures", "emapr_composite_biomass_histogram.png")))
 cat("Histogram saved — dimensions (px):", img_dims[2], "x", img_dims[1], "\n")
 ```
 
 ---
 
-## 5. Load State Boundaries
+## Plot A — Mean AGB Comparison Across Years
 
-```{r state-boundaries}
-all_states <- tigris::states(cb = TRUE, year = 2022, resolution = "5m") |>
-  dplyr::filter(STUSPS %in% WESTERN_STATES) |>
-  sf::st_transform(crs = sf::st_crs(agb_layer1))
+Mean ± SE of AGB across all valid California pixels for each of the three years.
 
-ca_boundary <- all_states |> dplyr::filter(STUSPS == "CA")
+```{r plot-a-comparison}
+trend_df <- do.call(rbind, lapply(stats_list, function(s) {
+  se <- s$sd / sqrt(s$n_valid)
+  data.frame(
+    year = s$year, mean = s$mean,
+    se   = se, ymin = s$mean - se, ymax = s$mean + se
+  )
+}))
 
-stopifnot("California not found in tigris states" = nrow(ca_boundary) == 1)
-stopifnot("Western states missing from tigris" = nrow(all_states) == length(WESTERN_STATES))
+pA <- ggplot(trend_df, aes(x = factor(year), y = mean)) +
+  geom_col(fill = "#2c7bb6", alpha = 0.85, width = 0.5) +
+  geom_errorbar(aes(ymin = ymin, ymax = ymax),
+                width = 0.12, linewidth = 0.8, color = "grey20") +
+  geom_text(aes(label = round(mean, 1)), vjust = -0.8, size = 3.5, color = "grey20") +
+  scale_y_continuous(
+    labels = number_format(accuracy = 0.1),
+    expand = expansion(mult = c(0, 0.12))
+  ) +
+  labs(
+    title    = "Mean Aboveground Biomass — California (2000, 2001, 2003)",
+    subtitle = "eMapR CONUS composites | Error bars = ± 1 SE across all valid California pixels",
+    x        = "Year",
+    y        = "Mean AGB (Mg ha⁻¹)",
+    caption  = "Source: eMapR / LandTrendR, islay.ceoas.oregonstate.edu."
+  ) +
+  theme_minimal(base_size = 12) +
+  theme(
+    plot.title         = element_text(face = "bold", size = 14),
+    plot.subtitle      = element_text(color = "grey40", size = 11),
+    plot.caption       = element_text(color = "grey50", size = 9),
+    panel.grid.minor   = element_blank(),
+    panel.grid.major.x = element_blank(),
+    axis.text          = element_text(size = 11)
+  )
 
-# ── Overlap check: do any present tiles touch the Western US extent? ───────────
-west_bbox <- sf::st_bbox(all_states)
-tile_ext  <- as.vector(terra::ext(agb_layer1))
+print(pA)
 
-x_overlap <- west_bbox["xmin"] < tile_ext[2] && west_bbox["xmax"] > tile_ext[1]
-y_overlap <- west_bbox["ymin"] < tile_ext[4] && west_bbox["ymax"] > tile_ext[3]
-
-cat("Mosaic extent — x:", round(tile_ext[1]), "to", round(tile_ext[2]), "\n")
-cat("Mosaic extent — y:", round(tile_ext[3]), "to", round(tile_ext[4]), "\n")
-cat("Western US overlap — x:", x_overlap, "| y:", y_overlap, "\n")
-
-if (!x_overlap || !y_overlap)
-  warning("Mosaic and Western US states do not overlap — check CRS alignment.")
+ggsave(here("figures", "emapr_composite_biomass_trend.png"),
+       plot = pA, width = 10, height = 6, dpi = 300, bg = "white")
+img_dims <- dim(png::readPNG(here("figures", "emapr_composite_biomass_trend.png")))
+cat("Plot A saved — dimensions (px):", img_dims[2], "x", img_dims[1], "\n")
 ```
 
 ---
 
-## 6. Spatial Map — Biomass with State Boundaries
+## Plot B — Spatial Maps of AGB (2000, 2001, 2003)
 
-```{r biomass-map, fig.height=9}
-# ── Aggregate for visualization ────────────────────────────────────────────────
-agb_agg <- terra::aggregate(agb_layer1, fact = AGG_FACTOR, fun = "mean", na.rm = TRUE)
-agg_res  <- round(terra::res(agb_agg)[1])
+Three annual snapshots mapped across California on a shared color scale.
+Native 30 m pixels aggregated to ~300 m for display. Color capped at the 99th
+percentile of forested pixels across all three years; values above the cap are
+**clamped** to the cap (not dropped to white).
 
-cat("Aggregated resolution (m):", agg_res, "\n")
-cat("Aggregated dimensions:    ", nrow(agb_agg), "×", ncol(agb_agg), "\n")
+```{r plot-b-prep, cache=FALSE}
+# ── Shared color scale: 99th pct of forested CA pixels across all three years ─
+all_forested <- unlist(lapply(stats_list, `[[`, "vals"))
+agb_upper    <- quantile(all_forested, 0.99, na.rm = TRUE)
+cat("Shared color scale: 0 –", round(agb_upper, 1), "Mg/ha (99th pct across 2000/2001/2003)\n")
+```
 
-# ── Convert to data frame ──────────────────────────────────────────────────────
-agb_df <- as.data.frame(agb_agg, xy = TRUE) |>
-  dplyr::rename(biomass = 3) |>
-  dplyr::filter(!is.na(biomass), biomass > 0)
+```{r plot-b-maps, cache=FALSE}
+# ── Helper: load pre-aggregated 300 m raster → clamp → save PNG ───────────────
+# 300 m TIFs are produced by scripts/r/01_precompute_emapr_ca.R (tiny, fast to load).
+make_emapr_map <- function(yr, ca_vect, agb_upper) {
+  map_path <- file.path(CA_DIR, glue("composite_{yr}_ca_300m.tif"))
+  if (!file.exists(map_path)) {
+    stop(glue("300 m raster not found for {yr}. Run scripts/r/01_precompute_emapr_ca.R first."))
+  }
+  lyr     <- terra::rast(map_path)
+  agg_res <- round(terra::res(lyr)[1])
+  cat(glue("{yr}: loaded {agg_res} m raster | {nrow(lyr)} × {ncol(lyr)} px\n"))
 
-cat("Valid pixels for plotting:", scales::comma(nrow(agb_df)), "\n")
+  n_valid <- sum(!is.na(terra::values(lyr)))
+  if (n_valid == 0) stop(glue("{yr}: all-NA — check 300 m TIF"))
+  cat(glue("{yr}: valid pixels = {scales::comma(n_valid)}\n"))
 
-cap_99 <- quantile(agb_df$biomass, 0.99, na.rm = TRUE)
-cat("99th pct (color cap):     ", round(cap_99, 1), "\n")
+  # Clamp BEFORE plotting so above-cap pixels show as yellow, not white
+  lyr <- terra::clamp(lyr, lower = 0, upper = agb_upper, values = TRUE)
 
-# ── Map ───────────────────────────────────────────────────────────────────────
-map_subtitle <- glue(
-  "{n_present} of {n_expected} tiles downloaded | ",
-  "CA boundary = black | Other Western states = grey | ",
-  "Aggregated to {agg_res} m for display"
-)
-
-pMap <- ggplot() +
-  geom_raster(data = agb_df,
-              aes(x = x, y = y, fill = pmin(biomass, cap_99))) +
-  # Western states — light grey fill so missing-tile gaps are visible
-  geom_sf(data      = all_states,
-          fill      = NA,
-          color     = "grey60",
-          linewidth = 0.4,
-          inherit.aes = FALSE) +
-  # California — bold black outline on top
-  geom_sf(data      = ca_boundary,
-          fill      = NA,
-          color     = "white",
-          linewidth = 1.2,
-          inherit.aes = FALSE) +
-  geom_sf(data      = ca_boundary,
-          fill      = NA,
-          color     = "black",
-          linewidth = 0.6,
-          inherit.aes = FALSE) +
-  scale_fill_viridis_c(
-    name      = "Biomass\n(Mg ha⁻¹)",
-    option    = "viridis",
-    direction = 1,
-    na.value  = "transparent",
-    labels    = number_format(accuracy = 1)
-  ) +
-  annotation_scale(location = "bl", width_hint = 0.2, text_cex = 0.85) +
-  annotation_north_arrow(
-    location    = "tr",
-    which_north = "true",
-    style       = north_arrow_minimal(text_size = 10)
-  ) +
-  labs(
-    title   = "eMapR Aboveground Biomass — Western US (available tiles)",
-    subtitle = map_subtitle,
-    x = NULL, y = NULL,
-    caption = paste(
-      "Source: eMapR / LandTrendR, USGS Landsat ARD.",
-      "CRS: EPSG:5070 (Albers Equal Area, CONUS).",
-      "Color capped at 99th percentile."
-    )
-  ) +
-  theme_void(base_size = 12) +
-  theme(
-    plot.title        = element_text(face = "bold", size = 14, margin = margin(b = 4)),
-    plot.subtitle     = element_text(color = "grey40", size = 10, margin = margin(b = 8)),
-    plot.caption      = element_text(color = "grey50", size = 9),
-    plot.margin       = margin(10, 10, 10, 10),
-    legend.position   = "right",
-    legend.title      = element_text(size = 11),
-    legend.text       = element_text(size = 10),
-    legend.key.height = unit(1.5, "cm")
+  fpath <- here("figures", glue("emapr_composite_biomass_map_{yr}.png"))
+  png(fpath, width = 8, height = 9, units = "in", res = 300, bg = "white")
+  terra::plot(
+    lyr,
+    col      = hcl.colors(100, "viridis"),
+    range    = c(0, agb_upper),
+    main     = glue("Aboveground Biomass — California ({yr})"),
+    plg      = list(
+      title     = glue("AGB (Mg/ha)\n(capped at {round(agb_upper)} — 99th pct)"),
+      title.cex = 0.75, cex = 0.75
+    ),
+    mar      = c(3, 3, 4, 7),
+    cex.main = 1.1
   )
+  terra::plot(ca_vect, add = TRUE, col = NA, border = "grey20", lwd = 0.6)
+  mtext(
+    glue("Source: eMapR / LandTrendR, islay.ceoas.oregonstate.edu. Aggregated to {agg_res} m."),
+    side = 1, line = 1.8, cex = 0.65, col = "grey50"
+  )
+  dev.off()
+  fpath
+}
 
-print(pMap)
+map_paths <- lapply(STUDY_YEARS, make_emapr_map,
+                    ca_vect   = ca_vect,
+                    agb_upper = agb_upper)
+names(map_paths) <- STUDY_YEARS
 
-ggsave(here("figures", "emapr_biomass_coverage_map.png"),
-       plot = pMap, width = 10, height = 9, dpi = 300, bg = "white")
-img_dims <- dim(png::readPNG(here("figures", "emapr_biomass_coverage_map.png")))
-cat("Map saved — dimensions (px):", img_dims[2], "x", img_dims[1], "\n")
+for (yr in STUDY_YEARS) {
+  img_dims <- dim(png::readPNG(map_paths[[as.character(yr)]]))
+  cat("Saved:", basename(map_paths[[as.character(yr)]]),
+      "— dimensions (px):", img_dims[2], "x", img_dims[1], "\n")
+}
+```
+
+```{r plot-b-2000, fig.cap="California AGB — 2000"}
+knitr::include_graphics(map_paths[["2000"]])
+```
+
+```{r plot-b-2001, fig.cap="California AGB — 2001"}
+knitr::include_graphics(map_paths[["2001"]])
+```
+
+```{r plot-b-2003, fig.cap="California AGB — 2003"}
+knitr::include_graphics(map_paths[["2003"]])
+```
+
+---
+
+## 7. Summary Table
+
+```{r summary-table}
+summary_df <- do.call(rbind, lapply(stats_list, function(s) {
+  tibble::tibble(
+    Year               = s$year,
+    `Valid pixels (%)` = round(s$n_valid / s$n_total * 100, 1),
+    `Median (Mg/ha)`   = round(s$median, 1),
+    `Mean (Mg/ha)`     = round(s$mean,   1),
+    `SD (Mg/ha)`       = round(s$sd,     1),
+    `95th pct`         = round(s$q95,    1),
+    `Max`              = round(s$max,    1)
+  )
+}))
+
+knitr::kable(
+  summary_df,
+  align   = "lrrrrrr",
+  caption = "eMapR composite biomass summary — California pixels, 2000 / 2001 / 2003"
+)
 ```
 
 ::: callout-note
-**Coverage notes:**
+**Data notes:**
 
-- The map shows only the **`r n_present` tile(s) currently on disk**; grey state outlines extend
-  beyond the raster footprint to show where data is still missing.
-- As additional tiles are downloaded to `data/raw/emapr_biomass/`, re-rendering this document
-  automatically picks them up — no code changes needed.
-- Each Landsat ARD tile is 5,000 × 5,000 pixels at 30 m native resolution (~150 × 150 km).
-- `h02v08` is intentionally absent from the 32-tile list (no study-area coverage for that cell).
+- Raw files: `composite_YYYY_median.tif` from `islay.ceoas.oregonstate.edu/STEM_CONUS_BIOMASS/biomassfiaald-v1990-2023-1/` (~27.7 GB each)
+- Pre-processed CA files: `data/processed/emapr_biomass_ca/composite_YYYY_ca.tif` (~100–300 MB each), generated by `scripts/r/00_crop_emapr_to_ca.R`
+- Native resolution: 30 m (Landsat ARD grid, EPSG:5070). Display maps aggregated to ~300 m (10× block mean).
+- Statistics and maps clipped to California only, matching the ctrees spatial scope.
+- Color scale capped at 99th percentile and clamped — no pixels are dropped to white.
+- Next steps: load remaining years (1994–2023), join with MTBS fire perimeters, and run the
+  Callaway-Sant'Anna DiD estimator in `scripts/r/03_create_panel.R`.
 :::

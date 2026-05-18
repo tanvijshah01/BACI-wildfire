@@ -93,10 +93,27 @@ Estimating causal effects of wildfire severity on forest biomass recovery using:
 
 ## Current Status
 
+**Scope note:** The project is currently in a downscaled EDA state — California only, years
+1990/1992/1993. Full Western US coverage and all available years are pending the tasks below.
+
 ### Completed
-- [ ] Download MTBS fire perimeters
-- [ ] Set up project structure
-- [ ] Install R packages
+- [x] Download MTBS fire perimeters
+- [x] Set up project structure
+- [x] Install R packages
+- [x] Download eMapR CONUS composites via FTP for years 1990–1998, 2000–2001, 2003–2015
+      (`data/raw/emapr_biomass/`, ~27.7 GB per file)
+- [x] Pre-save CA-clipped rasters for 1990–2003 (`data/processed/emapr_biomass_ca/`)
+- [x] EDA of eMapR biomass for CA, 1990/1992/1993 (`analysis/03_emapr_biomass_exploration.qmd`)
+
+### Incomplete — resume before expanding scope
+- [ ] **FTP download:** Years 1999, 2002, 2016–2023 not yet downloaded (disk space issue).
+      Use `curl.exe --ftp-pasv` loop in `CLAUDE.md §3.1.2`. Re-enable sleep prevention
+      (`powercfg /change standby-timeout-ac 0`) and keep lid open.
+- [ ] **Pre-save CA crops:** `scripts/r/00_crop_emapr_to_ca.R` completed 1990–2003 then
+      failed at 2004 (disk full). Run again once disk space is freed; script skips
+      already-saved years automatically.
+- [ ] **Expand EDA to all available years:** Once CA crops are complete, update
+      `STUDY_YEARS` in `03_emapr_biomass_exploration.qmd` to include all years.
 
 ### In Progress
 - [ ] **Exploratory Data Analysis (CURRENT PHASE)**
@@ -286,6 +303,77 @@ All raw data lives in `data/` and comes from federal sources — do not modify o
 
 All datasets are standard ESRI shapefiles (`.shp`, `.dbf`, `.shx`, `.prj`, `.cpg`) with FGDC metadata (`.xml`). Files are large (100MB+ each) — avoid loading entire datasets into memory; use spatial filters or chunked reads.
 
+## 3. Data Download
+
+### 3.1 Biomass Data
+
+#### 3.1.2 eMapR Biomass (islay.ceoas.oregonstate.edu)
+
+**Server:** `islay.ceoas.oregonstate.edu` (FTP, anonymous login)
+**Remote path:** `STEM_CONUS_BIOMASS/biomassfiaald-v1990-2023-1/`
+**Local destination:** `data/raw/emapr_biomass/` (files confirmed here, not in `data/raw/` directly)
+**Files:** `composite_YYYY_median.tif` — one per year, 1990–2023, ~27.7 GB each (BigTIFF format)
+**CRS:** EPSG:5070 (NAD83 / Conus Albers), 30 m resolution, ~96,815 × 153,809 pixels CONUS-wide
+
+**Important:** Windows `ftp.exe` does not support passive mode and will get `Connection closed by remote host` when running `mget *`. Use `curl.exe` instead (built into Windows 10/11). Do not use `curl` in PowerShell — it is an alias for `Invoke-WebRequest` and will fail; always use `curl.exe` explicitly.
+
+Download all years from a PowerShell prompt opened in `data/raw/emapr_biomass/`:
+
+```powershell
+for ($yr = 1990; $yr -le 2023; $yr++) {
+    $url = "ftp://islay.ceoas.oregonstate.edu/STEM_CONUS_BIOMASS/biomassfiaald-v1990-2023-1/composite_${yr}_median.tif"
+    Write-Host "Downloading $yr..."
+    curl.exe --ftp-pasv --user "anonymous:" -O $url
+}
+```
+
+To resume from a specific year (e.g., if 1990–1991 already downloaded), change the loop start:
+
+```powershell
+for ($yr = 1992; $yr -le 2023; $yr++) { ... }
+```
+
+Monitor download progress in a second PowerShell window:
+
+```powershell
+while ($true) {
+    $files = Get-ChildItem . -Filter "*.tif"
+    $tmp   = Get-ChildItem . -Filter "*.tmp"
+    $totalGB = [math]::Round(($files + $tmp | Measure-Object Length -Sum).Sum / 1GB, 2)
+    Write-Host "$(Get-Date -Format 'HH:mm:ss')  $($files.Count) tif complete | downloading: $($tmp.Name) | total on disk: $totalGB GB"
+    ($files + $tmp) | ForEach-Object { $_.Refresh() }
+    Start-Sleep 15
+}
+```
+
+Prevent the laptop from sleeping during download (required — closing the lid interrupts the transfer):
+
+```powershell
+powercfg /change standby-timeout-ac 0   # disable sleep on AC power
+```
+
+Re-enable after download completes:
+
+```powershell
+powercfg /change standby-timeout-ac 30
+```
+```
+Post-download preprocessing (required before rendering QMD):
+
+    The CONUS-wide composites (~27.7 GB each) must be cropped to the study region before use — loading them directly in
+    Quarto causes multi-minute stalls.
+
+    - California EDA: Run scripts/r/00_crop_emapr_to_ca.R once after downloading. Outputs land in
+    data/processed/emapr_biomass_ca/composite_YYYY_ca.tif (~100–300 MB each). analysis/03_emapr_biomass_exploration.qmd
+    reads from these, not the raw CONUS files.
+    - Western US analysis (planned): When the analysis expands to all 11 Western states (AZ, CA, CO, ID, MT, NV, NM, OR,
+     UT, WA, WY), write a separate scripts/r/00_crop_emapr_to_west.R following the same pattern. Expected output ~1 GB
+    per year.
+
+    Both preprocessing scripts are skip-safe — they check for existing output files and only process missing years.
+```
+---
+
 ## Directory Structure
 
 ```
@@ -295,9 +383,13 @@ BACI/
 │   └── r/             # Data processing & analysis scripts
 ├── analysis/          # Quarto exploratory & analysis documents
 ├── paper/             # Final manuscript (manuscript.qmd)
-├── data/              # Raw shapefiles (MTBS + Burn Severity)
+├── data/
+│   ├── raw/           # Untouched downloaded data (MTBS shapefiles, eMapR GeoTIFFs)
+│   └── processed/
+│       ├── ctrees/    # ctrees_biomass_ca_1km.nc, biomass_fire_polygons_ctrees.csv
+│       └── emapr_biomass_ca/  # CA-clipped eMapR TIFs, pre-aggregated 300m TIFs, stats RDS
 ├── figures/           # Output plots and maps
-└── output/            # Processed data outputs (e.g., panel CSVs)
+└── output/            # GEE export outputs (e.g., panel CSVs)
 ```
 
 ## Coding Style and Organization
