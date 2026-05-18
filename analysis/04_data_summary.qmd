@@ -17,6 +17,8 @@ execute:
   cache: false
 ---
 
+This document explores the key datasets involved in the BACI analysis with binary treatment: fire perimeters from MTBS (Monitoring Trends in Burn Severity) and biomass (eMapR and CTrees).
+
 ```{r outline}
 # =============================================================================
 # SCRIPT OUTLINE
@@ -26,6 +28,7 @@ execute:
 # 3.  ctrees — methodology, spatial maps
 # 4.  eMapR — methodology, spatial maps
 # 5.  Dataset comparison table — temporal range, spatial resolution, methodology
+# 6.  Design decisions — MTBS assessment types; choice of biomass outcome variable; control unit definition and SUTVA
 # =============================================================================
 ```
 
@@ -54,7 +57,7 @@ here::i_am("analysis/04_data_summary.qmd")
 
 # ── Study parameters — change these to update the whole document ───────────────
 STUDY_YEARS    <- c(2000, 2001, 2002)   # years with data in all three datasets
-YEAR_MIN       <- 2000                   # MTBS time-series start
+YEAR_MIN       <- 1984                   # MTBS full dataset start
 YEAR_MAX       <- 2023                   # MTBS time-series end
 STATE_FIPS     <- "CA"                   # state to clip all data to
 
@@ -147,7 +150,7 @@ ggplot() +
   scale_fill_viridis_c(
     option  = "inferno",
     name    = "Ignition year",
-    breaks  = seq(2000, 2023, by = 5),
+    breaks  = seq(YEAR_MIN, YEAR_MAX, by = 5),
     guide   = guide_colorbar(barwidth = 10, barheight = 0.5, title.position = "top")
   ) +
   annotation_scale(location = "bl", width_hint = 0.25) +
@@ -180,7 +183,7 @@ ggplot(fires_yr, aes(x = year, y = n, fill = asmnt_cat)) +
     values = c("Extended" = "#d6604d", "Initial" = "#4393c3", "Emergency" = "#878787", "Other" = "#cccccc"),
     name   = "Assessment type"
   ) +
-  scale_x_continuous(breaks = seq(YEAR_MIN, YEAR_MAX, by = 2)) +
+  scale_x_continuous(breaks = seq(YEAR_MIN, YEAR_MAX, by = 5)) +
   scale_y_continuous(expand = expansion(mult = c(0, 0.08))) +
   labs(
     title   = glue("Wildfire Count per Year — {STATE_FIPS}"),
@@ -507,7 +510,7 @@ mtbs_usage <- paste0(
 )
 
 ctrees_usage <- paste0(
-  "<strong>Primary outcome (response) variable.</strong> Annual mean AGB at ",
+  "<strong> Outcome (response) variable.</strong> Annual mean AGB at ",
   "100 m resolution extracted for each MTBS fire perimeter before and after ",
   "each fire event across the 11-state study region. Used as the dependent ",
   "variable in the Callaway-Sant&apos;Anna staggered difference-in-differences ",
@@ -515,8 +518,8 @@ ctrees_usage <- paste0(
 )
 
 emapr_usage <- paste0(
-  "Secondary biomass outcome for sensitivity analysis and cross-dataset ",
-  "validation. Annual AGB extracted at 30 m resolution over MTBS fire ",
+  "<strong> Outcome (response) variable.</strong> Annual AGB extracted at",
+  "30 m resolution over MTBS fire ",
   "perimeters; provides a methodologically independent estimate of biomass ",
   "recovery trajectories for comparison with ctrees."
 )
@@ -561,3 +564,87 @@ knitr::kable(
 - **eMapR:** 300 m display rasters pre-aggregated from 30 m CA-clipped composites. Study years: `r paste(STUDY_YEARS, collapse=", ")`. Source: eMapR / LandTrendR, islay.ceoas.oregonstate.edu.
 - To add a year: update `STUDY_YEARS` in the setup chunk and ensure `scripts/r/01_precompute_emapr_ca.R` has been run for that year.
 :::
+
+---
+
+## 6. Design Decisions
+
+### 6.1 Subsetting MTBS Data: All Assessment Types vs. Extended Only
+
+MTBS fire records carry one of three assessment types — **Extended**, **Initial**, and **Emergency** — reflecting when the post-fire Landsat scene was acquired relative to the fire event. The choice of which assessment types to retain has implications for both sample size and severity measurement quality.
+
+**Extended assessments** use a post-fire image acquired at the next peak-of-green growing season. This timing maximises the spectral contrast between burned and unburned vegetation, minimises ash-confusion artefacts, and produces the most defensible dNBR values for severity classification. MTBS documentation and the broader literature (Eidenshink et al., 2007) recommend Extended assessments for scientific analysis.
+
+**Initial assessments** use a post-fire image acquired shortly after containment. The dNBR value is still a valid spectral measurement, but it captures early post-fire conditions (ash, char, exposed soil) rather than true vegetation loss, potentially overestimating high-severity area in some fire types.
+
+
+| | All types | Extended only |
+|---|---|---|
+| **Advantages** | Larger sample; no geographic selection bias | Cleaner severity signal; methodologically defensible |
+| **Disadvantages** | Severity heterogeneity across assessment types
+
+**Potential approach:** Include all assessment types for defining the treatment indicator (initial and extended). Confirm results with extended-only analysis. 
+:::
+
+---
+
+### 6.2 Choice of Biomass Dataset for the Outcome Variable
+
+Both ctrees and eMapR provide annual aboveground biomass estimates for the study region, but they differ in methodology, temporal coverage, and data sources. 
+
+#### ctrees (proposed primary outcome)
+
+**Strengths:**
+- Multi-sensor fusion (Landsat + Sentinel-2 + ALOS PALSAR + GEDI + ICESat-2) provides richer spectral and structural information than Landsat-only products.
+- GEDI spaceborne lidar provides direct canopy height measurements that constrain biomass estimates, particularly important in structurally complex post-fire forests.
+- Trained on >500,000 inventory plots globally, providing broad ground-truth coverage.
+- Coverage through 2025 maximizes the post-fire recovery window for recently burned units.
+
+**Limitations:**
+- Temporal coverage begins in 2000, limiting the pre-treatment baseline to fires occurring after 2000 (no pre-fire data for 2000 fires themselves).
+- Multi-sensor fusion introduces potential discontinuities when sensors launch or retire (e.g., Sentinel-2 from 2015, GEDI from 2018).
+- Methodology not fully peer-reviewed in a single published paper at the time of writing.
+
+#### eMapR (proposed secondary/validation outcome)
+
+**Strengths:**
+- Coverage from 1990 provides a longer pre-treatment baseline — fires occurring from 2000 onward have up to 10 years of pre-fire biomass data available.
+- LandTrendR is explicitly designed to capture spectral trajectories of disturbance and recovery
+- Well-documented, peer-reviewed methodology (Kennedy et al., 2018).
+
+**Limitations:**
+- Landsat-only inputs; no structural lidar integration for the historical period.
+- Coverage ends at 2023 (2015 currently downloaded), limiting post-fire observation windows for recent fires.
+
+
+
+
+:::
+
+---
+
+### 6.3 Control Unit Definition and SUTVA
+
+The Stable Unit Treatment Value Assumption (SUTVA) requires that the potential outcome for any treated unit is unaffected by the treatment status of other units. In a wildfire context, this is threatened if: (1) a candidate control unit later burns during the study period, or (2) fire effects spill over into adjacent unburned areas (smoke, altered hydrology, seed dispersal, fire behavior modification).
+
+#### What qualifies as a control unit?
+
+Control units must satisfy two conditions:
+
+1. **Never burned** (within the study period, 2000–2023) — units that burn at any point cannot serve as clean controls for the full panel. In the Callaway-Sant'Anna framework, units that burn later are "not yet treated" controls, which is valid, but units that were already burned before the study period are problematic if biomass recovery is still ongoing.
+2. **Same ecoregion** — parallel trends requires that treated and control units would have followed the same biomass trajectory absent fire. Units in structurally similar vegetation (same EPA Level III ecoregion or same forest type) are more plausible counterfactuals than geographically distant units.
+
+#### Spatial buffer (SUTVA)
+
+A minimum spatial buffer between treated fire perimeters and control units reduces spillover violations. Common choices in the fire literature range from 500 m to 5 km depending on the mechanism of concern:
+
+| Spillover mechanism | Recommended buffer |
+|---|---|
+| Altered microclimate / edge effects | 100–500 m |
+| Hydrological effects (sediment, runoff) | 500 m–1 km |
+| Fire spread / spotting in subsequent fires | 1–5 km |
+
+**Potential approach:** Exclude any candidate control pixel within 1 km of any MTBS fire perimeter (burned 2000–2023). Sensitivity analysis with 500 m and 2 km buffers to assess robustness.
+
+:::
+
