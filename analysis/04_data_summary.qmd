@@ -23,12 +23,13 @@ This document explores the key datasets involved in the BACI analysis with binar
 # =============================================================================
 # SCRIPT OUTLINE
 # 1.  Setup — packages, study parameters, CA boundary
-# 2.  MTBS — methodology, fire perimeter map, fires per year,
+# 2.  Dataset comparison table — temporal range, spatial resolution, methodology
+# 3.  MTBS — methodology, fire perimeter map, fires per year,
 #             size distribution, assessment type summary, summary table
-# 3.  ctrees — methodology, spatial maps
-# 4.  eMapR — methodology, spatial maps
-# 5.  Dataset comparison table — temporal range, spatial resolution, methodology
-# 6.  Design decisions — MTBS assessment types; choice of biomass outcome variable; control unit definition and SUTVA
+# 4.  ctrees — methodology, spatial maps
+# 5.  eMapR — methodology, spatial maps
+# 6.  Biomass comparison — AGB distribution, scatter/hexbin, change map
+# 7.  Design decisions — MTBS assessment types; choice of biomass outcome variable; control unit definition and SUTVA
 # =============================================================================
 ```
 
@@ -50,6 +51,7 @@ library(lubridate)
 library(ggspatial)
 library(knitr)
 library(png)
+library(hexbin)
 
 sf_use_s2(FALSE)
 options(tigris_use_cache = TRUE)
@@ -91,9 +93,113 @@ theme_baci <- theme_minimal(base_size = 12) +
 
 ---
 
-## 2. MTBS Fire Perimeters
+## 2. Dataset Comparison
 
-### 2.1 Data Collection Methodology
+
+
+```{r dataset-comparison-table}
+# ── Dataset comparison ─────────────────────────────────────────────────────────
+# HTML tags used for multi-line cells; requires escape = FALSE in kable.
+
+mtbs_method <- paste0(
+  "Burn severity derived from the differenced Normalized Burn Ratio ",
+  "(dNBR = NBR<sub>pre</sub> &minus; NBR<sub>post</sub>). ",
+  "Severity classes calibrated per-fire against an unburned reference area ",
+  "(Eidenshink et al., 2007).",
+  "<br><br><em>Inputs:</em> Landsat 4/5 TM, 7 ETM+, 8/9 OLI surface reflectance; ",
+  "one pre-fire and one post-fire scene per event.",
+  "<br><br><em>Ground truth:</em> None. Index-based spectral classification ",
+  "reviewed by USFS remote sensing specialists; no independent field validation ",
+  "of severity classes."
+)
+
+ctrees_method <- paste0(
+  "Multi-scale machine learning framework predicting annual aboveground biomass ",
+  "density from multi-sensor satellite imagery and topographic covariates ",
+  "(CTrees, 2025).",
+  "<br><br><em>Inputs:</em> Landsat, Sentinel-2, and ALOS PALSAR radar surface ",
+  "reflectance; spaceborne LiDAR from NASA GEDI and ICESat-2; ",
+  "SRTM digital elevation model.",
+  "<br><br><em>Ground truth:</em> Over 500,000 ground-based forest inventory ",
+  "plots worldwide (including USFS FIA); validated with drone and airborne ",
+  "LiDAR measurements."
+)
+
+emapr_method <- paste0(
+  "LandTrendR spectral-temporal segmentation of annual Landsat composites ",
+  "(Kennedy et al., 2018). Piecewise linear segments capture disturbance and ",
+  "recovery dynamics. Segment-derived spectral predictors feed a gradient ",
+  "nearest neighbor (GNN) imputation model with environmental covariates ",
+  "(elevation, climate, soils) to estimate AGB ",
+  "(Environmental Mapping and Assessment Program, Oregon State University).",
+  "<br><br><em>Inputs:</em> Landsat 5 TM, 7 ETM+, 8/9 OLI annual ",
+  "peak-of-growing-season composites; spectral indices (NBR, NDVI, B5); ",
+  "elevation, climate, and soil data.",
+  "<br><br><em>Ground truth:</em> USFS Forest Inventory and Analysis (FIA) ",
+  "permanent monitoring plots across the continental United States."
+)
+
+mtbs_usage <- paste0(
+  "<strong>Treatment variable and study unit definition.</strong> All MTBS fires ",
+  "&ge; 1,000 ac in 11 Western US states (AZ, CA, CO, ID, MT, NV, NM, OR, ",
+  "UT, WA, WY), 2000&ndash;2020. Provides treatment timing (ignition year) ",
+  "and burn severity for each fire event."
+)
+
+ctrees_usage <- paste0(
+  "<strong> Outcome (response) variable. </strong> Annual mean AGB at ",
+  "100 m resolution extracted for each MTBS fire perimeter before and after ",
+  "each fire event across the 11-state study region. Used as the dependent ",
+  "variable in the Callaway-Sant&apos;Anna staggered difference-in-differences ",
+  "estimator."
+)
+
+emapr_usage <- paste0(
+  "<strong> Outcome (response) variable.</strong> Annual AGB extracted at",
+  "30 m resolution over MTBS fire ",
+  "perimeters; provides a methodologically independent estimate of biomass ",
+  "recovery trajectories for comparison with ctrees."
+)
+
+comparison_df <- data.frame(
+  Attribute = c("Full temporal range", "Spatial resolution", "Methodology", "Usage in BACI study"),
+  MTBS      = c(
+    "1984&ndash;2023 (US-wide; Western US fires &ge; 1,000 ac)",
+    "30 m Landsat grid (fire perimeters as EPSG:4326 polygons)",
+    mtbs_method,
+    mtbs_usage
+  ),
+  ctrees    = c(
+    "2000&ndash;2025 (worldwide)",
+    "~100 m native (WGS84 / EPSG:4326); coarsened to ~1.1 km for this analysis",
+    ctrees_method,
+    ctrees_usage
+  ),
+  eMapR     = c(
+    "1990&ndash;2023 (CONUS-wide)",
+    "30 m (Landsat ARD grid; EPSG:5070 NAD83 Conus Albers); 300 m display aggregation",
+    emapr_method,
+    emapr_usage
+  ),
+  stringsAsFactors = FALSE
+)
+
+knitr::kable(
+  comparison_df,
+  col.names = c("Attribute", "MTBS", "ctrees", "eMapR"),
+  align     = "llll",
+  escape    = FALSE,
+  caption   = "Summary comparison of datasets used in this analysis."
+)
+```
+
+
+
+---
+
+## 3. MTBS Fire Perimeters
+
+### 3.1 Data Collection Methodology
 
 The **Monitoring Trends in Burn Severity (MTBS)** program is a joint USGS–USDA Forest Service initiative that consistently maps the location, extent, and burn severity of all large wildland fires in the United States from 1984 to present (Eidenshink et al., 2007). Burn severity is assessed using multitemporal Landsat satellite imagery at 30 m resolution.
 
@@ -141,7 +247,7 @@ cat("CA wildfires", YEAR_MIN, "–", YEAR_MAX, ":", nrow(mtbs_ca), "fires\n")
 cat("Total area:  ", scales::comma(round(sum(mtbs_ca$burnbndac))), "acres\n")
 ```
 
-### 2.2 Fire Perimeter Map (California, `r YEAR_MIN`–`r YEAR_MAX`)
+### 3.2 Fire Perimeter Map (California, `r YEAR_MIN`–`r YEAR_MAX`)
 
 ```{r mtbs-map, fig.height=9}
 ggplot() +
@@ -151,7 +257,7 @@ ggplot() +
     option  = "inferno",
     name    = "Ignition year",
     breaks  = seq(YEAR_MIN, YEAR_MAX, by = 5),
-    guide   = guide_colorbar(barwidth = 10, barheight = 0.5, title.position = "top")
+    guide   = guide_colorbar(barwidth = 20, barheight = 0.5, title.position = "top")
   ) +
   annotation_scale(location = "bl", width_hint = 0.25) +
   annotation_north_arrow(location = "tr", which_north = "true",
@@ -170,7 +276,7 @@ ggplot() +
   )
 ```
 
-### 2.3 Fires per Year
+### 3.3 Fires per Year
 
 ```{r mtbs-fires-per-year, fig.height=5}
 fires_yr <- mtbs_ca |>
@@ -195,7 +301,7 @@ ggplot(fires_yr, aes(x = year, y = n, fill = asmnt_cat)) +
   theme(panel.grid.major.x = element_blank())
 ```
 
-### 2.4 Fire Size Distribution
+### 3.4 Fire Size Distribution
 
 ::: {.callout-note}
 MTBS only maps fires ≥ 1,000 acres in the Western US. The left tail of this distribution
@@ -225,7 +331,7 @@ ggplot(sf::st_drop_geometry(mtbs_ca), aes(x = burnbndac, fill = asmnt_cat)) +
   theme(panel.grid.major.x = element_blank())
 ```
 
-### 2.5 Assessment Type Summary
+### 3.5 Assessment Type Summary
 
 ```{r mtbs-asmnt-summary, fig.height=4}
 asmnt_sum <- mtbs_ca |>
@@ -252,37 +358,176 @@ ggplot(asmnt_sum, aes(x = reorder(asmnt_type, n_fires), y = n_fires)) +
   theme(panel.grid.major.y = element_blank())
 ```
 
-### 2.6 Summary Table
-
-```{r mtbs-summary-table}
-mtbs_ca |>
-  sf::st_drop_geometry() |>
-  dplyr::group_by(year) |>
-  dplyr::summarise(
-    `Fires`         = n(),
-    `Total acres`   = scales::comma(round(sum(burnbndac))),
-    `Median acres`  = scales::comma(round(median(burnbndac))),
-    `Largest (acres)` = scales::comma(round(max(burnbndac))),
-    `Extended assessments (%)` = round(mean(asmnt_cat == "Extended") * 100, 1),
-    .groups = "drop"
-  ) |>
-  knitr::kable(
-    align   = "lrrrrr",
-    caption = glue("MTBS wildfire summary — {STATE_FIPS}, {YEAR_MIN}–{YEAR_MAX}")
-  )
-```
 
 ---
 
-## 3. Ctrees Aboveground Biomass
+### 3.6 Extended vs. Initial Assessment: Spatial Overlap
 
-### 3.1 Data Collection Methodology
+Many MTBS fire events in California carry either an **Extended** or **Initial** assessment.
+If polygons from the two types overlap spatially — i.e., the same ground was burned in one
+Initial-assessed fire and later (or earlier) in an Extended-assessed fire — then that area
+would appear in both assessment categories with potentially different severity measurements.
+The analysis below quantifies this overlap.
+
+```{r mtbs-overlap-setup}
+# ── Split by assessment category ──────────────────────────────────────────────
+mtbs_ext <- mtbs_ca |> dplyr::filter(asmnt_cat == "Extended")
+mtbs_ini <- mtbs_ca |> dplyr::filter(asmnt_cat == "Initial")
+
+# Sanity check: any Event_ID appearing with >1 assessment type?
+dup_ids <- mtbs_ca |>
+  sf::st_drop_geometry() |>
+  dplyr::count(event_id, asmnt_cat) |>
+  dplyr::group_by(event_id) |>
+  dplyr::filter(dplyr::n_distinct(asmnt_cat) > 1) |>
+  dplyr::ungroup()
+
+cat("Extended fires:", nrow(mtbs_ext),
+    "| area:", scales::comma(round(sum(mtbs_ext$burnbndac))), "acres\n")
+cat("Initial fires: ", nrow(mtbs_ini),
+    "| area:", scales::comma(round(sum(mtbs_ini$burnbndac))), "acres\n")
+cat("Event IDs with >1 assessment type:", nrow(dup_ids), "\n")
+```
+
+```{r mtbs-overlap-area}
+# ── Union each type, then intersect the unions ────────────────────────────────
+ext_union <- sf::st_union(mtbs_ext)
+ini_union <- sf::st_union(mtbs_ini)
+ovlp_geom <- sf::st_intersection(ext_union, ini_union)
+
+# Convert m² → acres (1 m² = 0.000247105 ac)
+m2_to_ac <- function(x) as.numeric(sf::st_area(x)) * 0.000247105
+
+ext_ac  <- m2_to_ac(ext_union)
+ini_ac  <- m2_to_ac(ini_union)
+ovlp_ac <- if (length(ovlp_geom) > 0 && !sf::st_is_empty(ovlp_geom))
+             m2_to_ac(ovlp_geom) else 0
+
+overlap_df <- data.frame(
+  Category        = c("Extended", "Initial", "Overlap (Extended ∩ Initial)"),
+  N_fires         = c(nrow(mtbs_ext), nrow(mtbs_ini), NA_integer_),
+  Area_ac         = round(c(ext_ac, ini_ac, ovlp_ac)),
+  Pct_of_Extended = c(NA, NA, round(100 * ovlp_ac / ext_ac, 1)),
+  Pct_of_Initial  = c(NA, NA, round(100 * ovlp_ac / ini_ac,  1))
+)
+
+options(knitr.kable.NA = "—")   # render NA cells as an em-dash
+knitr::kable(
+  overlap_df,
+  col.names   = c("Category", "N fires", "Area (acres)", "% of Extended area", "% of Initial area"),
+  format.args = list(big.mark = ","),
+  caption     = "Burned area comparison between Extended and Initial assessment polygons."
+)
+```
+
+```{r mtbs-type-maps, fig.width=14, fig.height=9}
+# ── Helper: one CA fire map per assessment type ───────────────────────────────
+make_type_map <- function(fires_sf, title_str, subtitle_str, year_min, year_max, ca_sf) {
+  ggplot() +
+    geom_sf(data = ca_sf, fill = "grey95", color = "grey60", linewidth = 0.4) +
+    geom_sf(data = fires_sf, aes(fill = year), color = NA, alpha = 0.75) +
+    scale_fill_viridis_c(
+      option = "inferno",
+      name   = "Ignition year",
+      limits = c(year_min, year_max),
+      breaks = seq(year_min, year_max, by = 5),
+      guide  = guide_colorbar(barwidth = 14, barheight = 0.5, title.position = "top")
+    ) +
+    annotation_scale(location = "bl", width_hint = 0.25) +
+    annotation_north_arrow(location = "tr", which_north = "true",
+                           style = north_arrow_minimal()) +
+    labs(title = title_str, subtitle = subtitle_str) +
+    theme_void(base_size = 12) +
+    theme(
+      plot.title    = element_text(face = "bold", size = 13),
+      plot.subtitle = element_text(color = "grey40", size = 11),
+      legend.position = "bottom"
+    )
+}
+
+p_ext <- make_type_map(
+  fires_sf     = mtbs_ext,
+  title_str    = glue("Extended Assessments — {STATE_FIPS} ({YEAR_MIN}–{YEAR_MAX})"),
+  subtitle_str = glue("{scales::comma(nrow(mtbs_ext))} fires"),
+  year_min     = YEAR_MIN, year_max = YEAR_MAX, ca_sf = ca_5070
+)
+
+p_ini <- make_type_map(
+  fires_sf     = mtbs_ini,
+  title_str    = glue("Initial Assessments — {STATE_FIPS} ({YEAR_MIN}–{YEAR_MAX})"),
+  subtitle_str = glue("{scales::comma(nrow(mtbs_ini))} fires"),
+  year_min     = YEAR_MIN, year_max = YEAR_MAX, ca_sf = ca_5070
+)
+
+patchwork::wrap_plots(p_ext, p_ini, ncol = 2) +
+  patchwork::plot_layout(guides = "collect") +
+  patchwork::plot_annotation(
+    caption = "Source: USGS MTBS Program (mtbs.gov).",
+    theme   = theme(
+      plot.caption    = element_text(color = "grey50", size = 9, hjust = 1),
+      legend.position = "bottom"
+    )
+  )
+```
+
+```{r mtbs-overlap-by-year, fig.height=6}
+# ── Tag each fire: does it spatially intersect the opposite assessment type? ──
+ini_overlaps <- lengths(sf::st_intersects(mtbs_ini, mtbs_ext)) > 0
+ext_overlaps <- lengths(sf::st_intersects(mtbs_ext, mtbs_ini)) > 0
+
+fire_overlap_df <- dplyr::bind_rows(
+  sf::st_drop_geometry(mtbs_ext) |>
+    dplyr::mutate(overlaps_other = ext_overlaps, type = "Extended"),
+  sf::st_drop_geometry(mtbs_ini) |>
+    dplyr::mutate(overlaps_other = ini_overlaps, type = "Initial")
+) |>
+  dplyr::count(year, type, overlaps_other) |>
+  dplyr::mutate(overlap_label = ifelse(overlaps_other, "Overlaps other type", "No overlap"))
+
+ggplot(fire_overlap_df, aes(x = year, y = n, fill = overlap_label)) +
+  geom_col(width = 0.8) +
+  facet_wrap(~ type, ncol = 1, scales = "free_y") +
+  scale_fill_manual(
+    values = c("Overlaps other type" = "#f6c141", "No overlap" = "grey70"),
+    name   = NULL
+  ) +
+  scale_x_continuous(breaks = seq(YEAR_MIN, YEAR_MAX, by = 5)) +
+  scale_y_continuous(expand = expansion(mult = c(0, 0.1))) +
+  labs(
+    title    = glue("Fires Overlapping the Other Assessment Type — {STATE_FIPS}"),
+    subtitle = "Yellow = fire polygon intersects ≥1 polygon assessed under the opposite type",
+    x        = "Year", y = "Number of fires",
+    caption  = "Source: USGS MTBS Program."
+  ) +
+  theme_baci +
+  theme(
+    panel.grid.major.x = element_blank(),
+    strip.text         = element_text(face = "bold")
+  )
+```
+
+::: {.callout-important}
+**Implication for study design**
+
+If a substantial share of Initial-assessed fire pixels are also covered by Extended polygons
+(or vice versa), retaining all assessment types in the treatment indicator means some pixels
+carry two fire events with potentially different severity measurements. The area statistics
+above directly inform the decision in §7.2.
+:::
+
+---
+
+## 4. Ctrees Aboveground Biomass
+
+### 4.1 Data Collection Methodology
 
 The **Ctrees** dataset provides annual estimates of aboveground biomass (AGB) for California derived from a machine-learning model trained on Landsat spectral time-series data and field inventory measurements (FIA plots). The native product is at ~100 m spatial resolution in WGS84 and spans 2000–2025.
 
 For this analysis, the dataset was coarsened to ~1.1 km (11× block average) to reduce file size, yielding a NetCDF file (`data/processed/ctrees/ctrees_biomass_ca_1km.nc`) of ~65 MB covering all 26 years. Values are stored as int16 scaled by 1/10, and read here directly as Mg ha⁻¹. The dataset covers California only and requires no additional spatial clipping.
 
-**Source:** `ucsb-emlab/BACI-wildfires` arraylake zarr store.
+**Source:** `https://app.earthmover.io/marketplace/69e00e1c21faca8bf36879d2`
+**Units:** Mg ha⁻¹. **Available years in this analysis:** `r paste(STUDY_YEARS, collapse=", ")`.
+
 
 ```{r ctrees-load}
 agb <- terra::rast(NC_PATH)
@@ -303,7 +548,7 @@ cat("Layers:", terra::nlyr(agb), "| Years:", min(rast_years), "–", max(rast_ye
 stopifnot("Study years must be in ctrees data" = all(STUDY_YEARS %in% rast_years))
 ```
 
-### 3.2 Spatial Maps
+### 4.2 Spatial Maps
 
 ```{r ctrees-maps}
 # Shared color scale: 99th pct of forested pixels across all study years
@@ -370,9 +615,9 @@ knitr::include_graphics(ctrees_row_path)
 
 ---
 
-## 4. eMapR Aboveground Biomass
+## 5. eMapR Aboveground Biomass
 
-### 4.1 Data Collection Methodology
+### 5.1 Data Collection Methodology
 
 The **eMapR** dataset provides annual estimates of aboveground biomass (AGB) derived from **LandTrendR**, a spectral-temporal segmentation algorithm applied to Landsat surface reflectance time-series (Kennedy et al., 2018). LandTrendR fits piecewise linear segments to annual spectral indices, capturing both gradual vegetation change and disturbance events such as wildfire.  The native product is at ~30 m spatial resolution in ESPG: 5070 and spans 1990–2017.
 
@@ -396,7 +641,7 @@ names(emapr_stats) <- STUDY_YEARS
 cat("eMapR stats loaded for:", paste(STUDY_YEARS, collapse=", "), "\n")
 ```
 
-### 4.2 Spatial Maps
+### 5.2 Spatial Maps
 
 ```{r emapr-maps}
 all_emapr_vals <- unlist(lapply(emapr_stats, `[[`, "vals"))
@@ -456,195 +701,100 @@ knitr::include_graphics(emapr_row_path)
 
 ---
 
-## 5. Dataset Comparison
+## 6. Biomass Dataset Comparison — ctrees vs. eMapR
 
-The table below summarizes the key characteristics of the two biomass datasets used in this analysis alongside the MTBS fire perimeter data.
+The two biomass datasets capture the same ecological signal via different sensor stacks and
+modeling approaches. The figures below compare their value distributions and spatial patterns
+for the same years and study region to assess coherence before choosing one as the
+primary outcome variable.
 
-```{r dataset-comparison-table}
-# ── Dataset comparison ─────────────────────────────────────────────────────────
-# HTML tags used for multi-line cells; requires escape = FALSE in kable.
+### 6.1 AGB Value Distributions
 
-mtbs_method <- paste0(
-  "Burn severity derived from the differenced Normalized Burn Ratio ",
-  "(dNBR = NBR<sub>pre</sub> &minus; NBR<sub>post</sub>). ",
-  "Severity classes calibrated per-fire against an unburned reference area ",
-  "(Eidenshink et al., 2007).",
-  "<br><em>Inputs:</em> Landsat 4/5 TM, 7 ETM+, 8/9 OLI surface reflectance; ",
-  "one pre-fire and one post-fire scene per event.",
-  "<br><br><em>Ground truth:</em> None. Index-based spectral classification ",
-  "reviewed by USFS remote sensing specialists; no independent field validation ",
-  "of severity classes."
+```{r biomass-density}
+dist_df <- dplyr::bind_rows(
+  data.frame(agb = all_ctrees_vals[all_ctrees_vals <= ctrees_upper], dataset = "ctrees (~1.1 km)"),
+  data.frame(agb = all_emapr_vals[all_emapr_vals <= emapr_upper],    dataset = "eMapR (300 m)")
 )
 
-ctrees_method <- paste0(
-  "Multi-scale machine learning framework predicting annual aboveground biomass ",
-  "density from multi-sensor satellite imagery and topographic covariates ",
-  "(CTrees, 2025).",
-  "<br><em>Inputs:</em> Landsat, Sentinel-2, and ALOS PALSAR radar surface ",
-  "reflectance; spaceborne LiDAR from NASA GEDI and ICESat-2; ",
-  "SRTM digital elevation model.",
-  "<br><br><em>Ground truth:</em> Over 500,000 ground-based forest inventory ",
-  "plots worldwide (including USFS FIA); validated with drone and airborne ",
-  "LiDAR measurements."
-)
-
-emapr_method <- paste0(
-  "LandTrendR spectral-temporal segmentation of annual Landsat composites ",
-  "(Kennedy et al., 2018). Piecewise linear segments capture disturbance and ",
-  "recovery dynamics. Segment-derived spectral predictors feed a gradient ",
-  "nearest neighbor (GNN) imputation model with environmental covariates ",
-  "(elevation, climate, soils) to estimate AGB ",
-  "(Environmental Mapping and Assessment Program, Oregon State University).",
-  "<br><em>Inputs:</em> Landsat 5 TM, 7 ETM+, 8/9 OLI annual ",
-  "peak-of-growing-season composites; spectral indices (NBR, NDVI, B5); ",
-  "elevation, climate, and soil data.",
-  "<br><br><em>Ground truth:</em> USFS Forest Inventory and Analysis (FIA) ",
-  "permanent monitoring plots across the continental United States."
-)
-
-mtbs_usage <- paste0(
-  "Treatment variable and study unit definition. All MTBS fires ",
-  "&ge; 1,000 ac in 11 Western US states (AZ, CA, CO, ID, MT, NV, NM, OR, ",
-  "UT, WA, WY), 2000&ndash;2020. Provides treatment timing (ignition year) ",
-  "and burn severity for each fire event."
-)
-
-ctrees_usage <- paste0(
-  "<strong> Outcome (response) variable.</strong> Annual mean AGB at ",
-  "100 m resolution extracted for each MTBS fire perimeter before and after ",
-  "each fire event across the 11-state study region. Used as the dependent ",
-  "variable in the Callaway-Sant&apos;Anna staggered difference-in-differences ",
-  "estimator."
-)
-
-emapr_usage <- paste0(
-  "<strong> Outcome (response) variable.</strong> Annual AGB extracted at",
-  "30 m resolution over MTBS fire ",
-  "perimeters; provides a methodologically independent estimate of biomass ",
-  "recovery trajectories for comparison with ctrees."
-)
-
-comparison_df <- data.frame(
-  Attribute = c("Full temporal range", "Spatial resolution", "Methodology", "Usage in BACI study"),
-  MTBS      = c(
-    "1984&ndash;2023 (US-wide; Western US fires &ge; 1,000 ac)",
-    "30 m Landsat grid (fire perimeters as EPSG:4326 polygons)",
-    mtbs_method,
-    mtbs_usage
-  ),
-  ctrees    = c(
-    "2000&ndash;2025 (California)",
-    "~100 m native (WGS84 / EPSG:4326); coarsened to ~1.1 km for this analysis",
-    ctrees_method,
-    ctrees_usage
-  ),
-  eMapR     = c(
-    "1990&ndash;2023 (CONUS-wide); 1990&ndash;2015 downloaded for this study",
-    "30 m (Landsat ARD grid; EPSG:5070 NAD83 Conus Albers); 300 m display aggregation",
-    emapr_method,
-    emapr_usage
-  ),
-  stringsAsFactors = FALSE
-)
-
-knitr::kable(
-  comparison_df,
-  col.names = c("Attribute", "MTBS", "ctrees", "eMapR"),
-  align     = "llll",
-  escape    = FALSE,
-  caption   = "Summary comparison of datasets used in this analysis."
-)
+ggplot(dist_df, aes(x = agb, fill = dataset, color = dataset)) +
+  geom_density(alpha = 0.35, linewidth = 0.8) +
+  scale_x_continuous(
+    limits = c(0, max(ctrees_upper, emapr_upper) * 1.05),
+    labels = scales::comma_format(),
+    expand = expansion(mult = c(0, 0.02))
+  ) +
+  scale_y_continuous(expand = expansion(mult = c(0, 0.05))) +
+  scale_fill_manual(
+    values = c("ctrees (~1.1 km)" = "#2166ac", "eMapR (300 m)" = "#d6604d"),
+    name   = "Dataset"
+  ) +
+  scale_color_manual(
+    values = c("ctrees (~1.1 km)" = "#2166ac", "eMapR (300 m)" = "#d6604d"),
+    name   = "Dataset"
+  ) +
+  labs(
+    title    = glue("AGB Distribution — ctrees vs. eMapR ({paste(STUDY_YEARS, collapse=', ')})"),
+    subtitle = "Forested pixels only (AGB > 0); values capped at 99th percentile per dataset",
+    x        = "AGB (Mg/ha)",
+    y        = "Density",
+    caption  = "Different sample sizes due to different spatial resolutions (~1.1 km ctrees vs. 300 m eMapR)."
+  ) +
+  theme_baci
 ```
 
-::: callout-note
-**Data notes:**
+::: {.callout-note}
+**Note: Sharp peak in CTrees due to inclusion of non-forest area**
 
-- **MTBS:** Wildfires ≥ 1,000 acres, `r YEAR_MIN`–`r YEAR_MAX`, clipped to `r STATE_FIPS`. Source: USGS MTBS Program (mtbs.gov).
-- **ctrees:** ~1.1 km block-averaged from 100 m native. Years available: 2000–2025. Source: Ctrees, ucsb-emlab/BACI-wildfires.
-- **eMapR:** 300 m display rasters pre-aggregated from 30 m CA-clipped composites. Study years: `r paste(STUDY_YEARS, collapse=", ")`. Source: eMapR / LandTrendR, islay.ceoas.oregonstate.edu.
-- To add a year: update `STUDY_YEARS` in the setup chunk and ensure `scripts/r/01_precompute_emapr_ca.R` has been run for that year.
+ctrees assigns positive AGB values to *all* land pixels — including shrubland, chaparral, grassland, and
+agriculture. California is roughly 40% shrubland/chaparral and 20% grassland/agriculture (Central Valley,
+coastal prairies), which carry low biomass (~5–40 Mg/ha). This large non-forest area
+produces the tall, narrow spike at the left of the ctrees curve.
+
+eMapR (derived from LandTrendR, a Landsat spectral-temporal algorithm designed for forest disturbance
+monitoring) either assigns NA to non-forested pixels or produces more variable values across land cover
+types, yielding the broader, flatter distribution.
 :::
 
 ---
 
-## 6. Design Decisions
+## 7. Design Decisions
 
-### 6.1 Subsetting MTBS Data: All Assessment Types vs. Extended Only
+---
 
-MTBS fire records carry one of three assessment types — **Extended**, **Initial**, and **Emergency** — reflecting when the post-fire Landsat scene was acquired relative to the fire event. The choice of which assessment types to retain has implications for both sample size and severity measurement quality.
+### 7.1 Choice of Biomass Dataset for the Outcome Variable
 
-**Extended assessments** use a post-fire image acquired at the next peak-of-green growing season. This timing maximises the spectral contrast between burned and unburned vegetation, minimises ash-confusion artefacts, and produces the most defensible dNBR values for severity classification. MTBS documentation and the broader literature (Eidenshink et al., 2007) recommend Extended assessments for scientific analysis.
+| Criterion | ctrees | eMapR |
+|:---|:---|:---|
+| **Spatial resolution** | ~100 m native; coarsened to ~1.1 km for this analysis | <span style="color:#2e7d32; font-weight:bold;">✓</span> 30 m native (Landsat ARD grid, EPSG:5070) |
+| **Temporal coverage** | 2000–2025 worldwide | <span style="color:#2e7d32; font-weight:bold;">✓</span> 1990–2023 CONUS — up to 10 yr pre-fire baseline for fires ≥ 2000 |
+| **Methodology** | <span style="color:#2e7d32; font-weight:bold;">✓</span> Multi-sensor fusion (Landsat + Sentinel-2 + ALOS PALSAR + GEDI/ICESat-2 LiDAR); >500k FIA training plots worldwide | Landsat only (no structural LiDAR inputs); LandTrendR spectral segmentation + GNN imputation; peer-reviewed (Kennedy et al., 2018) |
 
-**Initial assessments** use a post-fire image acquired shortly after containment. The dNBR value is still a valid spectral measurement, but it captures early post-fire conditions (ash, char, exposed soil) rather than true vegetation loss, potentially overestimating high-severity area in some fire types.
+---
+
+### 7.2 Subsetting MTBS Data: All Assessment Types vs. Extended Only
+
+MTBS fire records carry different assessment types — **Extended** and **Initial** - reflecting when the post-fire Landsat scene was acquired relative to the fire event. The choice of which assessment types to retain has implications for both sample size and severity measurement quality.
 
 
 | | All types | Extended only |
 |---|---|---|
 | **Advantages** | Larger sample; no geographic selection bias | Cleaner severity signal; methodologically defensible |
-| **Disadvantages** | Severity heterogeneity across assessment types
+| **Disadvantages** | Severity heterogeneity across assessment types | |
 
-**Potential approach:** Include all assessment types for defining the treatment indicator (initial and extended). Confirm results with extended-only analysis. 
-:::
+**Potential approach:** Include all assessment types for defining the treatment indicator (initial and extended). Confirm results with extended-only analysis.
 
----
-
-### 6.2 Choice of Biomass Dataset for the Outcome Variable
-
-Both ctrees and eMapR provide annual aboveground biomass estimates for the study region, but they differ in methodology, temporal coverage, and data sources. 
-
-#### ctrees (proposed primary outcome)
-
-**Strengths:**
-- Multi-sensor fusion (Landsat + Sentinel-2 + ALOS PALSAR + GEDI + ICESat-2) provides richer spectral and structural information than Landsat-only products.
-- GEDI spaceborne lidar provides direct canopy height measurements that constrain biomass estimates, particularly important in structurally complex post-fire forests.
-- Trained on >500,000 inventory plots globally, providing broad ground-truth coverage.
-- Coverage through 2025 maximizes the post-fire recovery window for recently burned units.
-
-**Limitations:**
-- Temporal coverage begins in 2000, limiting the pre-treatment baseline to fires occurring after 2000 (no pre-fire data for 2000 fires themselves).
-- Multi-sensor fusion introduces potential discontinuities when sensors launch or retire (e.g., Sentinel-2 from 2015, GEDI from 2018).
-- Methodology not fully peer-reviewed in a single published paper at the time of writing.
-
-#### eMapR (proposed secondary/validation outcome)
-
-**Strengths:**
-- Coverage from 1990 provides a longer pre-treatment baseline — fires occurring from 2000 onward have up to 10 years of pre-fire biomass data available.
-- LandTrendR is explicitly designed to capture spectral trajectories of disturbance and recovery
-- Well-documented, peer-reviewed methodology (Kennedy et al., 2018).
-
-**Limitations:**
-- Landsat-only inputs; no structural lidar integration for the historical period.
-- Coverage ends at 2023 (2015 currently downloaded), limiting post-fire observation windows for recent fires.
-
-
-
-
-:::
+> See §3.6 for an empirical quantification of how much ground area is actually shared between
+> Extended and Initial assessment polygons, and what share of fires are spatially affected.
 
 ---
 
-### 6.3 Control Unit Definition and SUTVA
+### 7.3 How should the analysis handle repeated burns?
 
-The Stable Unit Treatment Value Assumption (SUTVA) requires that the potential outcome for any treated unit is unaffected by the treatment status of other units. In a wildfire context, this is threatened if: (1) a candidate control unit later burns during the study period, or (2) fire effects spill over into adjacent unburned areas (smoke, altered hydrology, seed dispersal, fire behavior modification).
+Next steps include calculating statistics on reburned frequency and area. Should this analysis remove areas once they have reburned?
 
-#### What qualifies as a control unit?
+---
 
-Control units must satisfy two conditions:
+### 7.4 What qualifies as a control unit?
 
-1. **Never burned** (within the study period, 2000–2023) — units that burn at any point cannot serve as clean controls for the full panel. In the Callaway-Sant'Anna framework, units that burn later are "not yet treated" controls, which is valid, but units that were already burned before the study period are problematic if biomass recovery is still ongoing.
-2. **Same ecoregion** — parallel trends requires that treated and control units would have followed the same biomass trajectory absent fire. Units in structurally similar vegetation (same EPA Level III ecoregion or same forest type) are more plausible counterfactuals than geographically distant units.
-
-#### Spatial buffer (SUTVA)
-
-A minimum spatial buffer between treated fire perimeters and control units reduces spillover violations. Common choices in the fire literature range from 500 m to 5 km depending on the mechanism of concern:
-
-| Spillover mechanism | Recommended buffer |
-|---|---|
-| Altered microclimate / edge effects | 100–500 m |
-| Hydrological effects (sediment, runoff) | 500 m–1 km |
-| Fire spread / spotting in subsequent fires | 1–5 km |
-
-**Potential approach:** Exclude any candidate control pixel within 1 km of any MTBS fire perimeter (burned 2000–2023). Sensitivity analysis with 500 m and 2 km buffers to assess robustness.
-
-:::
+Units that burn at any point cannot serve as clean controls for the full panel. Units that were already burned before the study period are problematic if biomass recovery is still ongoing. How do we confirm that areas chosen as controls didn't burn just prior to the study period?
 
