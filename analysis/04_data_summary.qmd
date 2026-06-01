@@ -389,36 +389,37 @@ cat("Initial fires: ", nrow(mtbs_ini),
 cat("Event IDs with >1 assessment type:", nrow(dup_ids), "\n")
 ```
 
-```{r mtbs-overlap-area}
-# ── Union each type, then intersect the unions ────────────────────────────────
-ext_union <- sf::st_union(mtbs_ext)
-ini_union <- sf::st_union(mtbs_ini)
-ovlp_geom <- sf::st_intersection(ext_union, ini_union)
+```{r mtbs-ext-pct}
+# ── Extended / Initial coverage as % of all CA fires ─────────────────────────
+total_n  <- nrow(sf::st_drop_geometry(mtbs_ca))
+total_ac <- sum(mtbs_ca$burnbndac, na.rm = TRUE)
 
-# Convert m² → acres (1 m² = 0.000247105 ac)
-m2_to_ac <- function(x) as.numeric(sf::st_area(x)) * 0.000247105
+ext_n    <- nrow(sf::st_drop_geometry(mtbs_ext))
+ext_ac   <- sum(mtbs_ext$burnbndac, na.rm = TRUE)
 
-ext_ac  <- m2_to_ac(ext_union)
-ini_ac  <- m2_to_ac(ini_union)
-ovlp_ac <- if (length(ovlp_geom) > 0 && !sf::st_is_empty(ovlp_geom))
-             m2_to_ac(ovlp_geom) else 0
+ini_n    <- nrow(sf::st_drop_geometry(mtbs_ini))
+ini_ac   <- sum(mtbs_ini$burnbndac, na.rm = TRUE)
 
-overlap_df <- data.frame(
-  Category        = c("Extended", "Initial", "Overlap (Extended ∩ Initial)"),
-  N_fires         = c(nrow(mtbs_ext), nrow(mtbs_ini), NA_integer_),
-  Area_ac         = round(c(ext_ac, ini_ac, ovlp_ac)),
-  Pct_of_Extended = c(NA, NA, round(100 * ovlp_ac / ext_ac, 1)),
-  Pct_of_Initial  = c(NA, NA, round(100 * ovlp_ac / ini_ac,  1))
+coverage_df <- tibble::tribble(
+  ~Assessment, ~N_fires, ~Pct_fires,                        ~Area_ac,        ~Pct_area,
+  "Extended",  ext_n,    round(100 * ext_n  / total_n, 1),  round(ext_ac),   round(100 * ext_ac  / total_ac, 1),
+  "Initial",   ini_n,    round(100 * ini_n  / total_n, 1),  round(ini_ac),   round(100 * ini_ac  / total_ac, 1),
+  "All fires", total_n,  100,                                round(total_ac), 100
 )
 
-options(knitr.kable.NA = "—")   # render NA cells as an em-dash
 knitr::kable(
-  overlap_df,
-  col.names   = c("Category", "N fires", "Area (acres)", "% of Extended area", "% of Initial area"),
+  coverage_df,
+  col.names   = c("Assessment", "N fires", "% of all fires",
+                  "Total area (ac)", "% of total area"),
   format.args = list(big.mark = ","),
-  caption     = "Burned area comparison between Extended and Initial assessment polygons."
+  caption     = paste0(
+    "Extended and Initial assessment coverage out of all CA MTBS wildfires ",
+    "(", YEAR_MIN, "–", YEAR_MAX, "). ",
+    "Rows sum to ≤ 100% because Emergency and Other assessments account for the remainder."
+  )
 )
 ```
+
 
 ```{r mtbs-type-maps, fig.width=14, fig.height=9}
 # ── Helper: one CA fire map per assessment type ───────────────────────────────

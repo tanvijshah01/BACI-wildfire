@@ -6,7 +6,7 @@
 
 <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=yes">
 
-<meta name="dcterms.date" content="2026-05-31">
+<meta name="dcterms.date" content="2026-06-01">
 
 <title>Data Summary: MTBS, ctrees, and eMapR — California</title>
 <style>
@@ -2369,7 +2369,7 @@ window.Quarto = {
     <div>
     <div class="quarto-title-meta-heading">Published</div>
     <div class="quarto-title-meta-contents">
-      <p class="date">May 31, 2026</p>
+      <p class="date">June 1, 2026</p>
     </div>
   </div>
   
@@ -2883,75 +2883,68 @@ Note
 <div class="cell">
 <details class="code-fold">
 <summary>Code</summary>
-<div class="sourceCode cell-code" id="cb18"><pre class="sourceCode r code-with-copy"><code class="sourceCode r"><span id="cb18-1"><a href="#cb18-1" aria-hidden="true" tabindex="-1"></a><span class="co"># ── Union each type, then intersect the unions ────────────────────────────────</span></span>
-<span id="cb18-2"><a href="#cb18-2" aria-hidden="true" tabindex="-1"></a>ext_union <span class="ot">&lt;-</span> sf<span class="sc">::</span><span class="fu">st_union</span>(mtbs_ext)</span>
-<span id="cb18-3"><a href="#cb18-3" aria-hidden="true" tabindex="-1"></a>ini_union <span class="ot">&lt;-</span> sf<span class="sc">::</span><span class="fu">st_union</span>(mtbs_ini)</span>
-<span id="cb18-4"><a href="#cb18-4" aria-hidden="true" tabindex="-1"></a>ovlp_geom <span class="ot">&lt;-</span> sf<span class="sc">::</span><span class="fu">st_intersection</span>(ext_union, ini_union)</span>
-<span id="cb18-5"><a href="#cb18-5" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb18-6"><a href="#cb18-6" aria-hidden="true" tabindex="-1"></a><span class="co"># Convert m² → acres (1 m² = 0.000247105 ac)</span></span>
-<span id="cb18-7"><a href="#cb18-7" aria-hidden="true" tabindex="-1"></a>m2_to_ac <span class="ot">&lt;-</span> <span class="cf">function</span>(x) <span class="fu">as.numeric</span>(sf<span class="sc">::</span><span class="fu">st_area</span>(x)) <span class="sc">*</span> <span class="fl">0.000247105</span></span>
-<span id="cb18-8"><a href="#cb18-8" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb18-9"><a href="#cb18-9" aria-hidden="true" tabindex="-1"></a>ext_ac  <span class="ot">&lt;-</span> <span class="fu">m2_to_ac</span>(ext_union)</span>
-<span id="cb18-10"><a href="#cb18-10" aria-hidden="true" tabindex="-1"></a>ini_ac  <span class="ot">&lt;-</span> <span class="fu">m2_to_ac</span>(ini_union)</span>
-<span id="cb18-11"><a href="#cb18-11" aria-hidden="true" tabindex="-1"></a>ovlp_ac <span class="ot">&lt;-</span> <span class="cf">if</span> (<span class="fu">length</span>(ovlp_geom) <span class="sc">&gt;</span> <span class="dv">0</span> <span class="sc">&amp;&amp;</span> <span class="sc">!</span>sf<span class="sc">::</span><span class="fu">st_is_empty</span>(ovlp_geom))</span>
-<span id="cb18-12"><a href="#cb18-12" aria-hidden="true" tabindex="-1"></a>             <span class="fu">m2_to_ac</span>(ovlp_geom) <span class="cf">else</span> <span class="dv">0</span></span>
-<span id="cb18-13"><a href="#cb18-13" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb18-14"><a href="#cb18-14" aria-hidden="true" tabindex="-1"></a>overlap_df <span class="ot">&lt;-</span> <span class="fu">data.frame</span>(</span>
-<span id="cb18-15"><a href="#cb18-15" aria-hidden="true" tabindex="-1"></a>  <span class="at">Category        =</span> <span class="fu">c</span>(<span class="st">&quot;Extended&quot;</span>, <span class="st">&quot;Initial&quot;</span>, <span class="st">&quot;Overlap (Extended ∩ Initial)&quot;</span>),</span>
-<span id="cb18-16"><a href="#cb18-16" aria-hidden="true" tabindex="-1"></a>  <span class="at">N_fires         =</span> <span class="fu">c</span>(<span class="fu">nrow</span>(mtbs_ext), <span class="fu">nrow</span>(mtbs_ini), <span class="cn">NA_integer_</span>),</span>
-<span id="cb18-17"><a href="#cb18-17" aria-hidden="true" tabindex="-1"></a>  <span class="at">Area_ac         =</span> <span class="fu">round</span>(<span class="fu">c</span>(ext_ac, ini_ac, ovlp_ac)),</span>
-<span id="cb18-18"><a href="#cb18-18" aria-hidden="true" tabindex="-1"></a>  <span class="at">Pct_of_Extended =</span> <span class="fu">c</span>(<span class="cn">NA</span>, <span class="cn">NA</span>, <span class="fu">round</span>(<span class="dv">100</span> <span class="sc">*</span> ovlp_ac <span class="sc">/</span> ext_ac, <span class="dv">1</span>)),</span>
-<span id="cb18-19"><a href="#cb18-19" aria-hidden="true" tabindex="-1"></a>  <span class="at">Pct_of_Initial  =</span> <span class="fu">c</span>(<span class="cn">NA</span>, <span class="cn">NA</span>, <span class="fu">round</span>(<span class="dv">100</span> <span class="sc">*</span> ovlp_ac <span class="sc">/</span> ini_ac,  <span class="dv">1</span>))</span>
-<span id="cb18-20"><a href="#cb18-20" aria-hidden="true" tabindex="-1"></a>)</span>
-<span id="cb18-21"><a href="#cb18-21" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb18-22"><a href="#cb18-22" aria-hidden="true" tabindex="-1"></a><span class="fu">options</span>(<span class="at">knitr.kable.NA =</span> <span class="st">&quot;—&quot;</span>)   <span class="co"># render NA cells as an em-dash</span></span>
-<span id="cb18-23"><a href="#cb18-23" aria-hidden="true" tabindex="-1"></a>knitr<span class="sc">::</span><span class="fu">kable</span>(</span>
-<span id="cb18-24"><a href="#cb18-24" aria-hidden="true" tabindex="-1"></a>  overlap_df,</span>
-<span id="cb18-25"><a href="#cb18-25" aria-hidden="true" tabindex="-1"></a>  <span class="at">col.names   =</span> <span class="fu">c</span>(<span class="st">&quot;Category&quot;</span>, <span class="st">&quot;N fires&quot;</span>, <span class="st">&quot;Area (acres)&quot;</span>, <span class="st">&quot;% of Extended area&quot;</span>, <span class="st">&quot;% of Initial area&quot;</span>),</span>
-<span id="cb18-26"><a href="#cb18-26" aria-hidden="true" tabindex="-1"></a>  <span class="at">format.args =</span> <span class="fu">list</span>(<span class="at">big.mark =</span> <span class="st">&quot;,&quot;</span>),</span>
-<span id="cb18-27"><a href="#cb18-27" aria-hidden="true" tabindex="-1"></a>  <span class="at">caption     =</span> <span class="st">&quot;Burned area comparison between Extended and Initial assessment polygons.&quot;</span></span>
+<div class="sourceCode cell-code" id="cb18"><pre class="sourceCode r code-with-copy"><code class="sourceCode r"><span id="cb18-1"><a href="#cb18-1" aria-hidden="true" tabindex="-1"></a><span class="co"># ── Extended / Initial coverage as % of all CA fires ─────────────────────────</span></span>
+<span id="cb18-2"><a href="#cb18-2" aria-hidden="true" tabindex="-1"></a>total_n  <span class="ot">&lt;-</span> <span class="fu">nrow</span>(sf<span class="sc">::</span><span class="fu">st_drop_geometry</span>(mtbs_ca))</span>
+<span id="cb18-3"><a href="#cb18-3" aria-hidden="true" tabindex="-1"></a>total_ac <span class="ot">&lt;-</span> <span class="fu">sum</span>(mtbs_ca<span class="sc">$</span>burnbndac, <span class="at">na.rm =</span> <span class="cn">TRUE</span>)</span>
+<span id="cb18-4"><a href="#cb18-4" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb18-5"><a href="#cb18-5" aria-hidden="true" tabindex="-1"></a>ext_n    <span class="ot">&lt;-</span> <span class="fu">nrow</span>(sf<span class="sc">::</span><span class="fu">st_drop_geometry</span>(mtbs_ext))</span>
+<span id="cb18-6"><a href="#cb18-6" aria-hidden="true" tabindex="-1"></a>ext_ac   <span class="ot">&lt;-</span> <span class="fu">sum</span>(mtbs_ext<span class="sc">$</span>burnbndac, <span class="at">na.rm =</span> <span class="cn">TRUE</span>)</span>
+<span id="cb18-7"><a href="#cb18-7" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb18-8"><a href="#cb18-8" aria-hidden="true" tabindex="-1"></a>ini_n    <span class="ot">&lt;-</span> <span class="fu">nrow</span>(sf<span class="sc">::</span><span class="fu">st_drop_geometry</span>(mtbs_ini))</span>
+<span id="cb18-9"><a href="#cb18-9" aria-hidden="true" tabindex="-1"></a>ini_ac   <span class="ot">&lt;-</span> <span class="fu">sum</span>(mtbs_ini<span class="sc">$</span>burnbndac, <span class="at">na.rm =</span> <span class="cn">TRUE</span>)</span>
+<span id="cb18-10"><a href="#cb18-10" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb18-11"><a href="#cb18-11" aria-hidden="true" tabindex="-1"></a>coverage_df <span class="ot">&lt;-</span> tibble<span class="sc">::</span><span class="fu">tribble</span>(</span>
+<span id="cb18-12"><a href="#cb18-12" aria-hidden="true" tabindex="-1"></a>  <span class="sc">~</span>Assessment, <span class="sc">~</span>N_fires, <span class="sc">~</span>Pct_fires,                        <span class="sc">~</span>Area_ac,        <span class="sc">~</span>Pct_area,</span>
+<span id="cb18-13"><a href="#cb18-13" aria-hidden="true" tabindex="-1"></a>  <span class="st">&quot;Extended&quot;</span>,  ext_n,    <span class="fu">round</span>(<span class="dv">100</span> <span class="sc">*</span> ext_n  <span class="sc">/</span> total_n, <span class="dv">1</span>),  <span class="fu">round</span>(ext_ac),   <span class="fu">round</span>(<span class="dv">100</span> <span class="sc">*</span> ext_ac  <span class="sc">/</span> total_ac, <span class="dv">1</span>),</span>
+<span id="cb18-14"><a href="#cb18-14" aria-hidden="true" tabindex="-1"></a>  <span class="st">&quot;Initial&quot;</span>,   ini_n,    <span class="fu">round</span>(<span class="dv">100</span> <span class="sc">*</span> ini_n  <span class="sc">/</span> total_n, <span class="dv">1</span>),  <span class="fu">round</span>(ini_ac),   <span class="fu">round</span>(<span class="dv">100</span> <span class="sc">*</span> ini_ac  <span class="sc">/</span> total_ac, <span class="dv">1</span>),</span>
+<span id="cb18-15"><a href="#cb18-15" aria-hidden="true" tabindex="-1"></a>  <span class="st">&quot;All fires&quot;</span>, total_n,  <span class="dv">100</span>,                                <span class="fu">round</span>(total_ac), <span class="dv">100</span></span>
+<span id="cb18-16"><a href="#cb18-16" aria-hidden="true" tabindex="-1"></a>)</span>
+<span id="cb18-17"><a href="#cb18-17" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb18-18"><a href="#cb18-18" aria-hidden="true" tabindex="-1"></a>knitr<span class="sc">::</span><span class="fu">kable</span>(</span>
+<span id="cb18-19"><a href="#cb18-19" aria-hidden="true" tabindex="-1"></a>  coverage_df,</span>
+<span id="cb18-20"><a href="#cb18-20" aria-hidden="true" tabindex="-1"></a>  <span class="at">col.names   =</span> <span class="fu">c</span>(<span class="st">&quot;Assessment&quot;</span>, <span class="st">&quot;N fires&quot;</span>, <span class="st">&quot;% of all fires&quot;</span>,</span>
+<span id="cb18-21"><a href="#cb18-21" aria-hidden="true" tabindex="-1"></a>                  <span class="st">&quot;Total area (ac)&quot;</span>, <span class="st">&quot;% of total area&quot;</span>),</span>
+<span id="cb18-22"><a href="#cb18-22" aria-hidden="true" tabindex="-1"></a>  <span class="at">format.args =</span> <span class="fu">list</span>(<span class="at">big.mark =</span> <span class="st">&quot;,&quot;</span>),</span>
+<span id="cb18-23"><a href="#cb18-23" aria-hidden="true" tabindex="-1"></a>  <span class="at">caption     =</span> <span class="fu">paste0</span>(</span>
+<span id="cb18-24"><a href="#cb18-24" aria-hidden="true" tabindex="-1"></a>    <span class="st">&quot;Extended and Initial assessment coverage out of all CA MTBS wildfires &quot;</span>,</span>
+<span id="cb18-25"><a href="#cb18-25" aria-hidden="true" tabindex="-1"></a>    <span class="st">&quot;(&quot;</span>, YEAR_MIN, <span class="st">&quot;–&quot;</span>, YEAR_MAX, <span class="st">&quot;). &quot;</span>,</span>
+<span id="cb18-26"><a href="#cb18-26" aria-hidden="true" tabindex="-1"></a>    <span class="st">&quot;Rows sum to ≤ 100% because Emergency and Other assessments account for the remainder.&quot;</span></span>
+<span id="cb18-27"><a href="#cb18-27" aria-hidden="true" tabindex="-1"></a>  )</span>
 <span id="cb18-28"><a href="#cb18-28" aria-hidden="true" tabindex="-1"></a>)</span></code><button title="Copy to Clipboard" class="code-copy-button"><i class="bi"></i></button></pre></div>
 </details>
 <div class="cell-output-display">
 <table class="caption-top table table-sm table-striped small">
-<caption>Burned area comparison between Extended and Initial assessment polygons.</caption>
-<colgroup>
-<col style="width: 33%">
-<col style="width: 9%">
-<col style="width: 14%">
-<col style="width: 21%">
-<col style="width: 20%">
-</colgroup>
+<caption>Extended and Initial assessment coverage out of all CA MTBS wildfires (1984–2023). Rows sum to ≤ 100% because Emergency and Other assessments account for the remainder.</caption>
 <thead>
 <tr class="header">
-<th style="text-align: left;">Category</th>
+<th style="text-align: left;">Assessment</th>
 <th style="text-align: right;">N fires</th>
-<th style="text-align: right;">Area (acres)</th>
-<th style="text-align: right;">% of Extended area</th>
-<th style="text-align: right;">% of Initial area</th>
+<th style="text-align: right;">% of all fires</th>
+<th style="text-align: right;">Total area (ac)</th>
+<th style="text-align: right;">% of total area</th>
 </tr>
 </thead>
 <tbody>
 <tr class="odd">
 <td style="text-align: left;">Extended</td>
 <td style="text-align: right;">1,012</td>
-<td style="text-align: right;">15,601,458</td>
-<td style="text-align: right;">—</td>
-<td style="text-align: right;">—</td>
+<td style="text-align: right;">58.4</td>
+<td style="text-align: right;">18,883,459</td>
+<td style="text-align: right;">78.3</td>
 </tr>
 <tr class="even">
 <td style="text-align: left;">Initial</td>
 <td style="text-align: right;">721</td>
-<td style="text-align: right;">4,563,959</td>
-<td style="text-align: right;">—</td>
-<td style="text-align: right;">—</td>
+<td style="text-align: right;">41.6</td>
+<td style="text-align: right;">5,239,264</td>
+<td style="text-align: right;">21.7</td>
 </tr>
 <tr class="odd">
-<td style="text-align: left;">Overlap (Extended ∩ Initial)</td>
-<td style="text-align: right;">—</td>
-<td style="text-align: right;">700,707</td>
-<td style="text-align: right;">4.5</td>
-<td style="text-align: right;">15.4</td>
+<td style="text-align: left;">All fires</td>
+<td style="text-align: right;">1,733</td>
+<td style="text-align: right;">100.0</td>
+<td style="text-align: right;">24,122,723</td>
+<td style="text-align: right;">100.0</td>
 </tr>
 </tbody>
 </table>
