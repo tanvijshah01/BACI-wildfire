@@ -79,7 +79,12 @@
       "PowerShell($dir = \"C:\\\\Users\\\\shaht\\\\Documents\\\\Projects\\\\BACI_local\\\\BACI\\\\data\\\\raw\\\\emapr_biomass\"; [System.IO.Directory]::GetFiles\\($dir\\) | ForEach-Object { [System.IO.Path]::GetFileName\\($_\\) } | Sort-Object)",
       "PowerShell([System.IO.Directory]::GetFiles\\(\"C:\\\\Program Files\\\\R\", \"Rscript.exe\", [System.IO.SearchOption]::AllDirectories\\) 2>$null; [System.IO.Directory]::GetFiles\\(\"C:\\\\Users\\\\shaht\", \"Rscript.exe\", [System.IO.SearchOption]::AllDirectories\\) 2>$null)",
       "PowerShell($env:PATH -split ';'; [System.IO.Directory]::GetFiles\\(\"C:\\\\Users\\\\shaht\\\\AppData\\\\Local\", \"quarto.exe\", [System.IO.SearchOption]::AllDirectories\\) 2>$null | Select-Object -First 3)",
-      "PowerShell([System.IO.Directory]::GetFiles\\(\"C:\\\\Program Files\\\\Positron\", \"quarto.exe\", [System.IO.SearchOption]::AllDirectories\\) 2>$null; [System.IO.Directory]::GetFiles\\(\"C:\\\\Program Files\", \"quarto.exe\", [System.IO.SearchOption]::AllDirectories\\) 2>$null | Select-Object -First 5)"
+      "PowerShell([System.IO.Directory]::GetFiles\\(\"C:\\\\Program Files\\\\Positron\", \"quarto.exe\", [System.IO.SearchOption]::AllDirectories\\) 2>$null; [System.IO.Directory]::GetFiles\\(\"C:\\\\Program Files\", \"quarto.exe\", [System.IO.SearchOption]::AllDirectories\\) 2>$null | Select-Object -First 5)",
+      "PowerShell(Get-ChildItem \"C:\\\\Users\\\\shaht\\\\Documents\\\\Projects\\\\BACI_local\\\\BACI\\\\data\\\\processed\\\\ctrees\" | Select-Object Name, @{N=\"MB\";E={[math]::Round\\($_.Length/1MB,1\\)}})",
+      "PowerShell(Get-ChildItem \"C:\\\\Users\\\\shaht\\\\Documents\\\\Projects\\\\BACI_local\\\\BACI\\\\data\\\\processed\\\\emapr_biomass_ca\" | Select-Object Name, @{N=\"MB\";E={[math]::Round\\($_.Length/1MB,1\\)}} | Sort-Object Name)",
+      "PowerShell($mem = Get-CimInstance Win32_OperatingSystem; [PSCustomObject]@{ TotalGB=[math]::Round\\($mem.TotalVisibleMemorySize/1MB,1\\); FreeGB=[math]::Round\\($mem.FreePhysicalMemory/1MB,1\\) })",
+      "PowerShell(& \"C:\\\\Program Files\\\\R\\\\R-4.5.2\\\\bin\\\\Rscript.exe\" \"C:\\\\Users\\\\shaht\\\\Documents\\\\Projects\\\\BACI_local\\\\BACI\\\\scripts\\\\r\\\\02_extract_emapr_within_fires.R\")",
+      "PowerShell(Get-Process *)"
     ]
   }
 }

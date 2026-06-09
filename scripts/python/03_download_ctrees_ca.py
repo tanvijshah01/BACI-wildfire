@@ -11,11 +11,16 @@
 # 4.  Part B — Fire polygon extraction (for R event-study / DiD)
 #       Precompute rasterized polygon masks once; then extract mean AGB
 #       per fire × year using pure numpy indexing (no shapely per year).
-# 5.  Sanity checks on both outputs
+# 5.  Part C — Native-resolution (~100 m) annual GeoTIFFs (for R comparison)
+#       Write one GeoTIFF per year at native 100 m resolution; used by
+#       04_data_summary.qmd and 05_biomass_within_fires.qmd to compare
+#       ctrees and eMapR at the same ~100 m resolution.
+# 6.  Sanity checks on all outputs
 #
 # OUTPUTS
 #   output/ctrees_biomass_ca_1km.nc    — coarsened CA raster, 26 years
 #   output/biomass_fire_polygons_ctrees.csv — long panel: event_id × year × agb
+#   data/processed/ctrees/ctrees_YYYY_ca_100m.tif — native 100 m annual GeoTIFFs
 #
 # EXTRACTION METHOD (Part B)
 #   Two approaches were evaluated:
@@ -64,6 +69,7 @@ from pathlib import Path
 
 # Try rasterio for fast scanline polygon rasterization
 try:
+    import rasterio
     import rasterio.features
     from rasterio.transform import from_origin as _rio_from_origin
     USE_RASTERIO = True
@@ -71,10 +77,11 @@ except ImportError:
     from matplotlib.path import Path as MplPath
     USE_RASTERIO = False
 
-PROJ_ROOT   = Path(__file__).resolve().parent.parent.parent
-OUT_NC      = PROJ_ROOT / "output" / "ctrees_biomass_ca_1km.nc"
-OUT_CSV     = PROJ_ROOT / "output" / "biomass_fire_polygons_ctrees.csv"
-MTBS_PATH   = PROJ_ROOT / "data" / "raw" / "mtbs" / "mtbs_perimeter_data" / "mtbs_perims_DD.shp"
+PROJ_ROOT     = Path(__file__).resolve().parent.parent.parent
+OUT_TIFS_DIR  = PROJ_ROOT / "data" / "processed" / "ctrees"
+OUT_NC        = OUT_TIFS_DIR / "ctrees_biomass_ca_1km.nc"
+OUT_CSV       = OUT_TIFS_DIR / "biomass_fire_polygons_ctrees.csv"
+MTBS_PATH     = PROJ_ROOT / "data" / "raw" / "mtbs" / "mtbs_perimeter_data" / "mtbs_perims_DD.shp"
 
 # -- Ctrees zarr parameters (from exploration script) -------------------------
 REPO_NAME    = "ucsb-emlab/BACI-wildfires"
@@ -95,7 +102,7 @@ COARSEN = 11
 MTBS_START = 2000
 MTBS_END   = 2025    # match Ctrees temporal range
 
-OUT_NC.parent.mkdir(parents=True, exist_ok=True)
+OUT_TIFS_DIR.mkdir(parents=True, exist_ok=True)
 
 
 def coarsen_block(arr2d, factor):
@@ -337,7 +344,71 @@ else:
             print(f"    {e}")
 
 
-# --- 5. SANITY CHECKS --------------------------------------------------------
+# --- 5. PART C — NATIVE-RESOLUTION (~100 m) ANNUAL GeoTIFFs -----------------
+# Writes one GeoTIFF per zarr year at the native ~100 m pixel grid.
+# Used by 04_data_summary.qmd and 05_biomass_within_fires.qmd to compare
+# ctrees and eMapR at the same ~100 m resolution (eMapR side is 3× aggregated
+# from 30 m → ~90 m; both sides labeled "~100 m" by convention).
+#
+# Requires rasterio (USE_RASTERIO=True). If rasterio is not installed, Part C
+# is skipped — install it with: pip install rasterio
+
+if not USE_RASTERIO:
+    print("\nPart C: rasterio not available — skipping 100 m GeoTIFF export.")
+    print("  Install rasterio (pip install rasterio) and re-run to generate")
+    print("  ctrees_YYYY_ca_100m.tif files.")
+else:
+    tifs_needed = [yr for yr in years
+                   if not (OUT_TIFS_DIR / f"ctrees_{yr}_ca_100m.tif").exists()]
+    if not tifs_needed:
+        print(f"\nPart C: All {len(years)} 100 m TIFs already exist — skipping.")
+    else:
+        print(f"\nPart C: Writing {len(tifs_needed)} native-resolution (~100 m) GeoTIFFs"
+              f" -> {OUT_TIFS_DIR.name}/")
+
+        # Pixel spacing in degrees (~0.000889); all years share the same grid
+        RES_C = float(abs(x_ca[1] - x_ca[0]))
+        # rasterio transform: origin = upper-left corner of top-left pixel;
+        # y_ca is descending so y_ca[0] is the northernmost (largest) latitude.
+        west_c  = float(x_ca[0]) - RES_C / 2
+        north_c = float(y_ca[0]) + RES_C / 2
+        transform_c = _rio_from_origin(west_c, north_c, RES_C, RES_C)
+
+        for t_idx, yr in enumerate(years):
+            tif_path = OUT_TIFS_DIR / f"ctrees_{yr}_ca_100m.tif"
+            if tif_path.exists():
+                print(f"  {yr} — already exists, skipping", flush=True)
+                continue
+
+            raw = agb_zarr[t_idx, y_start:y_end, x_start:x_end].astype("float32")
+            raw[raw == FILL_VALUE] = np.nan
+            raw /= SCALE_FACTOR   # -> Mg ha^-1
+
+            with rasterio.open(
+                tif_path, "w",
+                driver     = "GTiff",
+                height     = raw.shape[0],
+                width      = raw.shape[1],
+                count      = 1,
+                dtype      = "float32",
+                crs        = "EPSG:4326",
+                transform  = transform_c,
+                compress   = "lzw",
+                tiled      = True,
+                blockxsize = 512,
+                blockysize = 512,
+                nodata     = float("nan"),
+            ) as dst:
+                dst.write(raw, 1)
+
+            size_mb = tif_path.stat().st_size / 1e6
+            print(f"  {yr} — {size_mb:.1f} MB", flush=True)
+
+        n_done = len(list(OUT_TIFS_DIR.glob("ctrees_*_ca_100m.tif")))
+        print(f"  Done. {n_done}/{len(years)} 100 m TIFs present in {OUT_TIFS_DIR.name}/")
+
+
+# --- 6. SANITY CHECKS --------------------------------------------------------
 print("\nSanity checks...")
 
 # Part A
@@ -360,4 +431,13 @@ print(f"  CSV: {df_check['event_id'].nunique()} fires x {df_check['year'].nuniqu
 if pct_valid_csv < 50:
     print("  WARNING: <50% valid — check polygon alignment with Ctrees grid")
 
-print("\nDone. Outputs ready for analysis/02_ctrees_biomass_exploration.qmd")
+# Part C
+if USE_RASTERIO:
+    tif_count = len(list(OUT_TIFS_DIR.glob("ctrees_*_ca_100m.tif")))
+    print(f"  100 m TIFs: {tif_count}/{n_years} year(s) in {OUT_TIFS_DIR.name}/")
+    if tif_count < n_years:
+        print(f"  WARNING: Only {tif_count} of {n_years} 100 m TIFs present")
+else:
+    print("  100 m TIFs: skipped (rasterio not installed)")
+
+print("\nDone. Outputs ready for analysis/")

@@ -6,12 +6,13 @@
 # Input:  data/processed/emapr_biomass_ca/composite_YYYY_ca.tif
 # Output: data/processed/emapr_biomass_ca/stats_YYYY.rds    (scalar stats + sample)
 #         data/processed/emapr_biomass_ca/composite_YYYY_ca_300m.tif
+#         data/processed/emapr_biomass_ca/composite_YYYY_ca_100m.tif
 #
-# Skips any year whose two output files already exist.
+# Skips any year whose output files already exist.
 # =============================================================================
 # 1. Setup
 # 2. California boundary
-# 3. Loop over study years: compute stats → save RDS; aggregate → save 300m TIF
+# 3. Loop over study years: compute stats → save RDS; aggregate → save 300m and 100m TIFs
 # 4. Report
 # =============================================================================
 
@@ -40,9 +41,10 @@ ca_vect <- terra::vect(sf::st_transform(ca_wgs84, crs = 5070))
 
 # ── 3. Process each study year ────────────────────────────────────────────────
 for (yr in STUDY_YEARS) {
-  in_path    <- file.path(CA_DIR, glue("composite_{yr}_ca.tif"))
-  rds_path   <- file.path(CA_DIR, glue("stats_{yr}.rds"))
-  map_path   <- file.path(CA_DIR, glue("composite_{yr}_ca_300m.tif"))
+  in_path      <- file.path(CA_DIR, glue("composite_{yr}_ca.tif"))
+  rds_path     <- file.path(CA_DIR, glue("stats_{yr}.rds"))
+  map_path_300 <- file.path(CA_DIR, glue("composite_{yr}_ca_300m.tif"))
+  map_path_100 <- file.path(CA_DIR, glue("composite_{yr}_ca_100m.tif"))
 
   if (!file.exists(in_path)) stop(glue("CA file missing for {yr} — run 00_crop_emapr_to_ca.R first"))
 
@@ -67,15 +69,30 @@ for (yr in STUDY_YEARS) {
   }
 
   # ── 300 m aggregate ────────────────────────────────────────────────────────
-  if (file.exists(map_path)) {
+  if (file.exists(map_path_300)) {
     cat(glue("[SKIP] composite_{yr}_ca_300m.tif already exists\n"))
   } else {
     cat(glue("[AGG]  {yr} — aggregating to 300 m..."))
     t0  <- proc.time()["elapsed"]
     r   <- terra::rast(in_path)
     lyr <- terra::aggregate(r, fact = AGG_FACTOR, fun = "mean", na.rm = TRUE)
-    terra::writeRaster(lyr, map_path, overwrite = FALSE, gdal = c("COMPRESS=LZW"))
-    size_mb <- round(file.size(map_path) / 1e6, 1)
+    terra::writeRaster(lyr, map_path_300, overwrite = FALSE, gdal = c("COMPRESS=LZW"))
+    size_mb <- round(file.size(map_path_300) / 1e6, 1)
+    cat(glue(" done — {size_mb} MB in {round(proc.time()['elapsed'] - t0)}s\n"))
+  }
+
+  # ── ~100 m aggregate (fact = 3: 30 m × 3 = 90 m, labeled ~100 m) ──────────
+  if (file.exists(map_path_100)) {
+    cat(glue("[SKIP] composite_{yr}_ca_100m.tif already exists\n"))
+  } else {
+    cat(glue("[AGG]  {yr} — aggregating to ~100 m (fact = 3)..."))
+    t0  <- proc.time()["elapsed"]
+    r   <- terra::rast(in_path)
+    lyr <- terra::aggregate(r, fact = 3, fun = "mean", na.rm = TRUE)
+    terra::writeRaster(lyr, map_path_100, overwrite = FALSE,
+                       gdal = c("COMPRESS=LZW", "TILED=YES",
+                                "BLOCKXSIZE=512", "BLOCKYSIZE=512"))
+    size_mb <- round(file.size(map_path_100) / 1e6, 1)
     cat(glue(" done — {size_mb} MB in {round(proc.time()['elapsed'] - t0)}s\n"))
   }
 }
@@ -84,6 +101,9 @@ for (yr in STUDY_YEARS) {
 cat("\n=== Pre-compute complete ===\n")
 for (yr in STUDY_YEARS) {
   rds  <- file.path(CA_DIR, glue("stats_{yr}.rds"))
-  tif  <- file.path(CA_DIR, glue("composite_{yr}_ca_300m.tif"))
-  cat(glue("  {yr}: stats={if(file.exists(rds)) 'OK' else 'MISSING'}  300m={if(file.exists(tif)) 'OK' else 'MISSING'}\n"))
+  t300 <- file.path(CA_DIR, glue("composite_{yr}_ca_300m.tif"))
+  t100 <- file.path(CA_DIR, glue("composite_{yr}_ca_100m.tif"))
+  cat(glue("  {yr}: stats={if(file.exists(rds)) 'OK' else 'MISSING'}",
+           "  300m={if(file.exists(t300)) 'OK' else 'MISSING'}",
+           "  100m={if(file.exists(t100)) 'OK' else 'MISSING'}\n"))
 }

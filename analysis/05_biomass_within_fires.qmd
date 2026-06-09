@@ -12,7 +12,7 @@ format:
     fig-height: 6
     theme: flatly
 params:
-  study_years: [2008, 2009, 2010, 2011]   # ← change only this line to switch cohorts
+  study_years: [2000, 2001, 2002]   # ← change only this line to switch cohorts
 execute:
   warning: false
   message: false
@@ -31,7 +31,7 @@ data. No Google Earth Engine extraction is required; all data are local.
 # 1.  Setup — packages, study parameters (from params$study_years), paths, theme
 # 2.  Study fire cohort — MTBS perimeters for STUDY_YEARS CA fires; map + table
 # 3.  Biomass within fires — ctrees (load CSV, distributions, trend by year)
-# 4.  Biomass within fires — eMapR (extract from 300 m TIFs, cache to CSV)
+# 4.  Biomass within fires — eMapR (extract from ~100 m TIFs, cache to CSV)
 # 5.  Dataset comparison — distributions, scatter, summary table
 # 6.  Before / after fire event study (EDA_PLAN §4.2)
 # 7.  Design notes — data limitations and implications
@@ -74,20 +74,21 @@ cat("Study years:", paste(STUDY_YEARS, collapse = ", "), "\n")
 # ── Paths ─────────────────────────────────────────────────────────────────────
 MTBS_PATH       <- here("data", "raw", "mtbs", "mtbs_perimeter_data", "mtbs_perims_DD.shp")
 EMAPR_DIR       <- here("data", "processed", "emapr_biomass_ca")
-CTREES_FIRE_CSV <- here("data", "processed", "ctrees", "biomass_fire_polygons_ctrees.csv")
+CTREES_FIRE_CSV <- here("data", "processed", "ctrees",
+                        "biomass_fire_polygons_ctrees_forested.csv")
 
-# Cache file includes years in filename — auto-invalidates when STUDY_YEARS changes;
-# no need to manually delete the old CSV when switching cohorts.
+# Cache file includes years, resolution, and forest-mask suffix — auto-invalidates
+# when STUDY_YEARS changes.
 years_hash     <- paste(sort(STUDY_YEARS), collapse = "_")
 EMAPR_FIRE_CSV <- here("data", "processed", "emapr_biomass_ca",
-                       glue("biomass_fire_polygons_emapr_{years_hash}.csv"))
+                       glue("biomass_fire_polygons_emapr_{years_hash}_100m_forested.csv"))
 
 dir.create(here("figures"), showWarnings = FALSE)
 
 # Detect all 30 m CA-clipped source TIFs (1990–2015 currently on disk).
-# These are the ground truth for what years we can extract from.
-# 300 m versions (~12 MB each) are created on-the-fly in §4 if missing, because
-# terra::extract() on 500 MB 30 m files can trigger std::bad_alloc.
+# These determine which years can be extracted.
+# ~100 m versions (~55 MB each, fact=3 from 30 m) are used for extraction —
+# run scripts/r/01_create_emapr_100m_tifs.R once to generate them.
 emapr_src_tifs <- list.files(EMAPR_DIR, pattern = "^composite_\\d{4}_ca\\.tif$",
                              full.names = FALSE)
 EMAPR_YEARS    <- sort(as.integer(str_extract(emapr_src_tifs, "\\d{4}")))
@@ -303,81 +304,53 @@ Results are cached to a CSV keyed by study years — switching `params$study_yea
 automatically uses (or creates) the correct cache file.
 
 ```{r emapr-inventory}
-# ── Inventory available 300 m TIFs ────────────────────────────────────────────
-# 300 m TIFs (~12 MB each) must be pre-generated from the 30 m CA source files
-# before rendering. Run scripts/r/01_create_emapr_300m_tifs.R once to create
-# them for all years. Extraction here uses ONLY the 300 m versions — terra::extract()
-# on the 500 MB 30 m TIFs causes std::bad_alloc.
-tifs_300m_ready <- sort(as.integer(str_extract(
-  list.files(EMAPR_DIR, pattern = "^composite_\\d{4}_ca_300m\\.tif$"),
+# ── Inventory available ~100 m TIFs ───────────────────────────────────────────
+# ~100 m TIFs (~55 MB each, fact=3 from 30 m) must be pre-generated before
+# rendering. Run scripts/r/01_create_emapr_100m_tifs.R once to create them
+# for all years. These files are memory-safe for terra::extract() and match
+# the ctrees native ~100 m resolution for a fair comparison.
+tifs_100m_ready <- sort(as.integer(str_extract(
+  list.files(EMAPR_DIR, pattern = "^composite_\\d{4}_ca_100m\\.tif$"),
   "\\d{4}"
 )))
-cat("300 m TIFs available for:", paste(tifs_300m_ready, collapse = ", "), "\n")
+cat("~100 m TIFs available for:", paste(tifs_100m_ready, collapse = ", "), "\n")
 
-missing_300m <- setdiff(EMAPR_YEARS, tifs_300m_ready)
-if (length(missing_300m) > 0) {
+missing_100m <- setdiff(EMAPR_YEARS, tifs_100m_ready)
+if (length(missing_100m) > 0) {
   message(
-    length(missing_300m), " year(s) have no 300 m TIF yet and will be skipped: ",
-    paste(missing_300m, collapse = ", "),
-    "\nRun scripts/r/01_create_emapr_300m_tifs.R to generate them."
+    length(missing_100m), " year(s) have no ~100 m TIF yet and will be skipped: ",
+    paste(missing_100m, collapse = ", "),
+    "\nRun scripts/r/01_create_emapr_100m_tifs.R to generate them."
   )
 }
 ```
 
 ```{r emapr-extract}
-# ── Cache check (with staleness validation) ───────────────────────────────────
-# A cache is stale if it was built before all 300 m TIFs existed — e.g., it only
-# covers 2000–2003 but tifs_300m_ready now spans 1990–2015. In that case, delete
-# the file so the extraction loop re-runs with the full year set.
-run_extraction <- TRUE
-
-if (file.exists(EMAPR_FIRE_CSV)) {
-  emapr_raw    <- readr::read_csv(EMAPR_FIRE_CSV, show_col_types = FALSE)
-  cached_years <- sort(unique(emapr_raw$year))
-  stale_years  <- setdiff(tifs_300m_ready, cached_years)
-
-  if (length(stale_years) == 0) {
-    cat("Cache valid — covers all", length(cached_years), "available years.\n")
-    cat("Cache file:", basename(EMAPR_FIRE_CSV), "\n")
-    run_extraction <- FALSE
-  } else {
-    cat("Cache is stale — missing", length(stale_years), "year(s):",
-        paste(stale_years, collapse = ", "), "\nDeleting and re-extracting...\n")
-    file.remove(EMAPR_FIRE_CSV)
-  }
+# ── Load from pre-built cache only ────────────────────────────────────────────
+# Extraction runs in scripts/r/02_extract_emapr_within_fires.R (run once in
+# the R console before rendering). Doing terra::extract() inside Quarto causes
+# invisible hangs on Windows because Quarto buffers chunk output and terra's
+# internal C++ threading can deadlock.
+if (!file.exists(EMAPR_FIRE_CSV)) {
+  stop(
+    "Cache not found: ", basename(EMAPR_FIRE_CSV), "\n",
+    "Run scripts/r/03_prepare_forest_mask.R then ",
+    "scripts/r/02_extract_emapr_within_fires.R first, then re-render."
+  )
 }
 
-if (run_extraction) {
+emapr_raw    <- readr::read_csv(EMAPR_FIRE_CSV, show_col_types = FALSE)
+cached_years <- sort(unique(emapr_raw$year))
+stale_years  <- setdiff(tifs_100m_ready, cached_years)
 
-  cat("Running eMapR extraction for", length(tifs_300m_ready), "years...\n")
-  cat("Cache will be saved to:", basename(EMAPR_FIRE_CSV), "\n")
-
-  # eMapR is EPSG:5070 — transform study fires to match
-  mtbs_vect <- terra::vect(mtbs_study)  # already in 5070
-
-  ex_list <- lapply(tifs_300m_ready, function(yr) {
-    # Use 300 m TIFs (~12 MB) — NOT the 30 m source TIFs (~500 MB).
-    # Loading 500 MB rasters per year causes std::bad_alloc in terra::extract().
-    # Fire polygons are large enough (≥1,000 ac) that 300 m means are accurate.
-    tif <- file.path(EMAPR_DIR, glue("composite_{yr}_ca_300m.tif"))
-    if (!file.exists(tif)) {
-      message(glue("  Skipping {yr} — TIF not found"))
-      return(NULL)
-    }
-    r  <- terra::rast(tif)
-    ex <- terra::extract(r, mtbs_vect, fun = mean, na.rm = TRUE)
-    # ex: data.frame with column ID (polygon index) and raster layer value
-    data.frame(
-      event_id      = mtbs_vect$event_id,   # rows align with polygon order
-      year          = yr,
-      agb_mean_mgha = ex[[2L]]              # second column = extracted mean
-    )
-  })
-
-  emapr_raw <- dplyr::bind_rows(Filter(Negate(is.null), ex_list))
-  readr::write_csv(emapr_raw, EMAPR_FIRE_CSV)
-  cat("eMapR extraction complete — saved to", basename(EMAPR_FIRE_CSV), "\n")
+if (length(stale_years) > 0) {
+  warning(length(stale_years), " year(s) in tifs_100m_ready are not in cache: ",
+          paste(stale_years, collapse = ", "),
+          "\nDelete the cache and re-run 02_extract_emapr_within_fires.R to refresh.")
 }
+
+cat("Cache loaded —", length(cached_years), "years,", nrow(emapr_raw), "rows.\n")
+cat("Cache file:", basename(EMAPR_FIRE_CSV), "\n")
 
 # ── Join fire_year and compute rel_year ───────────────────────────────────────
 fire_meta <- sf::st_drop_geometry(mtbs_study) |>
@@ -407,13 +380,15 @@ cat("rel_year range:                ",
 # Both ctrees_fires and emapr_fires are defined; this chunk runs after emapr-extract
 combined_yr <- dplyr::bind_rows(
   ctrees_fires |>
+    dplyr::filter(abs(rel_year) <= 2) |>
     dplyr::group_by(year) |>
     dplyr::summarise(mean_agb = mean(agb_mean_mgha, na.rm = TRUE), .groups = "drop") |>
-    dplyr::mutate(dataset = "ctrees (~1.1 km)"),
+    dplyr::mutate(dataset = "ctrees (~100 m)"),
   emapr_fires |>
+    dplyr::filter(abs(rel_year) <= 2) |>
     dplyr::group_by(year) |>
     dplyr::summarise(mean_agb = mean(agb_mean_mgha, na.rm = TRUE), .groups = "drop") |>
-    dplyr::mutate(dataset = "eMapR (30 m)")
+    dplyr::mutate(dataset = "eMapR (~100 m)")
 )
 
 ggplot(combined_yr, aes(x = year, y = mean_agb, color = dataset)) +
@@ -425,10 +400,10 @@ ggplot(combined_yr, aes(x = year, y = mean_agb, color = dataset)) +
            label = paste0("Fire\n", STUDY_YEARS),
            vjust = 1.4, hjust = 0, size = 3, color = "grey40") +
   scale_color_manual(
-    values = c("ctrees (~1.1 km)" = "#2166ac", "eMapR (30 m)" = "#d6604d"),
+    values = c("ctrees (~100 m)" = "#2166ac", "eMapR (~100 m)" = "#d6604d"),
     name   = "Dataset"
   ) +
-  scale_x_continuous(breaks = seq(1990, 2025, by = 2)) +
+  scale_x_continuous(breaks = seq(min(combined_yr$year), max(combined_yr$year), by = 1)) +
   scale_y_continuous(labels = scales::comma_format(),
                      expand = expansion(mult = c(0.05, 0.15))) +
   labs(
@@ -473,8 +448,8 @@ if (length(both_years) < length(STUDY_YEARS)) {
 if (length(both_years) == 0) {
   message(
     "No study years have data in both datasets yet.\n",
-    "Run scripts/r/01_create_emapr_300m_tifs.R to generate 300 m TIFs for ",
-    paste(setdiff(STUDY_YEARS, tifs_300m_ready), collapse = ", "),
+    "Run scripts/r/01_create_emapr_100m_tifs.R to generate ~100 m TIFs for ",
+    paste(setdiff(STUDY_YEARS, tifs_100m_ready), collapse = ", "),
     ", then re-render."
   )
 } else {
@@ -541,7 +516,7 @@ if (length(both_years) == 0) {
         subtitle = glue("Fire ignition years ({paste(both_years, collapse = ', ')}); one panel per year"),
         x        = "Mean AGB within fire perimeter (Mg/ha)",
         y        = "Density",
-        caption  = "Each observation = mean AGB across all 30 m pixels within one fire polygon."
+        caption  = "Each observation = mean AGB within one fire polygon (~100 m pixels for both datasets)."
       ) +
       theme_baci
   )
@@ -612,8 +587,8 @@ REL_MIN <- -12L   # years before fire to show
 REL_MAX <-  20L   # years after fire to show
 
 event_long <- dplyr::bind_rows(
-  ctrees_fires |> dplyr::mutate(dataset = "ctrees (~1.1 km)"),
-  emapr_fires  |> dplyr::mutate(dataset = "eMapR (30 m)")
+  ctrees_fires |> dplyr::mutate(dataset = "ctrees (~100 m)"),
+  emapr_fires  |> dplyr::mutate(dataset = "eMapR (~100 m)")
 ) |>
   dplyr::filter(rel_year >= REL_MIN, rel_year <= REL_MAX)
 
@@ -640,7 +615,7 @@ ctrees_pre_yrs <- min(STUDY_YEARS) - 2000L
 # Restrict to rel_year >= -8: the last year before which the 2008 cohort drops
 # out (obs year 1999, no TIF). Pooling cohorts with unequal representation
 # creates a spurious dip at rel_year = -9 — see diagnostic note in §6.
-event_agg_pooled <- dplyr::filter(event_agg, rel_year >= -8L)
+event_agg_pooled <- dplyr::filter(event_agg, rel_year >= -2L, rel_year <= 2L)
 
 # Build the tooltip text on the point layer; other layers get no tooltip
 p_event <- ggplot(event_agg_pooled, aes(x = rel_year, y = mean_agb,
@@ -659,11 +634,11 @@ p_event <- ggplot(event_agg_pooled, aes(x = rel_year, y = mean_agb,
   geom_vline(xintercept = 0, linetype = "dashed",
              color = "grey30", linewidth = 0.8) +
   scale_color_manual(
-    values = c("ctrees (~1.1 km)" = "#2166ac", "eMapR (30 m)" = "#d6604d"),
+    values = c("ctrees (~100 m)" = "#2166ac", "eMapR (~100 m)" = "#d6604d"),
     name   = "Dataset"
   ) +
   scale_x_continuous(
-    breaks = seq(-8L, REL_MAX, by = 2),
+    breaks = seq(-2L, 2L, by = 1),
     name   = "Years relative to fire"
   ) +
   scale_y_continuous(
@@ -697,6 +672,7 @@ plotly::ggplotly(p_event, tooltip = "text") |>
 ```{r event-study-by-cohort, fig.height=7}
 # Per-cohort aggregation
 event_agg_cohort <- event_long |>
+  dplyr::filter(rel_year >= -2L, rel_year <= 2L) |>
   dplyr::group_by(dataset, fire_year, rel_year) |>
   dplyr::summarise(
     mean_agb = mean(agb_mean_mgha, na.rm = TRUE),
@@ -714,15 +690,15 @@ ggplot(event_agg_cohort,
   facet_wrap(~ fire_year, ncol = 1,
              labeller = labeller(fire_year = function(x) paste("Fire cohort:", x))) +
   scale_color_manual(
-    values = c("ctrees (~1.1 km)" = "#2166ac", "eMapR (30 m)" = "#d6604d"),
+    values = c("ctrees (~100 m)" = "#2166ac", "eMapR (~100 m)" = "#d6604d"),
     name   = "Dataset"
   ) +
   scale_fill_manual(
-    values = c("ctrees (~1.1 km)" = "#2166ac", "eMapR (30 m)" = "#d6604d"),
+    values = c("ctrees (~100 m)" = "#2166ac", "eMapR (~100 m)" = "#d6604d"),
     name   = "Dataset"
   ) +
   scale_x_continuous(
-    breaks = seq(REL_MIN, REL_MAX, by = 2),
+    breaks = seq(-2L, 2L, by = 1),
     name   = "Years relative to fire"
   ) +
   scale_y_continuous(
