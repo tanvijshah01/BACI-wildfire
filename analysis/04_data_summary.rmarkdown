@@ -1,0 +1,954 @@
+---
+title: "Data Summary: MTBS, ctrees, and eMapR — California"
+subtitle: "Wildfire perimeters | Ctrees aboveground biomass | eMapR aboveground biomass"
+date: today
+format:
+  html:
+    embed-resources: true
+    toc: true
+    toc-depth: 3
+    code-fold: true
+    fig-width: 10
+    fig-height: 7
+    theme: flatly
+execute:
+  warning: false
+  message: false
+  cache: false
+---
+
+This document explores the key datasets involved in the BACI analysis with binary treatment: fire perimeters from MTBS (Monitoring Trends in Burn Severity) and biomass (eMapR and CTrees).
+
+```{r outline}
+# =============================================================================
+# SCRIPT OUTLINE
+# 1.  Setup — packages, study parameters, CA boundary
+# 2.  Dataset comparison table — temporal range, spatial resolution, methodology
+# 3.  MTBS — methodology, fire perimeter map, fires per year,
+#             size distribution, assessment type summary, summary table
+# 4.  ctrees — methodology, spatial maps
+# 5.  eMapR — methodology, spatial maps
+# 6.  Biomass comparison — AGB distribution, scatter/hexbin, change map
+# 7.  Design decisions — MTBS assessment types; choice of biomass outcome variable; control unit definition and SUTVA
+# =============================================================================
+```
+
+---
+
+## 1. Setup
+
+```{r setup}
+library(terra)
+library(sf)
+library(here)
+library(dplyr)
+library(ggplot2)
+library(scales)
+library(glue)
+library(patchwork)
+library(tigris)
+library(lubridate)
+library(ggspatial)
+library(knitr)
+library(png)
+library(hexbin)
+
+sf_use_s2(FALSE)
+options(tigris_use_cache = TRUE)
+here::i_am("analysis/04_data_summary.qmd")
+terra::terraOptions(threads = 1L)   # prevents threading deadlock inside Quarto on Windows
+
+# ── Study parameters — change these to update the whole document ───────────────
+STUDY_YEARS    <- c(2000, 2001, 2002)   # years with data in all three datasets
+YEAR_MIN       <- 1984                   # MTBS full dataset start
+YEAR_MAX       <- 2023                   # MTBS time-series end
+STATE_FIPS     <- "CA"                   # state to clip all data to
+
+# ── Paths ─────────────────────────────────────────────────────────────────────
+MTBS_PATH    <- here("data", "raw", "mtbs", "mtbs_perimeter_data", "mtbs_perims_DD.shp")
+CTREES_DIR   <- here("data", "processed", "ctrees")
+EMAPR_DIR    <- here("data", "processed", "emapr_biomass_ca")
+
+dir.create(here("figures"), showWarnings = FALSE)
+
+# ── CA boundary — loaded once, used by all three sections ─────────────────────
+ca_sf      <- tigris::states(cb = TRUE, year = 2022, resolution = "5m") |>
+  dplyr::filter(STUSPS == STATE_FIPS)
+stopifnot("State boundary not found" = nrow(ca_sf) == 1)
+
+ca_4326    <- sf::st_transform(ca_sf, 4326)      # for ctrees (WGS84)
+ca_5070    <- sf::st_transform(ca_sf, 5070)      # for eMapR/MTBS (Albers)
+ca_vect_4326 <- terra::vect(ca_4326)
+ca_vect_5070 <- terra::vect(ca_5070)
+
+# ── Shared theme for ggplot figures ───────────────────────────────────────────
+theme_baci <- theme_minimal(base_size = 12) +
+  theme(
+    plot.title       = element_text(face = "bold", size = 14),
+    plot.subtitle    = element_text(color = "grey40", size = 11),
+    plot.caption     = element_text(color = "grey50", size = 9),
+    panel.grid.minor = element_blank(),
+    axis.text        = element_text(size = 10)
+  )
+```
+
+---
+
+## 2. Dataset Comparison
+
+
+
+```{r dataset-comparison-table}
+# ── Dataset comparison ─────────────────────────────────────────────────────────
+# HTML tags used for multi-line cells; requires escape = FALSE in kable.
+
+mtbs_method <- paste0(
+  "Burn severity derived from the differenced Normalized Burn Ratio ",
+  "(dNBR = NBR<sub>pre</sub> &minus; NBR<sub>post</sub>). ",
+  "Severity classes calibrated per-fire against an unburned reference area ",
+  "(Eidenshink et al., 2007).",
+  "<br><br><em>Inputs:</em> Landsat 4/5 TM, 7 ETM+, 8/9 OLI surface reflectance; ",
+  "one pre-fire and one post-fire scene per event.",
+  "<br><br><em>Ground truth:</em> None. Index-based spectral classification ",
+  "reviewed by USFS remote sensing specialists; no independent field validation ",
+  "of severity classes."
+)
+
+ctrees_method <- paste0(
+  "Multi-scale machine learning framework predicting annual aboveground biomass ",
+  "density from multi-sensor satellite imagery and topographic covariates ",
+  "(CTrees, 2025).",
+  "<br><br><em>Inputs:</em> Landsat, Sentinel-2, and ALOS PALSAR radar surface ",
+  "reflectance; spaceborne LiDAR from NASA GEDI and ICESat-2; ",
+  "SRTM digital elevation model.",
+  "<br><br><em>Ground truth:</em> Over 500,000 ground-based forest inventory ",
+  "plots worldwide (including USFS FIA); validated with drone and airborne ",
+  "LiDAR measurements."
+)
+
+emapr_method <- paste0(
+  "LandTrendR spectral-temporal segmentation of annual Landsat composites ",
+  "(Kennedy et al., 2018). Piecewise linear segments capture disturbance and ",
+  "recovery dynamics. Segment-derived spectral predictors feed a gradient ",
+  "nearest neighbor (GNN) imputation model with environmental covariates ",
+  "(elevation, climate, soils) to estimate AGB ",
+  "(Environmental Mapping and Assessment Program, Oregon State University).",
+  "<br><br><em>Inputs:</em> Landsat 5 TM, 7 ETM+, 8/9 OLI annual ",
+  "peak-of-growing-season composites; spectral indices (NBR, NDVI, B5); ",
+  "elevation, climate, and soil data.",
+  "<br><br><em>Ground truth:</em> USFS Forest Inventory and Analysis (FIA) ",
+  "permanent monitoring plots across the continental United States."
+)
+
+mtbs_usage <- paste0(
+  "<strong>Treatment variable and study unit definition.</strong> All MTBS fires ",
+  "&ge; 1,000 ac in 11 Western US states (AZ, CA, CO, ID, MT, NV, NM, OR, ",
+  "UT, WA, WY), 2000&ndash;2020. Provides treatment timing (ignition year) ",
+  "and burn severity for each fire event."
+)
+
+ctrees_usage <- paste0(
+  "<strong> Outcome (response) variable. </strong> Annual mean AGB at ",
+  "100 m resolution extracted for each MTBS fire perimeter before and after ",
+  "each fire event across the 11-state study region. Used as the dependent ",
+  "variable in the Callaway-Sant&apos;Anna staggered difference-in-differences ",
+  "estimator."
+)
+
+emapr_usage <- paste0(
+  "<strong> Outcome (response) variable.</strong> Annual AGB extracted at",
+  "30 m resolution over MTBS fire ",
+  "perimeters; provides a methodologically independent estimate of biomass ",
+  "recovery trajectories for comparison with ctrees."
+)
+
+comparison_df <- data.frame(
+  Attribute = c("Full temporal range", "Spatial resolution", "Methodology", "Usage in BACI study"),
+  MTBS      = c(
+    "1984&ndash;2023 (US-wide; Western US fires &ge; 1,000 ac)",
+    "30 m Landsat grid (fire perimeters as EPSG:4326 polygons)",
+    mtbs_method,
+    mtbs_usage
+  ),
+  ctrees    = c(
+    "2000&ndash;2025 (worldwide)",
+    "~100 m native (WGS84 / EPSG:4326); used at native ~100 m in this analysis",
+    ctrees_method,
+    ctrees_usage
+  ),
+  eMapR     = c(
+    "1990&ndash;2023 (CONUS-wide)",
+    "30 m native (Landsat ARD grid; EPSG:5070 NAD83 Conus Albers); ~90 m display aggregation (fact=3, labeled ~100 m)",
+    emapr_method,
+    emapr_usage
+  ),
+  stringsAsFactors = FALSE
+)
+
+knitr::kable(
+  comparison_df,
+  col.names = c("Attribute", "MTBS", "ctrees", "eMapR"),
+  align     = "llll",
+  escape    = FALSE,
+  caption   = "Summary comparison of datasets used in this analysis."
+)
+```
+
+
+
+---
+
+## 3. MTBS Fire Perimeters
+
+### 3.1 Data Collection Methodology
+
+The **Monitoring Trends in Burn Severity (MTBS)** program is a joint USGS–USDA Forest Service initiative that consistently maps the location, extent, and burn severity of all large wildland fires in the United States from 1984 to present (Eidenshink et al., 2007). Burn severity is assessed using multitemporal Landsat satellite imagery at 30 m resolution.
+
+Burn severity is derived from the **differenced Normalized Burn Ratio (dNBR)**:
+
+$$\text{dNBR} = (\text{NBR}_{\text{pre}} - \text{NBR}_{\text{post}}) \times 1000$$
+
+where $\text{NBR} = (\text{NIR} - \text{SWIR}) / (\text{NIR} + \text{SWIR})$. Higher dNBR values indicate greater vegetation loss. Thresholds separating severity classes are calibrated **per fire** against an unburned reference area (`dnbr_offst`), so threshold values are not directly comparable across fires.
+
+**Minimum fire size:** ≥ 1,000 acres in the Western US; ≥ 500 acres in the Eastern US.
+
+#### Assessment types and image timing
+
+| Type | Description |
+|------|-------------|
+| **Initial** | Post-fire image acquired shortly after containment — fast but may capture early ash confusion |
+| **Extended** | Post-fire image acquired at next peak-of-green season — preferred for severity characterization |
+
+Extended assessments are generally preferred for scientific analysis.
+
+```{r mtbs-load}
+mtbs_raw <- sf::st_read(MTBS_PATH, quiet = TRUE)
+
+# Filter to state, wildfire only, year range, then clip to state boundary
+mtbs_ca <- mtbs_raw |>
+  dplyr::filter(
+    incid_type == "Wildfire",
+    lubridate::year(ig_date) >= YEAR_MIN,
+    lubridate::year(ig_date) <= YEAR_MAX
+  ) |>
+  sf::st_transform(sf::st_crs(ca_5070)) |>
+  sf::st_filter(ca_5070) |>
+  dplyr::mutate(
+    year      = lubridate::year(ig_date),
+    asmnt_cat = dplyr::case_when(
+      grepl("Extended",  asmnt_type) ~ "Extended",
+      grepl("Initial",   asmnt_type) ~ "Initial",
+      grepl("Emergency", asmnt_type) ~ "Emergency",
+      TRUE                           ~ "Other"
+    ),
+    single_scene = grepl("\\(SS\\)", asmnt_type)
+  )
+
+cat("CA wildfires", YEAR_MIN, "–", YEAR_MAX, ":", nrow(mtbs_ca), "fires\n")
+cat("Total area:  ", scales::comma(round(sum(mtbs_ca$burnbndac))), "acres\n")
+```
+
+### 3.2 Fire Perimeter Map (California, `r YEAR_MIN`–`r YEAR_MAX`)
+
+```{r mtbs-map, fig.height=9}
+ggplot() +
+  geom_sf(data = ca_5070, fill = "grey95", color = "grey60", linewidth = 0.4) +
+  geom_sf(data = mtbs_ca, aes(fill = year), color = NA, alpha = 0.75) +
+  scale_fill_viridis_c(
+    option  = "inferno",
+    name    = "Ignition year",
+    breaks  = seq(YEAR_MIN, YEAR_MAX, by = 5),
+    guide   = guide_colorbar(barwidth = 20, barheight = 0.5, title.position = "top")
+  ) +
+  annotation_scale(location = "bl", width_hint = 0.25) +
+  annotation_north_arrow(location = "tr", which_north = "true",
+                         style = north_arrow_minimal()) +
+  labs(
+    title   = glue("MTBS Wildfire Perimeters — {STATE_FIPS} ({YEAR_MIN}–{YEAR_MAX})"),
+    subtitle = glue("{scales::comma(nrow(mtbs_ca))} wildfires ≥ 1,000 acres"),
+    caption = "Source: USGS MTBS Program (mtbs.gov)."
+  ) +
+  theme_void(base_size = 12) +
+  theme(
+    plot.title    = element_text(face = "bold", size = 14),
+    plot.subtitle = element_text(color = "grey40", size = 11),
+    plot.caption  = element_text(color = "grey50", size = 9),
+    legend.position = "bottom"
+  )
+```
+
+### 3.3 Fires per Year
+
+```{r mtbs-fires-per-year, fig.height=5}
+fires_yr <- mtbs_ca |>
+  sf::st_drop_geometry() |>
+  dplyr::count(year, asmnt_cat)
+
+ggplot(fires_yr, aes(x = year, y = n, fill = asmnt_cat)) +
+  geom_col(width = 0.8) +
+  scale_fill_manual(
+    values = c("Extended" = "#d6604d", "Initial" = "#4393c3", "Emergency" = "#878787", "Other" = "#cccccc"),
+    name   = "Assessment type"
+  ) +
+  scale_x_continuous(breaks = seq(YEAR_MIN, YEAR_MAX, by = 5)) +
+  scale_y_continuous(expand = expansion(mult = c(0, 0.08))) +
+  labs(
+    title   = glue("Wildfire Count per Year — {STATE_FIPS}"),
+    subtitle = glue("MTBS wildfires ≥ 1,000 acres, {YEAR_MIN}–{YEAR_MAX}"),
+    x = "Year", y = "Number of fires",
+    caption = "Source: USGS MTBS Program."
+  ) +
+  theme_baci +
+  theme(panel.grid.major.x = element_blank())
+```
+
+### 3.4 Fire Size Distribution
+
+::: {.callout-note}
+MTBS only maps fires ≥ 1,000 acres in the Western US. The left tail of this distribution
+is therefore truncated — smaller fires are not represented.
+:::
+
+```{r mtbs-size-dist, fig.height=5}
+ggplot(sf::st_drop_geometry(mtbs_ca), aes(x = burnbndac, fill = asmnt_cat)) +
+  geom_histogram(bins = 40, alpha = 0.8, color = NA, position = "stack") +
+  scale_x_log10(
+    labels = scales::comma_format(),
+    breaks = c(1000, 5000, 10000, 50000, 100000, 500000)
+  ) +
+  scale_fill_manual(
+    values = c("Extended" = "#d6604d", "Initial" = "#4393c3", "Emergency" = "#878787", "Other" = "#cccccc"),
+    name   = "Assessment type"
+  ) +
+  scale_y_continuous(expand = expansion(mult = c(0, 0.08))) +
+  labs(
+    title    = glue("Fire Size Distribution — {STATE_FIPS}"),
+    subtitle = glue("Log₁₀ scale | {YEAR_MIN}–{YEAR_MAX} | fires ≥ 1,000 acres only"),
+    x        = "Fire area (acres, log scale)",
+    y        = "Number of fires",
+    caption  = "Source: USGS MTBS Program."
+  ) +
+  theme_baci +
+  theme(panel.grid.major.x = element_blank())
+```
+
+### 3.5 Assessment Type Summary
+
+```{r mtbs-asmnt-summary, fig.height=4}
+asmnt_sum <- mtbs_ca |>
+  sf::st_drop_geometry() |>
+  dplyr::filter(
+    !grepl("Emergency", asmnt_type),
+    !grepl("\\(SS\\)",  asmnt_type)
+  ) |>
+  dplyr::count(asmnt_type, name = "n_fires") |>
+  dplyr::arrange(desc(n_fires))
+
+ggplot(asmnt_sum, aes(x = reorder(asmnt_type, n_fires), y = n_fires)) +
+  geom_col(fill = "#2c7bb6", alpha = 0.85, width = 0.6) +
+  geom_text(aes(label = n_fires), hjust = -0.2, size = 3.5) +
+  coord_flip() +
+  scale_y_continuous(expand = expansion(mult = c(0, 0.15))) +
+  labs(
+    title   = glue("Wildfire Count by Assessment Type — {STATE_FIPS}"),
+    subtitle = glue("{YEAR_MIN}–{YEAR_MAX}"),
+    x = NULL, y = "Number of fires",
+    caption = "Source: USGS MTBS Program."
+  ) +
+  theme_baci +
+  theme(panel.grid.major.y = element_blank())
+```
+
+
+---
+
+### 3.6 Extended vs. Initial Assessment: Spatial Overlap
+
+Many MTBS fire events in California carry either an **Extended** or **Initial** assessment.
+If polygons from the two types overlap spatially — i.e., the same ground was burned in one
+Initial-assessed fire and later (or earlier) in an Extended-assessed fire — then that area
+would appear in both assessment categories with potentially different severity measurements.
+The analysis below quantifies this overlap.
+
+```{r mtbs-overlap-setup}
+# ── Split by assessment category ──────────────────────────────────────────────
+mtbs_ext <- mtbs_ca |> dplyr::filter(asmnt_cat == "Extended")
+mtbs_ini <- mtbs_ca |> dplyr::filter(asmnt_cat == "Initial")
+
+# Sanity check: any Event_ID appearing with >1 assessment type?
+dup_ids <- mtbs_ca |>
+  sf::st_drop_geometry() |>
+  dplyr::count(event_id, asmnt_cat) |>
+  dplyr::group_by(event_id) |>
+  dplyr::filter(dplyr::n_distinct(asmnt_cat) > 1) |>
+  dplyr::ungroup()
+
+cat("Extended fires:", nrow(mtbs_ext),
+    "| area:", scales::comma(round(sum(mtbs_ext$burnbndac))), "acres\n")
+cat("Initial fires: ", nrow(mtbs_ini),
+    "| area:", scales::comma(round(sum(mtbs_ini$burnbndac))), "acres\n")
+cat("Event IDs with >1 assessment type:", nrow(dup_ids), "\n")
+```
+
+```{r mtbs-ext-pct}
+# ── Extended / Initial coverage as % of all CA fires ─────────────────────────
+total_n  <- nrow(sf::st_drop_geometry(mtbs_ca))
+total_ac <- sum(mtbs_ca$burnbndac, na.rm = TRUE)
+
+ext_n    <- nrow(sf::st_drop_geometry(mtbs_ext))
+ext_ac   <- sum(mtbs_ext$burnbndac, na.rm = TRUE)
+
+ini_n    <- nrow(sf::st_drop_geometry(mtbs_ini))
+ini_ac   <- sum(mtbs_ini$burnbndac, na.rm = TRUE)
+
+coverage_df <- tibble::tribble(
+  ~Assessment, ~N_fires, ~Pct_fires,                        ~Area_ac,        ~Pct_area,
+  "Extended",  ext_n,    round(100 * ext_n  / total_n, 1),  round(ext_ac),   round(100 * ext_ac  / total_ac, 1),
+  "Initial",   ini_n,    round(100 * ini_n  / total_n, 1),  round(ini_ac),   round(100 * ini_ac  / total_ac, 1),
+  "All fires", total_n,  100,                                round(total_ac), 100
+)
+
+knitr::kable(
+  coverage_df,
+  col.names   = c("Assessment", "N fires", "% of all fires",
+                  "Total area (ac)", "% of total area"),
+  format.args = list(big.mark = ","),
+  caption     = paste0(
+    "Extended and Initial assessment coverage out of all CA MTBS wildfires ",
+    "(", YEAR_MIN, "–", YEAR_MAX, "). ",
+    "Rows sum to ≤ 100% because Emergency and Other assessments account for the remainder."
+  )
+)
+```
+
+
+```{r mtbs-type-maps, fig.width=14, fig.height=9}
+# ── Helper: one CA fire map per assessment type ───────────────────────────────
+make_type_map <- function(fires_sf, title_str, subtitle_str, year_min, year_max, ca_sf) {
+  ggplot() +
+    geom_sf(data = ca_sf, fill = "grey95", color = "grey60", linewidth = 0.4) +
+    geom_sf(data = fires_sf, aes(fill = year), color = NA, alpha = 0.75) +
+    scale_fill_viridis_c(
+      option = "inferno",
+      name   = "Ignition year",
+      limits = c(year_min, year_max),
+      breaks = seq(year_min, year_max, by = 5),
+      guide  = guide_colorbar(barwidth = 14, barheight = 0.5, title.position = "top")
+    ) +
+    annotation_scale(location = "bl", width_hint = 0.25) +
+    annotation_north_arrow(location = "tr", which_north = "true",
+                           style = north_arrow_minimal()) +
+    labs(title = title_str, subtitle = subtitle_str) +
+    theme_void(base_size = 12) +
+    theme(
+      plot.title    = element_text(face = "bold", size = 13),
+      plot.subtitle = element_text(color = "grey40", size = 11),
+      legend.position = "bottom"
+    )
+}
+
+p_ext <- make_type_map(
+  fires_sf     = mtbs_ext,
+  title_str    = glue("Extended Assessments — {STATE_FIPS} ({YEAR_MIN}–{YEAR_MAX})"),
+  subtitle_str = glue("{scales::comma(nrow(mtbs_ext))} fires"),
+  year_min     = YEAR_MIN, year_max = YEAR_MAX, ca_sf = ca_5070
+)
+
+p_ini <- make_type_map(
+  fires_sf     = mtbs_ini,
+  title_str    = glue("Initial Assessments — {STATE_FIPS} ({YEAR_MIN}–{YEAR_MAX})"),
+  subtitle_str = glue("{scales::comma(nrow(mtbs_ini))} fires"),
+  year_min     = YEAR_MIN, year_max = YEAR_MAX, ca_sf = ca_5070
+)
+
+patchwork::wrap_plots(p_ext, p_ini, ncol = 2) +
+  patchwork::plot_layout(guides = "collect") +
+  patchwork::plot_annotation(
+    caption = "Source: USGS MTBS Program (mtbs.gov).",
+    theme   = theme(
+      plot.caption    = element_text(color = "grey50", size = 9, hjust = 1),
+      legend.position = "bottom"
+    )
+  )
+```
+
+```{r mtbs-overlap-by-year, fig.height=6}
+# ── Tag each fire: does it spatially intersect the opposite assessment type? ──
+ini_overlaps <- lengths(sf::st_intersects(mtbs_ini, mtbs_ext)) > 0
+ext_overlaps <- lengths(sf::st_intersects(mtbs_ext, mtbs_ini)) > 0
+
+fire_overlap_df <- dplyr::bind_rows(
+  sf::st_drop_geometry(mtbs_ext) |>
+    dplyr::mutate(overlaps_other = ext_overlaps, type = "Extended"),
+  sf::st_drop_geometry(mtbs_ini) |>
+    dplyr::mutate(overlaps_other = ini_overlaps, type = "Initial")
+) |>
+  dplyr::count(year, type, overlaps_other) |>
+  dplyr::mutate(overlap_label = ifelse(overlaps_other, "Overlaps other type", "No overlap"))
+
+ggplot(fire_overlap_df, aes(x = year, y = n, fill = overlap_label)) +
+  geom_col(width = 0.8) +
+  facet_wrap(~ type, ncol = 1, scales = "free_y") +
+  scale_fill_manual(
+    values = c("Overlaps other type" = "#f6c141", "No overlap" = "grey70"),
+    name   = NULL
+  ) +
+  scale_x_continuous(breaks = seq(YEAR_MIN, YEAR_MAX, by = 5)) +
+  scale_y_continuous(expand = expansion(mult = c(0, 0.1))) +
+  labs(
+    title    = glue("Fires Overlapping the Other Assessment Type — {STATE_FIPS}"),
+    subtitle = "Yellow = fire polygon intersects ≥1 polygon assessed under the opposite type",
+    x        = "Year", y = "Number of fires",
+    caption  = "Source: USGS MTBS Program."
+  ) +
+  theme_baci +
+  theme(
+    panel.grid.major.x = element_blank(),
+    strip.text         = element_text(face = "bold")
+  )
+```
+
+::: {.callout-important}
+**Implication for study design**
+
+If a substantial share of Initial-assessed fire pixels are also covered by Extended polygons
+(or vice versa), retaining all assessment types in the treatment indicator means some pixels
+carry two fire events with potentially different severity measurements. The area statistics
+above directly inform the decision in §7.2.
+:::
+
+---
+
+## 4. Ctrees Aboveground Biomass
+
+### 4.1 Data Collection Methodology
+
+The **Ctrees** dataset provides annual estimates of aboveground biomass (AGB) for California derived from a machine-learning model trained on Landsat spectral time-series data and field inventory measurements (FIA plots). The native product is at ~100 m spatial resolution in WGS84 and spans 2000–2025.
+
+For this analysis, individual annual GeoTIFFs at native ~100 m resolution are used (`data/processed/ctrees/ctrees_YYYY_ca_100m.tif`, ~40–70 MB each), generated by `scripts/python/03_download_ctrees_ca.py` Part C. This enables a fair comparison with eMapR at matched ~100 m resolution. The dataset covers California only and requires no additional spatial clipping.
+
+**Source:** `https://app.earthmover.io/marketplace/69e00e1c21faca8bf36879d2`
+**Units:** Mg ha⁻¹. **Available years in this analysis:** `r paste(STUDY_YEARS, collapse=", ")`.
+
+
+```{r ctrees-load}
+# Load one ~100 m GeoTIFF per study year (generated by 03_download_ctrees_ca.py Part C).
+# Each file is ~40-70 MB; loading only STUDY_YEARS avoids reading all 26 years at once.
+ctrees_tifs <- setNames(
+  lapply(STUDY_YEARS, function(yr) {
+    tif <- file.path(CTREES_DIR, glue("ctrees_{yr}_ca_100m.tif"))
+    if (!file.exists(tif)) stop(glue(
+      "ctrees 100 m TIF missing for {yr} — run scripts/python/03_download_ctrees_ca.py"
+    ))
+    r <- terra::rast(tif)
+    terra::crs(r) <- "EPSG:4326"
+    r
+  }),
+  as.character(STUDY_YEARS)
+)
+
+cat("ctrees 100 m TIFs loaded for:", paste(STUDY_YEARS, collapse = ", "), "\n")
+for (yr in STUDY_YEARS) {
+  r <- ctrees_tifs[[as.character(yr)]]
+  cat(glue("  {yr}: {terra::nrow(r)} × {terra::ncol(r)} px, ",
+           "res = {round(terra::res(r)[1], 6)}°\n"))
+}
+```
+
+### 4.2 Spatial Maps
+
+```{r ctrees-maps}
+# Load NLCD 2004 forest mask (EPSG:4326, ~100m) — generated by
+# scripts/r/03_prepare_forest_mask.R. Non-forest pixels are set to NA.
+forest_mask_4326_path <- here("data", "processed", "forest_mask",
+                               "nlcd2004_forest_100m_ca.tif")
+if (!file.exists(forest_mask_4326_path)) {
+  stop("Forest mask missing — run scripts/r/03_prepare_forest_mask.R first.")
+}
+forest_mask_4326 <- terra::rast(forest_mask_4326_path)
+
+# Shared color scale: 99th pct of forested pixels across all study years.
+# Use spatSample (200k/year) instead of terra::values() — the latter reads
+# all ~40M native 100m pixels per year into RAM and hangs the render.
+all_ctrees_vals <- unlist(lapply(STUDY_YEARS, function(yr) {
+  r <- terra::mask(ctrees_tifs[[as.character(yr)]], forest_mask_4326)
+  v <- terra::spatSample(r, size = 200000, na.rm = TRUE, warn = FALSE)[[1]]
+  v[v > 0]
+}))
+ctrees_upper <- quantile(all_ctrees_vals, 0.99, na.rm = TRUE)
+cat("Ctrees color cap:", round(ctrees_upper, 1), "Mg/ha (99th pct, forest only)\n")
+
+# CA boundary as path coordinates for geom_path overlay (EPSG:4326)
+ca_path_4326 <- sf::st_coordinates(sf::st_cast(ca_4326, "MULTILINESTRING")) |>
+  as.data.frame() |>
+  dplyr::mutate(grp = paste(L1, L2, sep = "_"))
+
+# Build one ggplot panel per year
+ctrees_panels <- lapply(STUDY_YEARS, function(yr) {
+  lyr <- ctrees_tifs[[as.character(yr)]]
+  lyr <- terra::mask(lyr, forest_mask_4326)  # forest pixels only
+  # Aggregate to ~1 km for display only — 100m → 1km reduces 125M pixels to ~1.2M,
+  # avoiding std::bad_alloc in as.data.frame(). all_ctrees_vals above uses native 100m.
+  lyr <- terra::aggregate(lyr, fact = 10, fun = "mean", na.rm = TRUE)
+  ca_mask <- terra::rasterize(ca_vect_4326, lyr, field = 1, background = NA)
+  lyr <- terra::mask(lyr, ca_mask)
+  lyr <- terra::clamp(lyr, lower = 0, upper = ctrees_upper, values = TRUE)
+  df  <- as.data.frame(lyr, xy = TRUE, na.rm = FALSE)
+  names(df)[3] <- "agb"
+
+  ggplot(df, aes(x = x, y = y, fill = agb)) +
+    geom_raster() +
+    geom_path(data = ca_path_4326, aes(x = X, y = Y, group = grp),
+              color = "grey25", linewidth = 0.3, inherit.aes = FALSE) +
+    scale_fill_viridis_c(
+      name     = "AGB (Mg/ha)",
+      limits   = c(0, ctrees_upper),
+      na.value = "white",
+      guide    = guide_colorbar(barwidth = 1.5, barheight = 16,
+                                title.position = "top", title.hjust = 0.5)
+    ) +
+    coord_fixed(ratio = 1 / cos(37.25 * pi / 180)) +
+    labs(title = as.character(yr)) +
+    theme_void(base_size = 11) +
+    theme(plot.title   = element_text(hjust = 0.5, face = "bold", size = 12),
+          legend.title = element_text(size = 12),
+          legend.text  = element_text(size = 11))
+})
+
+# Assemble row with single shared legend
+ctrees_row <- patchwork::wrap_plots(ctrees_panels, nrow = 1) +
+  patchwork::plot_layout(guides = "collect") +
+  patchwork::plot_annotation(
+    title   = glue("Ctrees Aboveground Biomass — {STATE_FIPS} ({paste(STUDY_YEARS, collapse=', ')})"),
+    caption = "Source: Ctrees, ucsb-emlab/BACI-wildfires (arraylake). ~1 km display resolution (aggregated from native 100 m for rendering).",
+    theme   = theme(plot.title   = element_text(face = "bold", size = 13, hjust = 0.5),
+                    plot.caption = element_text(color = "grey50", size = 9, hjust = 1))
+  )
+
+ctrees_row_path <- here("figures", "summary_ctrees_row.png")
+ggsave(ctrees_row_path, plot = ctrees_row, width = 16, height = 7, dpi = 200, bg = "white")
+d <- dim(png::readPNG(ctrees_row_path))
+cat("Ctrees row saved —", d[2], "×", d[1], "px\n")
+```
+
+```{r ctrees-display-maps}
+knitr::include_graphics(ctrees_row_path)
+```
+
+---
+
+## 5. eMapR Aboveground Biomass
+
+### 5.1 Data Collection Methodology
+
+The **eMapR** dataset provides annual estimates of aboveground biomass (AGB) derived from **LandTrendR**, a spectral-temporal segmentation algorithm applied to Landsat surface reflectance time-series (Kennedy et al., 2018). LandTrendR fits piecewise linear segments to annual spectral indices, capturing both gradual vegetation change and disturbance events such as wildfire.  The native product is at ~30 m spatial resolution in ESPG: 5070 and spans 1990–2017.
+
+For this analysis, the native CONUS-wide composites (~28 GB each) were clipped to California (`scripts/r/00_crop_emapr_to_ca.R`, ~500 MB each), and summary statistics and ~90 m display rasters (labeled "~100 m", fact=3 from 30 m) were pre-computed (`scripts/r/01_precompute_emapr_ca.R`) to enable fast rendering and fair comparison with ctrees at matched resolution.
+
+**Source:** `islay.ceoas.oregonstate.edu/STEM_CONUS_BIOMASS/biomassfiaald-v1990-2023-1/`
+**Units:** Mg ha⁻¹. **Available years in this analysis:** `r paste(STUDY_YEARS, collapse=", ")`.
+
+```{r emapr-load}
+for (yr in STUDY_YEARS) {
+  rds <- file.path(EMAPR_DIR, glue("stats_{yr}.rds"))
+  tif <- file.path(EMAPR_DIR, glue("composite_{yr}_ca_100m.tif"))
+  if (!file.exists(rds)) stop(glue("eMapR stats missing for {yr} — run 01_precompute_emapr_ca.R"))
+  if (!file.exists(tif)) stop(glue("eMapR ~100m TIF missing for {yr} — run 01_precompute_emapr_ca.R"))
+}
+
+emapr_stats <- lapply(STUDY_YEARS, function(yr) {
+  readRDS(file.path(EMAPR_DIR, glue("stats_{yr}.rds")))
+})
+names(emapr_stats) <- STUDY_YEARS
+cat("eMapR stats loaded for:", paste(STUDY_YEARS, collapse=", "), "\n")
+```
+
+### 5.2 Spatial Maps
+
+```{r emapr-maps}
+# Load NLCD 2004 forest mask (EPSG:5070, 30m) — exact match with eMapR CRS/resolution.
+forest_mask_5070_path <- here("data", "processed", "forest_mask",
+                               "nlcd2004_forest_30m_ca.tif")
+if (!file.exists(forest_mask_5070_path)) {
+  stop("Forest mask missing — run scripts/r/03_prepare_forest_mask.R first.")
+}
+forest_mask_5070 <- terra::rast(forest_mask_5070_path)
+
+# Align mask extent to the eMapR 30 m grid — the two rasters were cropped independently
+# and may have slightly different bounding boxes. crop+extend adjusts extent metadata only
+# (no pixel resampling).
+r_emapr_template <- terra::rast(file.path(EMAPR_DIR,
+                                           glue("composite_{STUDY_YEARS[1]}_ca.tif")))
+forest_mask_5070 <- terra::crop(forest_mask_5070, r_emapr_template, snap = "near")
+forest_mask_5070 <- terra::extend(forest_mask_5070, r_emapr_template)
+rm(r_emapr_template)
+
+# eMapR stats vals are a pre-computed sample (spatSample, no forest filter).
+# Use the 30m mask to filter them for a consistent color cap.
+all_emapr_vals <- unlist(lapply(STUDY_YEARS, function(yr) {
+  r <- terra::rast(file.path(EMAPR_DIR, glue("composite_{yr}_ca.tif")))
+  r <- terra::mask(r, forest_mask_5070)
+  v <- terra::spatSample(r, size = 200000, na.rm = TRUE, warn = FALSE)[[1]]
+  v[v > 0]
+}))
+emapr_upper    <- quantile(all_emapr_vals, 0.99, na.rm = TRUE)
+cat("eMapR color cap:", round(emapr_upper, 1), "Mg/ha (99th pct, forest only)\n")
+
+# CA boundary as path coordinates for geom_path overlay (EPSG:5070)
+ca_path_5070 <- sf::st_coordinates(sf::st_cast(ca_5070, "MULTILINESTRING")) |>
+  as.data.frame() |>
+  dplyr::mutate(grp = paste(L1, L2, sep = "_"))
+
+# Precompute mask at 90m (fact=3 from 30m) once — reused for all year panels.
+# modal preserves binary 1/NA values cleanly when aggregating.
+forest_mask_90m <- terra::aggregate(forest_mask_5070, fact = 3, fun = "modal")
+
+# Build one ggplot panel per year
+emapr_panels <- lapply(STUDY_YEARS, function(yr) {
+  lyr <- terra::rast(file.path(EMAPR_DIR, glue("composite_{yr}_ca_100m.tif")))
+  lyr <- terra::mask(lyr, forest_mask_90m)   # forest pixels only (resampled to 90m grid)
+  # Aggregate to ~270 m for display only (fact=3 from ~90m → ~270m reduces ~16M to ~1.8M pixels)
+  lyr <- terra::aggregate(lyr, fact = 3, fun = "mean", na.rm = TRUE)
+  lyr <- terra::clamp(lyr, lower = 0, upper = emapr_upper, values = TRUE)
+  df  <- as.data.frame(lyr, xy = TRUE, na.rm = FALSE)
+  names(df)[3] <- "agb"
+
+  ggplot(df, aes(x = x, y = y, fill = agb)) +
+    geom_raster() +
+    geom_path(data = ca_path_5070, aes(x = X, y = Y, group = grp),
+              color = "grey25", linewidth = 0.3, inherit.aes = FALSE) +
+    scale_fill_viridis_c(
+      name     = "AGB (Mg/ha)",
+      limits   = c(0, emapr_upper),
+      na.value = "white",
+      guide    = guide_colorbar(barwidth = 1.5, barheight = 16,
+                                title.position = "top", title.hjust = 0.5)
+    ) +
+    coord_equal() +
+    labs(title = as.character(yr)) +
+    theme_void(base_size = 11) +
+    theme(plot.title   = element_text(hjust = 0.5, face = "bold", size = 12),
+          legend.title = element_text(size = 12),
+          legend.text  = element_text(size = 11))
+})
+
+# Assemble row with single shared legend
+emapr_row <- patchwork::wrap_plots(emapr_panels, nrow = 1) +
+  patchwork::plot_layout(guides = "collect") +
+  patchwork::plot_annotation(
+    title   = glue("eMapR Aboveground Biomass — {STATE_FIPS} ({paste(STUDY_YEARS, collapse=', ')})"),
+    caption = "Source: eMapR / LandTrendR, islay.ceoas.oregonstate.edu. ~270 m display resolution (aggregated from ~90 m for rendering).",
+    theme   = theme(plot.title   = element_text(face = "bold", size = 13, hjust = 0.5),
+                    plot.caption = element_text(color = "grey50", size = 9, hjust = 1))
+  )
+
+emapr_row_path <- here("figures", "summary_emapr_row.png")
+ggsave(emapr_row_path, plot = emapr_row, width = 16, height = 7, dpi = 200, bg = "white")
+d <- dim(png::readPNG(emapr_row_path))
+cat("eMapR row saved —", d[2], "×", d[1], "px\n")
+```
+
+```{r emapr-display-maps}
+knitr::include_graphics(emapr_row_path)
+```
+
+---
+
+## 6. Biomass Dataset Comparison — ctrees vs. eMapR
+
+The two biomass datasets capture the same ecological signal via different sensor stacks and
+modeling approaches. The figures below compare their value distributions and spatial patterns
+for the same years and study region to assess coherence before choosing one as the
+primary outcome variable.
+
+### 6.1 Effect of Forest Mask on ctrees Distribution
+
+ctrees assigns positive AGB to **all** land pixels, including shrubland, chaparral, and
+grassland — land cover types that make up roughly 60% of California's area. The forest mask
+(NLCD 2004 classes 41/42/43) removes these pixels, isolating only forested areas for
+comparison with eMapR (which inherently focuses on forest disturbance dynamics via
+LandTrendR).
+
+```{r ctrees-mask-effect}
+# Sample unmasked ctrees values for the "before" distribution.
+# ctrees_tifs is loaded in the ctrees-maps chunk above.
+all_ctrees_vals_raw <- unlist(lapply(STUDY_YEARS, function(yr) {
+  v <- terra::spatSample(ctrees_tifs[[as.character(yr)]], size = 200000,
+                         na.rm = TRUE, warn = FALSE)[[1]]
+  v[v > 0]
+}))
+
+N_SAMP <- 300000L
+mask_effect_df <- dplyr::bind_rows(
+  data.frame(
+    agb    = sample(all_ctrees_vals_raw[all_ctrees_vals_raw <= quantile(all_ctrees_vals_raw, 0.99, na.rm = TRUE)],
+                    min(N_SAMP, sum(all_ctrees_vals_raw <= quantile(all_ctrees_vals_raw, 0.99, na.rm = TRUE))),
+                    replace = FALSE),
+    version = "ctrees — all pixels"
+  ),
+  data.frame(
+    agb    = sample(all_ctrees_vals[all_ctrees_vals <= ctrees_upper],
+                    min(N_SAMP, sum(all_ctrees_vals <= ctrees_upper)),
+                    replace = FALSE),
+    version = "ctrees — forest only (NLCD 2004)"
+  )
+)
+
+pct_forest <- round(100 * length(all_ctrees_vals) / length(all_ctrees_vals_raw), 1)
+cat(glue("Forest pixels retained: {pct_forest}% of all positive-AGB ctrees pixels\n"))
+
+ggplot(mask_effect_df, aes(x = agb, fill = version, color = version)) +
+  geom_density(alpha = 0.35, linewidth = 0.8) +
+  scale_x_continuous(
+    labels = scales::comma_format(),
+    expand = expansion(mult = c(0, 0.02))
+  ) +
+  scale_y_continuous(expand = expansion(mult = c(0, 0.05))) +
+  scale_fill_manual(
+    values = c("ctrees — all pixels" = "#aaaaaa",
+               "ctrees — forest only (NLCD 2004)" = "#2166ac"),
+    name   = NULL
+  ) +
+  scale_color_manual(
+    values = c("ctrees — all pixels" = "#888888",
+               "ctrees — forest only (NLCD 2004)" = "#2166ac"),
+    name   = NULL
+  ) +
+  labs(
+    title    = glue("ctrees AGB Distribution: Before vs. After Forest Mask ({paste(STUDY_YEARS, collapse=', ')})"),
+    subtitle = glue("Forest pixels retained: {pct_forest}% of positive-AGB pixels | NLCD 2004 classes 41/42/43"),
+    x        = "AGB (Mg/ha)",
+    y        = "Density",
+    caption  = "Grey = all land pixels with AGB > 0; blue = forest pixels only. Values capped at 99th percentile per group."
+  ) +
+  theme_baci +
+  theme(legend.position = "top")
+```
+
+### 6.2 AGB Value Distributions — ctrees vs. eMapR (forest only)
+
+```{r biomass-density}
+# Sample before density estimation — full pixel arrays are 100M+ values and
+# geom_density() scales O(n*m), making it hang on unsampled raster data.
+N_SAMP <- 500000L
+ct_vals  <- all_ctrees_vals[all_ctrees_vals <= ctrees_upper]
+emp_vals <- all_emapr_vals[all_emapr_vals <= emapr_upper]
+
+dist_df <- dplyr::bind_rows(
+  data.frame(agb = sample(ct_vals,  min(N_SAMP, length(ct_vals)),  replace = FALSE), dataset = "ctrees (~100 m)"),
+  data.frame(agb = sample(emp_vals, min(N_SAMP, length(emp_vals)), replace = FALSE), dataset = "eMapR (~100 m)")
+)
+
+ggplot(dist_df, aes(x = agb, fill = dataset, color = dataset)) +
+  geom_density(alpha = 0.35, linewidth = 0.8) +
+  scale_x_continuous(
+    limits = c(0, max(ctrees_upper, emapr_upper) * 1.05),
+    labels = scales::comma_format(),
+    expand = expansion(mult = c(0, 0.02))
+  ) +
+  scale_y_continuous(expand = expansion(mult = c(0, 0.05))) +
+  scale_fill_manual(
+    values = c("ctrees (~100 m)" = "#2166ac", "eMapR (~100 m)" = "#d6604d"),
+    name   = "Dataset"
+  ) +
+  scale_color_manual(
+    values = c("ctrees (~100 m)" = "#2166ac", "eMapR (~100 m)" = "#d6604d"),
+    name   = "Dataset"
+  ) +
+  labs(
+    title    = glue("AGB Distribution — ctrees vs. eMapR ({paste(STUDY_YEARS, collapse=', ')})"),
+    subtitle = "Forest pixels only (NLCD 2004 classes 41/42/43); values capped at 99th percentile per dataset",
+    x        = "AGB (Mg/ha)",
+    y        = "Density",
+    caption  = "Both datasets sampled at matched ~100 m resolution (ctrees native; eMapR 3× block-mean from 30 m = ~90 m)."
+  ) +
+  theme_baci
+```
+
+::: {.callout-note}
+**Note: Sharp peak in CTrees due to inclusion of non-forest area**
+
+ctrees assigns positive AGB values to *all* land pixels — including shrubland, chaparral, grassland, and
+agriculture. California is roughly 40% shrubland/chaparral and 20% grassland/agriculture (Central Valley,
+coastal prairies), which carry low biomass (~5–40 Mg/ha). This large non-forest area
+produces the tall, narrow spike at the left of the ctrees curve.
+
+eMapR (derived from LandTrendR, a Landsat spectral-temporal algorithm designed for forest disturbance
+monitoring) either assigns NA to non-forested pixels or produces more variable values across land cover
+types, yielding the broader, flatter distribution.
+:::
+
+---
+
+## 7. Design Decisions
+
+---
+
+### 7.1 Choice of Biomass Dataset for the Outcome Variable
+
+| Criterion | ctrees | eMapR |
+|:---|:---|:---|
+| **Spatial resolution** | ~100 m native (WGS84); used at native ~100 m | <span style="color:#2e7d32; font-weight:bold;">✓</span> 30 m native (Landsat ARD grid, EPSG:5070); ~90 m for analysis (labeled ~100 m) |
+| **Temporal coverage** | 2000–2025 worldwide | <span style="color:#2e7d32; font-weight:bold;">✓</span> 1990–2023 CONUS — up to 10 yr pre-fire baseline for fires ≥ 2000 |
+| **Methodology** | <span style="color:#2e7d32; font-weight:bold;">✓</span> Multi-sensor fusion (Landsat + Sentinel-2 + ALOS PALSAR + GEDI/ICESat-2 LiDAR); >500k FIA training plots worldwide | Landsat only (no structural LiDAR inputs); LandTrendR spectral segmentation + GNN imputation; peer-reviewed (Kennedy et al., 2018) |
+
+---
+
+### 7.2 Subsetting MTBS Data: All Assessment Types vs. Extended Only
+
+MTBS fire records carry different assessment types — **Extended** and **Initial** - reflecting when the post-fire Landsat scene was acquired relative to the fire event. The choice of which assessment types to retain has implications for both sample size and severity measurement quality.
+
+
+| | All types | Extended only |
+|---|---|---|
+| **Advantages** | Larger sample; no geographic selection bias | Cleaner severity signal; methodologically defensible |
+| **Disadvantages** | Severity heterogeneity across assessment types | |
+
+```{=html}
+<table style="width:100%; border-collapse:collapse; font-size:14px; margin:1em 0;">
+  <thead>
+    <tr style="background:#f5f5f5;">
+      <th style="padding:10px 14px; text-align:left; border-bottom:1px solid #ddd; min-width:140px;">Assessment Type</th>
+      <th style="padding:10px 14px; text-align:left; border-bottom:1px solid #ddd;">Timing / Method</th>
+      <th style="padding:10px 14px; text-align:left; border-bottom:1px solid #ddd;">Ecosystem Type</th>
+      <th style="padding:10px 14px; text-align:left; border-bottom:1px solid #ddd;">Severity Characteristics</th>
+      <th style="padding:10px 14px; text-align:left; border-bottom:1px solid #ddd;">Implications for Analysis</th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td style="padding:12px 14px; border-bottom:1px solid #eee; font-weight:500;">Initial Assessment</td>
+      <td style="padding:12px 14px; border-bottom:1px solid #eee; line-height:1.6;">Defined after fire termination to assess consumption and first-order mortality (<a href="http://www.pyrogeographer.com/uploads/1/6/4/8/16481944/kolden_etal_2012_fem.pdf">Kolden 2012</a>)</td>
+      <td style="padding:12px 14px; border-bottom:1px solid #eee; line-height:1.6;">Grasslands and shrublands (<a href="http://www.pyrogeographer.com/uploads/1/6/4/8/16481944/kolden_etal_2012_fem.pdf">Kolden 2012</a>)</td>
+      <td style="padding:12px 14px; border-bottom:1px solid #eee; line-height:1.6;">May overestimate fire severity because captures only immediate post-fire effects while disregarding resprouting or recovery of live vegetation. Ash cover, which decreases with time since fire, often increases reflectance values resulting in increased measures of high severity (<a href="http://doi.org/10.1101/2025.08.22.671876">Zhang 2025</a>). Less definition in perimeter.</td>
+      <td style="padding:12px 14px; border-bottom:1px solid #eee; line-height:1.6;">Choice of assessment type matters for burn severity interpretation if using MTBS severity data</td>
+    </tr>
+    <tr>
+      <td style="padding:12px 14px; font-weight:500;">Extended Assessment</td>
+      <td style="padding:12px 14px; line-height:1.6;">Data acquired the first growing season after wildfire to quantify delayed mortality and primary regeneration (<a href="http://www.pyrogeographer.com/uploads/1/6/4/8/16481944/kolden_etal_2012_fem.pdf">Kolden 2012</a>)</td>
+      <td style="padding:12px 14px; line-height:1.6;">Forests (<a href="http://www.pyrogeographer.com/uploads/1/6/4/8/16481944/kolden_etal_2012_fem.pdf">Kolden 2012</a>)</td>
+      <td style="padding:12px 14px; line-height:1.6;">Includes vegetative recovery potential and delayed mortality (<a href="https://research.fs.usda.gov/download/treesearch/24066.pdf">Key 2006</a>)</td>
+      <td style="padding:12px 14px; line-height:1.6;">Better captures true fire effects in forest ecosystems where mortality is delayed; more appropriate for causal inference on biomass recovery</td>
+    </tr>
+  </tbody>
+</table>
+```
+
+**Potential approach:** Include all assessment types for defining the treatment indicator (initial and extended). Confirm results with extended-only analysis.
+
+> See §3.6 for an empirical quantification of how much ground area is actually shared between
+> Extended and Initial assessment polygons, and what share of fires are spatially affected.
+
+---
+
+### 7.3 How should the analysis handle repeated burns?
+
+Next steps include calculating statistics on reburned frequency and area. Should this analysis remove areas once they have reburned?
+
+---
+
+### 7.4 What qualifies as a control unit?
+
+Units that burn at any point cannot serve as clean controls for the full panel. Units that were already burned before the study period are problematic if biomass recovery is still ongoing. How do we confirm that areas chosen as controls didn't burn just prior to the study period?
+
+

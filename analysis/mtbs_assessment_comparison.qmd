@@ -1,0 +1,343 @@
+---
+title: "MTBS Assessment Types: Definitions and Spatial Bias"
+subtitle: "Do Initial and Extended assessments cluster systematically by geography, season, or fire size?"
+date: today
+format:
+  html:
+    embed-resources: true
+    toc: true
+    toc-depth: 3
+    code-fold: true
+    fig-width: 10
+    fig-height: 6
+    theme: flatly
+execute:
+  warning: false
+  message: false
+  cache: true
+---
+
+```{r}
+# =============================================================================
+# SCRIPT OUTLINE
+# 1. Setup — packages, paths, study parameters
+# 2. Assessment type definitions (comparison table)
+# 3. Load and filter MTBS data
+# 4. Bias investigation plots
+#    4.1 Fire counts by state — Extended only + Extended/Initial stacked (patchwork)
+#    4.2 Fire count by ignition month — Initial vs Extended (stacked bar)
+# =============================================================================
+```
+
+---
+
+## 1. Setup
+
+```{r setup}
+.install_if_missing <- function(pkgs) {
+  missing <- pkgs[!pkgs %in% rownames(installed.packages())]
+  if (length(missing) > 0) install.packages(missing, repos = "https://cloud.r-project.org", quiet = TRUE)
+}
+.install_if_missing(c("tigris", "ggspatial", "glue", "patchwork", "scales", "png"))
+
+library(tidyverse)
+library(sf)
+library(tigris)
+library(here)
+library(scales)
+library(glue)
+library(patchwork)
+
+options(tigris_use_cache = TRUE)
+sf_use_s2(FALSE)
+
+here::i_am("analysis/mtbs_assessment_comparison.qmd")
+
+WESTERN_STATES <- c("AZ", "CA", "CO", "ID", "MT", "NV", "NM", "OR", "UT", "WA", "WY")
+YEAR_MIN       <- 2000
+YEAR_MAX       <- 2023
+MTBS_PATH      <- here("data/raw/mtbs/mtbs_perimeter_data/mtbs_perims_DD.shp")
+
+# Two-color palette: Initial (blue) vs Extended (red) — colorblind-safe
+BINARY_COLORS <- c("Initial" = "#4393c3", "Extended" = "#d6604d")
+
+dir.create(here("figures"), showWarnings = FALSE)
+```
+
+---
+
+## 2. Assessment Type Definitions
+
+MTBS assigns each fire an `asmnt_type` that records which post-fire Landsat image was used for burn severity mapping. The timing of that image affects the dNBR signal and the ecological interpretation of severity scores.
+
+```{r comparison-table}
+#| code-fold: false
+defn_tbl <- tribble(
+  ~`Assessment Type`, ~`Post-fire image timing`,                                                                         ~`Primary ecosystem`,
+  "Initial",          "Acquired shortly after containment; captures first-order mortality and ash cover (Kolden 2012)", "Grasslands, shrublands",
+  "Extended",         "Acquired the first growing season after fire; allows vegetation to stabilize (Kolden 2012)",     "Forests"
+)
+
+knitr::kable(defn_tbl, align = "lll")
+```
+
+## 3. Load and Filter MTBS Data
+
+```{r load-mtbs}
+mtbs_raw <- st_read(MTBS_PATH, quiet = TRUE)
+
+stopifnot(all(c("event_id", "ig_date", "incid_type", "burnbndac",
+                "asmnt_type", "pre_id", "post_id") %in% names(mtbs_raw)))
+
+n_invalid <- sum(!st_is_valid(mtbs_raw))
+if (n_invalid > 0) mtbs_raw <- st_make_valid(mtbs_raw)
+
+cat("Records loaded:", nrow(mtbs_raw), "\n")
+```
+
+```{r parse-and-filter}
+# Get Western US state boundaries for spatial filter
+western_states_sf <- states(cb = TRUE, progress_bar = FALSE) |>
+  filter(STUSPS %in% WESTERN_STATES) |>
+  st_transform(st_crs(mtbs_raw))
+
+# --- Parse fields -------------------------------------------------------
+mtbs_parsed <- mtbs_raw |>
+  mutate(
+    year  = as.integer(substr(ig_date, 1, 4)),
+    month = as.integer(substr(ig_date, 6, 7)),
+    # State extracted from event_id prefix (format: ST + lat + lon + date)
+    state = substr(event_id, 1, 2),
+    # Collapse 4 types to binary: any Extended → "Extended", else → "Initial"
+    # SS variants (no pre-fire image) flagged separately for the lag plot
+    asmnt_binary = case_when(
+      asmnt_type %in% c("Extended", "Extended (SS)") ~ "Extended",
+      TRUE                                            ~ "Initial"
+    ),
+    asmnt_ss = str_detect(asmnt_type, fixed("(SS)"))
+  )
+
+# Filter: wildfires only, Western US, 2000–2023
+n0 <- nrow(mtbs_parsed)
+mtbs_wf <- mtbs_parsed |> filter(incid_type == "Wildfire")
+cat("After Wildfire filter:         ", nrow(mtbs_wf), "(removed", n0 - nrow(mtbs_wf), ")\n")
+
+mtbs_wf <- mtbs_wf |> filter(year >= YEAR_MIN, year <= YEAR_MAX)
+cat("After year filter (2000–2023): ", nrow(mtbs_wf), "\n")
+
+mtbs_study <- st_join(mtbs_wf, western_states_sf["STUSPS"], join = st_intersects, left = FALSE)
+cat("After Western US spatial filter:", nrow(mtbs_study), "\n")
+
+stopifnot(length(setdiff(WESTERN_STATES, unique(mtbs_study$STUSPS))) == 0)
+cat("All 11 Western states present. ✓\n")
+
+# Drop geometry for non-spatial summaries
+mtbs_df <- st_drop_geometry(mtbs_study)
+
+cat("\nAssessment type breakdown:\n")
+print(count(mtbs_df, asmnt_type, sort = TRUE))
+```
+
+---
+
+## 4. Bias Investigation
+
+### 4.1 Fire Counts by State
+
+Two views of the same data: the left plot shows Extended fires only; the right adds Initial fires as a stacked bar. Comparing them reveals both the absolute volume of Extended fires per state and how that volume relates to each state's total fire activity.
+
+```{r plot-state-counts, fig.height=7}
+state_asmnt <- mtbs_df |>
+  count(STUSPS, asmnt_binary) |>
+  pivot_wider(names_from = asmnt_binary, values_from = n, values_fill = 0) |>
+  mutate(
+    total   = Initial + Extended,
+    pct_ext = 100 * Extended / total
+  )
+
+overall_pct <- 100 * sum(state_asmnt$Extended) / sum(state_asmnt$total)
+cat("Overall % Extended (Western US wildfires, 2000–2023):", round(overall_pct, 1), "%\n")
+print(arrange(state_asmnt, desc(Extended)))
+
+# Shared state order: descending by Extended count
+state_order <- state_asmnt |> arrange(Extended) |> pull(STUSPS)
+
+state_long <- mtbs_df |>
+  count(STUSPS, asmnt_binary) |>
+  mutate(STUSPS = factor(STUSPS, levels = state_order))
+
+# -- Plot A: Extended only ---------------------------------------------------
+p_ext_only <- state_long |>
+  filter(asmnt_binary == "Extended") |>
+  ggplot(aes(x = n, y = STUSPS)) +
+  geom_col(fill = BINARY_COLORS["Extended"], alpha = 0.85, width = 0.7) +
+  geom_text(aes(label = comma(n)), hjust = -0.15, size = 3.3, color = "grey20") +
+  scale_x_continuous(labels = comma, expand = expansion(mult = c(0, 0.15))) +
+  labs(title = "Extended only", x = "Number of fires", y = NULL) +
+  theme_minimal(base_size = 12) +
+  theme(
+    plot.title         = element_text(face = "bold", size = 13),
+    panel.grid.minor   = element_blank(),
+    panel.grid.major.y = element_blank(),
+    axis.title.x       = element_text(size = 11),
+    axis.text          = element_text(size = 10)
+  )
+
+# -- Plot B: Extended + Initial stacked --------------------------------------
+p_stacked <- state_long |>
+  mutate(asmnt_binary = factor(asmnt_binary, levels = c("Initial", "Extended"))) |>
+  ggplot(aes(x = n, y = STUSPS, fill = asmnt_binary)) +
+  geom_col(alpha = 0.85, width = 0.7) +
+  geom_text(
+    data = state_asmnt |> mutate(STUSPS = factor(STUSPS, levels = state_order)),
+    aes(x = total, y = STUSPS, label = comma(total), fill = NULL),
+    hjust = -0.15, size = 3.3, color = "grey20"
+  ) +
+  scale_fill_manual(values = BINARY_COLORS, name = NULL) +
+  scale_x_continuous(labels = comma, expand = expansion(mult = c(0, 0.15))) +
+  labs(title = "Extended + Initial", x = "Number of fires", y = NULL) +
+  theme_minimal(base_size = 12) +
+  theme(
+    plot.title         = element_text(face = "bold", size = 13),
+    panel.grid.minor   = element_blank(),
+    panel.grid.major.y = element_blank(),
+    axis.title.x       = element_text(size = 11),
+    axis.text          = element_text(size = 10),
+    legend.position    = "top",
+    legend.text        = element_text(size = 10)
+  )
+
+p_state_counts <- (p_ext_only | p_stacked) +
+  plot_annotation(
+    title    = "Wildfire Counts by State — Extended vs Initial Assessments",
+    subtitle = glue("Western US wildfires ≥ 1,000 acres, 2000–2023  (n = {comma(sum(state_asmnt$total))})"),
+    caption  = "States ordered by Extended fire count. Source: USGS MTBS.",
+    theme    = theme(
+      plot.title    = element_text(face = "bold", size = 14),
+      plot.subtitle = element_text(color = "grey40"),
+      plot.caption  = element_text(color = "grey50", size = 9)
+    )
+  )
+
+print(p_state_counts)
+
+stopifnot("All states have same Extended count — no variation" = sd(state_asmnt$Extended) > 0)
+
+ggsave(here("figures/asmnt_counts_by_state.png"),
+       plot = p_state_counts, width = 14, height = 7, dpi = 300, bg = "white")
+img_dims <- dim(png::readPNG(here("figures/asmnt_counts_by_state.png")))
+cat("Plot 4.1 saved — dimensions (px):", img_dims[2], "x", img_dims[1], "\n")
+```
+
+---
+
+### 4.2 Fire Count by Ignition Month
+
+Two views mirroring 4.1: Extended only on the left, stacked Extended + Initial on the right. Late-season fires (September–October) shift toward Extended because little post-fire growing season remains before winter. August has the most fires overall but a lower Extended share than September, so Initial-assessed fires dominate the high-volume peak season.
+
+```{r plot-month-stacked, fig.height=5}
+month_count <- mtbs_df |>
+  filter(!is.na(month)) |>
+  count(month, asmnt_binary) |>
+  mutate(mon_lbl = factor(month.abb[month], levels = month.abb))
+
+month_totals <- month_count |>
+  group_by(mon_lbl) |>
+  summarise(total = sum(n), .groups = "drop")
+
+theme_month <- theme_minimal(base_size = 12) +
+  theme(
+    plot.title         = element_text(face = "bold", size = 13),
+    panel.grid.minor   = element_blank(),
+    panel.grid.major.x = element_blank(),
+    axis.title         = element_text(size = 11),
+    axis.text          = element_text(size = 10)
+  )
+
+# -- Plot A: Extended only ---------------------------------------------------
+p_month_ext <- month_count |>
+  filter(asmnt_binary == "Extended") |>
+  ggplot(aes(x = mon_lbl, y = n)) +
+  geom_col(fill = BINARY_COLORS["Extended"], alpha = 0.85, width = 0.75) +
+  geom_text(aes(label = comma(n)), vjust = -0.4, size = 3.2, color = "grey20") +
+  scale_y_continuous(labels = comma, expand = expansion(mult = c(0, 0.15))) +
+  labs(title = "Extended only", x = "Ignition month", y = "Number of fires") +
+  theme_month
+
+# -- Plot B: Extended + Initial stacked --------------------------------------
+p_month_stacked <- month_count |>
+  mutate(asmnt_binary = factor(asmnt_binary, levels = c("Initial", "Extended"))) |>
+  ggplot(aes(x = mon_lbl, y = n, fill = asmnt_binary)) +
+  geom_col(alpha = 0.85, width = 0.75) +
+  geom_text(
+    data = month_totals,
+    aes(x = mon_lbl, y = total, label = comma(total), fill = NULL),
+    vjust = -0.4, size = 3.2, color = "grey20"
+  ) +
+  scale_fill_manual(values = BINARY_COLORS, name = NULL) +
+  scale_y_continuous(labels = comma, expand = expansion(mult = c(0, 0.15))) +
+  labs(title = "Extended + Initial", x = "Ignition month", y = "Number of fires") +
+  theme_month +
+  theme(legend.position = "top", legend.text = element_text(size = 10))
+
+p_month_counts <- (p_month_ext | p_month_stacked) +
+  plot_annotation(
+    title    = "Wildfire Counts by Ignition Month — Extended vs Initial Assessments",
+    subtitle = glue("Western US wildfires ≥ 1,000 acres, 2000–2023  (n = {comma(sum(month_totals$total))})"),
+    caption  = "Labels show fire count per bar (left) or total per month (right). Source: USGS MTBS.",
+    theme    = theme(
+      plot.title    = element_text(face = "bold", size = 14),
+      plot.subtitle = element_text(color = "grey40"),
+      plot.caption  = element_text(color = "grey50", size = 9)
+    )
+  )
+
+print(p_month_counts)
+
+ggsave(here("figures/asmnt_counts_by_month.png"),
+       plot = p_month_counts, width = 14, height = 6, dpi = 300, bg = "white")
+img_dims <- dim(png::readPNG(here("figures/asmnt_counts_by_month.png")))
+cat("Plot 4.2 saved — dimensions (px):", img_dims[2], "x", img_dims[1], "\n")
+```
+
+---
+
+## Summary
+
+```{r summary-table}
+month_initial_peak <- month_count |>
+  filter(asmnt_binary == "Initial") |>
+  slice_max(n, n = 1)
+
+month_pct_ext <- month_count |>
+  pivot_wider(names_from = asmnt_binary, values_from = n, values_fill = 0) |>
+  mutate(pct_ext = 100 * Extended / (Initial + Extended),
+         mon_lbl = factor(month.abb[month], levels = month.abb)) |>
+  slice_max(pct_ext, n = 1)
+
+summary_tbl <- tribble(
+  ~Metric,                                   ~Value,
+  "Total Western US wildfires (2000–2023)",   comma(sum(state_asmnt$total)),
+  "Extended assessments — count (%)",         glue("{comma(sum(state_asmnt$Extended))} ({round(overall_pct, 1)}%)"),
+  "Highest % Extended state",                 with(state_asmnt, glue("{STUSPS[which.max(pct_ext)]} ({round(max(pct_ext), 1)}%)")),
+  "Lowest % Extended state",                  with(state_asmnt, glue("{STUSPS[which.min(pct_ext)]} ({round(min(pct_ext), 1)}%)")),
+  "Peak month for % Extended",                glue("{month_pct_ext$mon_lbl} ({round(month_pct_ext$pct_ext, 1)}%)"),
+  "Peak month for Initial fire count",        glue("{month_initial_peak$mon_lbl} ({comma(month_initial_peak$n)} fires)")
+)
+
+knitr::kable(summary_tbl, col.names = c("Metric", "Value"), align = "lr")
+```
+
+::: {.callout-important}
+Recommendation for this study (wildfire impact on biomass): 
+
+Include both assessment types. 
+
+The assessment type differs in what ecological changes are visible 
+at the time of MTBS mapping (Key 2006), but perimeters represent 
+the same burned area. Our outcome variable (annual biomass) is 
+measured consistently for all fires using the same CTrees 
+methodology, independent of MTBS assessment type.
+
+Excluding initial assessments, in favor of optimizing the fire perimeter quality, would focus the analysis on forest fires only. 
+:::
