@@ -84,7 +84,14 @@
       "PowerShell(Get-ChildItem \"C:\\\\Users\\\\shaht\\\\Documents\\\\Projects\\\\BACI_local\\\\BACI\\\\data\\\\processed\\\\emapr_biomass_ca\" | Select-Object Name, @{N=\"MB\";E={[math]::Round\\($_.Length/1MB,1\\)}} | Sort-Object Name)",
       "PowerShell($mem = Get-CimInstance Win32_OperatingSystem; [PSCustomObject]@{ TotalGB=[math]::Round\\($mem.TotalVisibleMemorySize/1MB,1\\); FreeGB=[math]::Round\\($mem.FreePhysicalMemory/1MB,1\\) })",
       "PowerShell(& \"C:\\\\Program Files\\\\R\\\\R-4.5.2\\\\bin\\\\Rscript.exe\" \"C:\\\\Users\\\\shaht\\\\Documents\\\\Projects\\\\BACI_local\\\\BACI\\\\scripts\\\\r\\\\02_extract_emapr_within_fires.R\")",
-      "PowerShell(Get-Process *)"
+      "PowerShell(Get-Process *)",
+      "PowerShell($env:R_HOME = \"C:\\\\Program Files\\\\R\\\\R-4.5.2\"; & \"C:\\\\Program Files\\\\R\\\\R-4.5.2\\\\bin\\\\x64\\\\Rscript.exe\" --vanilla -e \"cat\\('hello'\\)\")",
+      "Bash(powershell -Command \"Import-Csv 'C:/Users/shaht/Documents/Projects/BACI_local/BACI/data/processed/emapr_biomass_ca/biomass_fire_polygons_emapr_2000_2001_2002_100m_forested.csv' | Select-Object -ExpandProperty year | Sort-Object -Unique\")",
+      "Bash(powershell *)",
+      "Bash(grep -E \"^ctrees_[0-9]{4}_ca_100m\\\\.tif$\")",
+      "Bash(grep -E \"^composite_[0-9]{4}_ca_100m\\\\.tif$\")",
+      "Bash(Rscript *)",
+      "Bash(grep *)"
     ]
   }
 }

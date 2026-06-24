@@ -37,14 +37,14 @@ options(tigris_use_cache = TRUE)
 here::i_am("scripts/r/02_extract_emapr_within_fires.R")
 
 # ── 1. Paths and parameters ───────────────────────────────────────────────────
-STUDY_YEARS <- c(2000L, 2001L, 2002L)   # must match QMD params
+STUDY_YEARS <- 2000L:2005L   # must match QMD params (study_year_min / study_year_max)
 STATE_FIPS  <- "CA"
 
 MTBS_PATH   <- here("data", "raw", "mtbs", "mtbs_perimeter_data", "mtbs_perims_DD.shp")
 EMAPR_DIR   <- here("data", "processed", "emapr_biomass_ca")
-FOREST_MASK <- here("data", "processed", "forest_mask", "nlcd2001_forest_30m_ca.tif")
+FOREST_MASK <- here("data", "processed", "forest_mask", "nlcd2004_forest_90m_ca.tif")
 
-years_hash     <- paste(sort(STUDY_YEARS), collapse = "_")
+years_hash     <- paste(min(STUDY_YEARS), max(STUDY_YEARS), sep = "_")
 EMAPR_FIRE_CSV <- here("data", "processed", "emapr_biomass_ca",
                        glue("biomass_fire_polygons_emapr_{years_hash}_100m_forested.csv"))
 
@@ -87,7 +87,7 @@ if (length(tifs_100m_ready) == 0) {
 
 # ── 4. Resume check — skip years already in a partial cache ──────────────────
 # Writes one year at a time so a crash mid-run loses nothing already extracted.
-tifs_needed <- intersect(STUDY_YEARS, tifs_100m_ready)
+tifs_needed <- tifs_100m_ready  # extract all available years, not just fire cohort years
 
 done_years <- integer(0)
 if (file.exists(EMAPR_FIRE_CSV)) {
@@ -116,17 +116,17 @@ if (!file.exists(FOREST_MASK)) {
 forest_mask <- terra::rast(FOREST_MASK)
 cat("Forest mask loaded:", basename(FOREST_MASK), "\n\n")
 
-mtbs_vect <- terra::vect(mtbs_study)
+mtbs_vect <- terra::vect(mtbs_study)   # EPSG:5070, matches eMapR TIF CRS
 n_total   <- length(tifs_100m_ready)
 n_todo    <- length(tifs_to_do)
 
-cat(glue("Extracting {n_todo} TIF(s) for {nrow(mtbs_study)} fire polygons...\n\n"))
+cat(glue("Extracting {n_todo} TIF(s) for {nrow(mtbs_study)} fire polygons (polygon-by-polygon)...\n\n"))
 t0 <- proc.time()
 
 for (i in seq_along(tifs_to_do)) {
-  yr      <- tifs_to_do[[i]]
-  pos     <- which(tifs_100m_ready == yr)   # position in full list for display
-  tif     <- file.path(EMAPR_DIR, glue("composite_{yr}_ca_100m.tif"))
+  yr  <- tifs_to_do[[i]]
+  pos <- which(tifs_100m_ready == yr)
+  tif <- file.path(EMAPR_DIR, glue("composite_{yr}_ca_100m.tif"))
 
   if (!file.exists(tif)) {
     cat(glue("  [{pos}/{n_total}] {yr} — TIF not found, skipping\n"))
@@ -135,24 +135,36 @@ for (i in seq_along(tifs_to_do)) {
 
   t1 <- proc.time()
   r  <- terra::rast(tif)
-  r  <- terra::mask(r, forest_mask)   # retain forest pixels only (NLCD 2001 classes 41/42/43)
-  ex <- terra::extract(r, mtbs_vect, fun = mean, na.rm = TRUE)
+
+  # Polygon-by-polygon: crop raster + mask to each fire polygon's extent, then mean.
+  # Full-raster resample/mask/extract segfaults on Windows with terra regardless
+  # of batching — the only stable path is the same approach used for ctrees.
+  # Resamples the 90m forest mask to the eMapR 100m grid at polygon scale (fast).
+  agb_vec <- numeric(nrow(mtbs_vect))
+  for (j in seq_len(nrow(mtbs_vect))) {
+    poly     <- mtbs_vect[j]
+    r_c      <- terra::crop(r,           poly, snap = "out")
+    fm_c     <- terra::crop(forest_mask, poly, snap = "out")
+    fm_snap  <- terra::resample(fm_c, r_c, method = "near")
+    r_masked <- terra::mask(r_c, fm_snap)
+    vals     <- terra::values(r_masked, na.rm = TRUE)
+    agb_vec[j] <- if (length(vals) > 0L) mean(vals) else NA_real_
+  }
+
   elapsed <- round((proc.time() - t1)[["elapsed"]], 1)
 
   df_yr <- data.frame(
     event_id      = mtbs_vect$event_id,
     year          = yr,
-    agb_mean_mgha = ex[[2L]]
+    agb_mean_mgha = agb_vec
   )
 
-  # Append to CSV immediately — crash-safe
   readr::write_csv(df_yr, EMAPR_FIRE_CSV,
                    append = file.exists(EMAPR_FIRE_CSV))
 
   cat(glue("  [{pos}/{n_total}] {yr} — {elapsed}s  (saved)\n"))
 
-  # Release terra memory between iterations
-  rm(r, ex, df_yr)
+  rm(r, df_yr)
   terra::tmpFiles(remove = TRUE)
   gc(verbose = FALSE, full = TRUE)
 }

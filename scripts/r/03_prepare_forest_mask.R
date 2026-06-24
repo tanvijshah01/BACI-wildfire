@@ -1,7 +1,7 @@
 # =============================================================================
 # 03_prepare_forest_mask.R
 #
-# Download NLCD 2001 for California and save two binary forest masks:
+# Download NLCD 2004 for California and save two binary forest masks:
 #   - 30 m  EPSG:5070  (matches eMapR native resolution and CRS)
 #   - ~100 m EPSG:4326 (matches ctrees native resolution and CRS)
 #
@@ -17,7 +17,7 @@
 #
 # OUTLINE
 # 1. Setup
-# 2. Download NLCD 2001 clipped to CA
+# 2. Download NLCD 2004 clipped to CA
 # 3. Reclassify to binary forest mask (30 m, EPSG:5070)
 # 4. Project and resample to ctrees grid (~100 m, EPSG:4326)
 # 5. Sanity checks and report
@@ -39,27 +39,28 @@ MASK_DIR   <- here("data", "processed", "forest_mask")
 CTREES_DIR <- here("data", "processed", "ctrees")
 EMAPR_DIR  <- here("data", "processed", "emapr_biomass_ca")
 
-OUT_30M  <- file.path(MASK_DIR, "nlcd2001_forest_30m_ca.tif")
-OUT_100M <- file.path(MASK_DIR, "nlcd2001_forest_100m_ca.tif")
+OUT_30M  <- file.path(MASK_DIR, "nlcd2004_forest_30m_ca.tif")
+OUT_90M  <- file.path(MASK_DIR, "nlcd2004_forest_90m_ca.tif")   # for eMapR 100m TIFs (fact=3 from 30m → 90m)
+OUT_100M <- file.path(MASK_DIR, "nlcd2004_forest_100m_ca.tif")
 
 dir.create(MASK_DIR, recursive = TRUE, showWarnings = FALSE)
 
 FOREST_CLASSES <- c(41L, 42L, 43L)   # Deciduous, Evergreen, Mixed Forest
 
-# ── 2. Download NLCD 2001 ─────────────────────────────────────────────────────
+# ── 2. Download NLCD 2004 ─────────────────────────────────────────────────────
 cat("Loading CA boundary...\n")
 ca_sf   <- tigris::states(cb = TRUE, year = 2022, resolution = "5m") |>
   dplyr::filter(STUSPS == "CA")
 ca_5070 <- sf::st_transform(ca_sf, 5070)
 
-cat("Downloading NLCD 2001 for CA (this may take 1-2 minutes)...\n")
+cat("Downloading NLCD 2004 for CA (this may take 1-2 minutes)...\n")
 t0 <- proc.time()["elapsed"]
 
 # FedData returns a SpatRaster; template must be an sf or SpatVector in any CRS
 nlcd_raw <- FedData::get_nlcd(
   template  = ca_5070,
   label     = "CA",
-  year      = 2001,
+  year      = 2004,
   dataset   = "landcover",
   extraction.dir = file.path(MASK_DIR, "nlcd_raw")
 )
@@ -93,7 +94,25 @@ if (file.exists(OUT_30M)) {
 
 mask_30m <- terra::rast(OUT_30M)
 
-# ── 4. ~100 m mask — EPSG:4326, aligned to ctrees grid ───────────────────────
+# ── 4. 90 m mask — EPSG:5070, for eMapR 100m TIFs (composite_YYYY_ca_100m.tif) ─
+# eMapR 100m TIFs are fact=3 aggregates of the 30m source → 90m native resolution.
+# A 90m mask avoids loading the 954M-cell 30m mask during extraction (std::bad_alloc).
+if (file.exists(OUT_90M)) {
+  cat("[SKIP] 90 m mask already exists.\n")
+} else {
+  cat("Building 90 m forest mask (EPSG:5070, fact=3)...\n")
+  mask_90m <- terra::aggregate(mask_30m, fact = 3, fun = "modal")
+  terra::writeRaster(mask_90m, OUT_90M, overwrite = FALSE,
+                     datatype = "INT1U",
+                     gdal = c("COMPRESS=LZW", "TILED=YES",
+                               "BLOCKXSIZE=512", "BLOCKYSIZE=512"))
+  size_mb <- round(file.size(OUT_90M) / 1e6, 1)
+  cat(glue("  Saved {OUT_90M} ({size_mb} MB)\n"))
+}
+
+mask_90m <- terra::rast(OUT_90M)
+
+# ── 5. ~100 m mask — EPSG:4326, aligned to ctrees grid ───────────────────────
 if (file.exists(OUT_100M)) {
   cat("[SKIP] ~100 m mask already exists.\n")
 } else {
@@ -126,6 +145,7 @@ mask_100m <- terra::rast(OUT_100M)
 cat("\n=== Forest Mask Report ===\n")
 
 for (lst in list(list(r = mask_30m,  label = "30 m  (EPSG:5070)"),
+                 list(r = mask_90m,  label = "90 m  (EPSG:5070)"),
                  list(r = mask_100m, label = "~100 m (EPSG:4326)"))) {
   n_forest <- terra::global(lst$r, "notNA")[[1]]
   n_total  <- terra::ncell(lst$r)

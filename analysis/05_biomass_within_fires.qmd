@@ -12,7 +12,8 @@ format:
     fig-height: 6
     theme: flatly
 params:
-  study_years: [2000, 2001, 2002]   # ← change only this line to switch cohorts
+  study_year_min: 2000   # first fire cohort year
+  study_year_max: 2005   # last fire cohort year
 execute:
   warning: false
   message: false
@@ -20,7 +21,7 @@ execute:
 ---
 
 This document explores aboveground biomass (AGB) **within MTBS fire perimeters** for
-California fires that ignited in `r paste(params$study_years, collapse = ", ")`. It compares
+California fires that ignited in `r params$study_year_min`–`r params$study_year_max`. It compares
 two biomass datasets — **ctrees** (annual, ML-based) and **eMapR** (annual,
 LandTrendR-based) — using per-fire mean AGB extracted directly from raster and tabular
 data. No Google Earth Engine extraction is required; all data are local.
@@ -28,7 +29,7 @@ data. No Google Earth Engine extraction is required; all data are local.
 ```{r outline}
 # =============================================================================
 # SCRIPT OUTLINE
-# 1.  Setup — packages, study parameters (from params$study_years), paths, theme
+# 1.  Setup — packages, study parameters (from params$study_year_min/max), paths, theme
 # 2.  Study fire cohort — MTBS perimeters for STUDY_YEARS CA fires; map + table
 # 3.  Biomass within fires — ctrees (load CSV, distributions, trend by year)
 # 4.  Biomass within fires — eMapR (extract from ~100 m TIFs, cache to CSV)
@@ -59,17 +60,19 @@ library(ggspatial)
 library(knitr)
 library(stringr)
 library(RColorBrewer)
+library(viridis)
 library(plotly)
 
 sf_use_s2(FALSE)
 options(tigris_use_cache = TRUE, knitr.kable.NA = "—")
 here::i_am("analysis/05_biomass_within_fires.qmd")
 
-# ── Study parameters — controlled entirely by params$study_years in YAML ──────
-STUDY_YEARS <- as.integer(params$study_years)
+# ── Study parameters ──────────────────────────────────────────────────────────
+STUDY_YEARS <- as.integer(seq(params$study_year_min, params$study_year_max))
 STATE_FIPS  <- "CA"
 
-cat("Study years:", paste(STUDY_YEARS, collapse = ", "), "\n")
+cat("Study cohort years:", params$study_year_min, "–", params$study_year_max,
+    "(", length(STUDY_YEARS), "cohorts )\n")
 
 # ── Paths ─────────────────────────────────────────────────────────────────────
 MTBS_PATH       <- here("data", "raw", "mtbs", "mtbs_perimeter_data", "mtbs_perims_DD.shp")
@@ -77,9 +80,8 @@ EMAPR_DIR       <- here("data", "processed", "emapr_biomass_ca")
 CTREES_FIRE_CSV <- here("data", "processed", "ctrees",
                         "biomass_fire_polygons_ctrees_forested.csv")
 
-# Cache file includes years, resolution, and forest-mask suffix — auto-invalidates
-# when STUDY_YEARS changes.
-years_hash     <- paste(sort(STUDY_YEARS), collapse = "_")
+# Cache keyed by cohort year range — "2000_2015" instead of listing all 16 years.
+years_hash     <- paste(params$study_year_min, params$study_year_max, sep = "_")
 EMAPR_FIRE_CSV <- here("data", "processed", "emapr_biomass_ca",
                        glue("biomass_fire_polygons_emapr_{years_hash}_100m_forested.csv"))
 
@@ -111,16 +113,11 @@ theme_baci <- theme_minimal(base_size = 12) +
     axis.text        = element_text(size = 10)
   )
 
-# ── Cohort colors — dynamically generated for any number of study years ────────
-# RColorBrewer Set2 requires a minimum of 3 colors; we always request at least 3
-# and then take the first length(STUDY_YEARS) entries.
-n_pal         <- max(3L, length(STUDY_YEARS))
+# ── Cohort colors — viridis gradient, works for any number of study years ─────
 COHORT_COLORS <- setNames(
-  RColorBrewer::brewer.pal(n_pal, "Set2")[seq_along(STUDY_YEARS)],
+  viridis::viridis(length(STUDY_YEARS), option = "D"),
   as.character(STUDY_YEARS)
 )
-cat("Cohort colors:\n")
-print(COHORT_COLORS)
 ```
 
 ---
@@ -273,14 +270,33 @@ observation year.
 
 ```{r ctrees-load}
 # ── Load and filter to study fires ────────────────────────────────────────────
-ctrees_all   <- readr::read_csv(CTREES_FIRE_CSV, show_col_types = FALSE)
+# Fall back to the non-forested CSV while the slow forested extraction is running.
+# Both have identical columns (event_id, fire_year, year, agb_mean_mgha);
+# the only difference is the forested version masks to NLCD 2004 forest pixels.
+CTREES_NONFORESTED_CSV <- here("data", "processed", "ctrees",
+                               "biomass_fire_polygons_ctrees.csv")
+
+if (file.exists(CTREES_FIRE_CSV)) {
+  ctrees_src <- CTREES_FIRE_CSV
+  cat("Using forested ctrees CSV (forest-masked).\n")
+} else if (file.exists(CTREES_NONFORESTED_CSV)) {
+  ctrees_src <- CTREES_NONFORESTED_CSV
+  message("Forested CSV not found — falling back to non-forested ctrees CSV.\n",
+          "Run scripts/r/04_extract_ctrees_within_fires.R then re-render.")
+} else {
+  stop("No ctrees CSV found. Run scripts/r/04_extract_ctrees_within_fires.R first.")
+}
+
+ctrees_all   <- readr::read_csv(ctrees_src, show_col_types = FALSE)
 ctrees_fires <- ctrees_all |>
   dplyr::filter(event_id %in% mtbs_study$event_id) |>
   dplyr::mutate(
     rel_year  = year - fire_year,
     fire_year = as.integer(fire_year)
-  )
+  ) |>
+  dplyr::filter(!is.na(agb_mean_mgha))
 
+cat("Source CSV:                ", basename(ctrees_src), "\n")
 cat("Rows in full ctrees CSV:   ", nrow(ctrees_all), "\n")
 cat("Rows for study fires:      ", nrow(ctrees_fires), "\n")
 cat("Fires matched to MTBS:     ",
@@ -290,9 +306,8 @@ cat("Observation years:         ",
 cat("rel_year range:            ",
     min(ctrees_fires$rel_year), "to", max(ctrees_fires$rel_year), "\n")
 
-# Sanity checks
-stopifnot(all(ctrees_fires$fire_year %in% STUDY_YEARS))
-stopifnot(all(!is.na(ctrees_fires$agb_mean_mgha)))
+stopifnot("fire_year values outside STUDY_YEARS" =
+            all(ctrees_fires$fire_year %in% STUDY_YEARS))
 ```
 
 ---
@@ -300,7 +315,7 @@ stopifnot(all(!is.na(ctrees_fires$agb_mean_mgha)))
 ## 4. Biomass Within Fires — eMapR
 
 eMapR AGB is extracted here from the 300 m CA-clipped TIFs using `terra::extract()`.
-Results are cached to a CSV keyed by study years — switching `params$study_years`
+Results are cached to a CSV keyed by study year range — switching `params$study_year_min`/`max`
 automatically uses (or creates) the correct cache file.
 
 ```{r emapr-inventory}
@@ -331,46 +346,48 @@ if (length(missing_100m) > 0) {
 # the R console before rendering). Doing terra::extract() inside Quarto causes
 # invisible hangs on Windows because Quarto buffers chunk output and terra's
 # internal C++ threading can deadlock.
-if (!file.exists(EMAPR_FIRE_CSV)) {
-  stop(
-    "Cache not found: ", basename(EMAPR_FIRE_CSV), "\n",
-    "Run scripts/r/03_prepare_forest_mask.R then ",
-    "scripts/r/02_extract_emapr_within_fires.R first, then re-render."
-  )
+EMAPR_AVAILABLE <- file.exists(EMAPR_FIRE_CSV)
+
+if (!EMAPR_AVAILABLE) {
+  message("eMapR cache not found (", basename(EMAPR_FIRE_CSV), ").\n",
+          "Run scripts/r/02_extract_emapr_within_fires.R to enable eMapR sections.\n",
+          "Continuing with ctrees only.")
+  emapr_fires <- dplyr::tibble(event_id = character(), fire_year = integer(),
+                               year = integer(), agb_mean_mgha = double(),
+                               rel_year = integer())
+} else {
+  emapr_raw    <- readr::read_csv(EMAPR_FIRE_CSV, show_col_types = FALSE)
+  cached_years <- sort(unique(emapr_raw$year))
+  stale_years  <- setdiff(tifs_100m_ready, cached_years)
+
+  if (length(stale_years) > 0) {
+    message(length(stale_years), " year(s) available in TIFs but not cached: ",
+            paste(stale_years, collapse = ", "),
+            "\nDelete cache and re-run 02_extract_emapr_within_fires.R to refresh.")
+  }
+
+  cat("Cache loaded —", length(cached_years), "years,", nrow(emapr_raw), "rows.\n")
+  cat("Cache file:", basename(EMAPR_FIRE_CSV), "\n")
+
+  fire_meta <- sf::st_drop_geometry(mtbs_study) |>
+    dplyr::select(event_id, fire_year = year)
+
+  emapr_fires <- emapr_raw |>
+    dplyr::left_join(fire_meta, by = "event_id") |>
+    dplyr::mutate(
+      rel_year  = year - fire_year,
+      fire_year = as.integer(fire_year)
+    ) |>
+    dplyr::filter(!is.na(agb_mean_mgha))
+
+  cat("eMapR rows for study fires:    ", nrow(emapr_fires), "\n")
+  cat("Fires with eMapR data:         ",
+      dplyr::n_distinct(emapr_fires$event_id), "of", nrow(mtbs_study), "\n")
+  cat("Observation years:             ",
+      min(emapr_fires$year), "–", max(emapr_fires$year), "\n")
+  cat("rel_year range:                ",
+      min(emapr_fires$rel_year), "to", max(emapr_fires$rel_year), "\n")
 }
-
-emapr_raw    <- readr::read_csv(EMAPR_FIRE_CSV, show_col_types = FALSE)
-cached_years <- sort(unique(emapr_raw$year))
-stale_years  <- setdiff(tifs_100m_ready, cached_years)
-
-if (length(stale_years) > 0) {
-  warning(length(stale_years), " year(s) in tifs_100m_ready are not in cache: ",
-          paste(stale_years, collapse = ", "),
-          "\nDelete the cache and re-run 02_extract_emapr_within_fires.R to refresh.")
-}
-
-cat("Cache loaded —", length(cached_years), "years,", nrow(emapr_raw), "rows.\n")
-cat("Cache file:", basename(EMAPR_FIRE_CSV), "\n")
-
-# ── Join fire_year and compute rel_year ───────────────────────────────────────
-fire_meta <- sf::st_drop_geometry(mtbs_study) |>
-  dplyr::select(event_id, fire_year = year)
-
-emapr_fires <- emapr_raw |>
-  dplyr::left_join(fire_meta, by = "event_id") |>
-  dplyr::mutate(
-    rel_year  = year - fire_year,
-    fire_year = as.integer(fire_year)
-  ) |>
-  dplyr::filter(!is.na(agb_mean_mgha))
-
-cat("eMapR rows for study fires:    ", nrow(emapr_fires), "\n")
-cat("Fires with eMapR data:         ",
-    dplyr::n_distinct(emapr_fires$event_id), "of", nrow(mtbs_study), "\n")
-cat("Observation years:             ",
-    min(emapr_fires$year), "–", max(emapr_fires$year), "\n")
-cat("rel_year range:                ",
-    min(emapr_fires$rel_year), "to", max(emapr_fires$rel_year), "\n")
 ```
 
 ### 4.1 Mean Annual AGB — ctrees vs. eMapR
@@ -380,12 +397,10 @@ cat("rel_year range:                ",
 # Both ctrees_fires and emapr_fires are defined; this chunk runs after emapr-extract
 combined_yr <- dplyr::bind_rows(
   ctrees_fires |>
-    dplyr::filter(abs(rel_year) <= 2) |>
     dplyr::group_by(year) |>
     dplyr::summarise(mean_agb = mean(agb_mean_mgha, na.rm = TRUE), .groups = "drop") |>
     dplyr::mutate(dataset = "ctrees (~100 m)"),
   emapr_fires |>
-    dplyr::filter(abs(rel_year) <= 2) |>
     dplyr::group_by(year) |>
     dplyr::summarise(mean_agb = mean(agb_mean_mgha, na.rm = TRUE), .groups = "drop") |>
     dplyr::mutate(dataset = "eMapR (~100 m)")
@@ -480,17 +495,17 @@ if (length(both_years) == 0) {
     col.names   = c("Year", "Dataset", "N fires", "Mean (Mg/ha)", "Median",
                     "SD", "Min", "Max"),
     format.args = list(big.mark = ","),
-    caption     = glue("AGB summary statistics within study fire polygons at the ",
-                       "fire ignition years ({paste(both_years, collapse = ', ')}).")
+    caption     = glue("AGB summary statistics within study fire polygons at each ",
+                       "fire ignition year ({min(both_years)}–{max(both_years)}).")
   ))
 }
 ```
 
 ### 5.2 Distribution Comparison
 
-```{r comparison-density, fig.height=4}
+```{r comparison-density, fig.height=5}
 if (length(both_years) == 0) {
-  message("Skipping density plot — no overlapping study years available.")
+  message("Skipping distribution plot — no overlapping study years available.")
 } else {
   combined_dist <- dplyr::bind_rows(
     ctrees_fires |>
@@ -501,24 +516,27 @@ if (length(both_years) == 0) {
       dplyr::mutate(dataset = "eMapR")
   )
 
+  # Boxplot by cohort year — readable for 16 years; density facets would overflow
   print(
-    ggplot(combined_dist, aes(x = agb_mean_mgha, fill = dataset, color = dataset)) +
-      geom_density(alpha = 0.30, linewidth = 0.8) +
-      facet_wrap(~ year, nrow = 1) +
+    ggplot(combined_dist,
+           aes(x = factor(year), y = agb_mean_mgha,
+               fill = dataset, color = dataset)) +
+      geom_boxplot(alpha = 0.35, linewidth = 0.5, outlier.size = 0.8,
+                   position = position_dodge(width = 0.75)) +
       scale_fill_manual(values  = c("ctrees" = "#2166ac", "eMapR" = "#d6604d"),
                         name    = "Dataset") +
       scale_color_manual(values = c("ctrees" = "#2166ac", "eMapR" = "#d6604d"),
                          name   = "Dataset") +
-      scale_x_continuous(labels = scales::comma_format()) +
-      scale_y_continuous(expand = expansion(mult = c(0, 0.05))) +
+      scale_y_continuous(labels = scales::comma_format()) +
       labs(
         title    = "AGB Distribution Within Study Fires — ctrees vs. eMapR",
-        subtitle = glue("Fire ignition years ({paste(both_years, collapse = ', ')}); one panel per year"),
-        x        = "Mean AGB within fire perimeter (Mg/ha)",
-        y        = "Density",
-        caption  = "Each observation = mean AGB within one fire polygon (~100 m pixels for both datasets)."
+        subtitle = glue("Per-fire mean AGB at each cohort's ignition year ({min(both_years)}–{max(both_years)})"),
+        x        = "Fire cohort year",
+        y        = "Mean AGB within fire perimeter (Mg/ha)",
+        caption  = "Each box = distribution across fires in that cohort year (~100 m pixels for both datasets)."
       ) +
-      theme_baci
+      theme_baci +
+      theme(axis.text.x = element_text(angle = 45, hjust = 1))
   )
 }
 ```
@@ -583,8 +601,8 @@ indexed to each fire's ignition year (`rel_year = 0`).
 
 ```{r event-study-data}
 # ── Build combined long data frame indexed to fire year ───────────────────────
-REL_MIN <- -12L   # years before fire to show
-REL_MAX <-  20L   # years after fire to show
+REL_MIN <- -12L   # years before fire to show (eMapR reaches back to 1990 for 2002 cohort)
+REL_MAX <-  15L   # years after fire to show (2000 cohort + 15 = 2015, last eMapR year)
 
 event_long <- dplyr::bind_rows(
   ctrees_fires |> dplyr::mutate(dataset = "ctrees (~100 m)"),
@@ -610,12 +628,15 @@ print(dplyr::count(event_agg, dataset))
 
 ```{r event-study-plot, fig.height=5}
 n_fires_total  <- dplyr::n_distinct(event_long$event_id)
-ctrees_pre_yrs <- min(STUDY_YEARS) - 2000L
 
-# Restrict to rel_year >= -8: the last year before which the 2008 cohort drops
-# out (obs year 1999, no TIF). Pooling cohorts with unequal representation
-# creates a spurious dip at rel_year = -9 — see diagnostic note in §6.
-event_agg_pooled <- dplyr::filter(event_agg, rel_year >= -2L, rel_year <= 2L)
+# Show the full window where data exists.
+# Pre-fire: eMapR reaches back to 1990 (rel_year = -12 for 2002 cohort);
+#   ctrees starts at 2000 so has no pre-fire coverage for 2000-cohort.
+# Post-fire: eMapR runs to 2015 (rel_year = +15 for 2000 cohort);
+#   ctrees continues to 2025 but we cap at +15 to keep axes matched.
+# Pooling cohorts at extreme rel_years means fewer fires contribute — note this
+# in interpretation (2002-cohort dominates rel_year < -10; 2000-cohort dominates > +13).
+event_agg_pooled <- dplyr::filter(event_agg, rel_year >= REL_MIN, rel_year <= REL_MAX)
 
 # Build the tooltip text on the point layer; other layers get no tooltip
 p_event <- ggplot(event_agg_pooled, aes(x = rel_year, y = mean_agb,
@@ -638,7 +659,7 @@ p_event <- ggplot(event_agg_pooled, aes(x = rel_year, y = mean_agb,
     name   = "Dataset"
   ) +
   scale_x_continuous(
-    breaks = seq(-2L, 2L, by = 1),
+    breaks = seq(REL_MIN, REL_MAX, by = 2),
     name   = "Years relative to fire"
   ) +
   scale_y_continuous(
@@ -660,7 +681,7 @@ plotly::ggplotly(p_event, tooltip = "text") |>
         "Aboveground Biomass Before and After Fire — ctrees vs. eMapR",
         "<br><sup>Mean ±1 SE across ", n_fires_total, " CA fires igniting ",
         min(STUDY_YEARS), "–", max(STUDY_YEARS),
-        " (all cohorts present from rel_year = -8)",
+        " | eMapR: ", min(EMAPR_YEARS), "–2015 | ctrees: 2000–2025",
         " | dashed = fire year</sup>"
       )
     )
@@ -670,9 +691,8 @@ plotly::ggplotly(p_event, tooltip = "text") |>
 ### 6.2 Event Study by Fire Cohort
 
 ```{r event-study-by-cohort, fig.height=7}
-# Per-cohort aggregation
+# Per-cohort aggregation — use full window; each cohort's data range differs by dataset
 event_agg_cohort <- event_long |>
-  dplyr::filter(rel_year >= -2L, rel_year <= 2L) |>
   dplyr::group_by(dataset, fire_year, rel_year) |>
   dplyr::summarise(
     mean_agb = mean(agb_mean_mgha, na.rm = TRUE),
@@ -698,7 +718,7 @@ ggplot(event_agg_cohort,
     name   = "Dataset"
   ) +
   scale_x_continuous(
-    breaks = seq(-2L, 2L, by = 1),
+    breaks = seq(REL_MIN, REL_MAX, by = 2),
     name   = "Years relative to fire"
   ) +
   scale_y_continuous(
@@ -707,8 +727,8 @@ ggplot(event_agg_cohort,
   ) +
   labs(
     title    = "Before / After AGB by Fire Cohort — ctrees vs. eMapR",
-    subtitle = "Mean ±1 SE | dashed = fire year (rel_year = 0) | facet = ignition year",
-    caption  = "Source: ctrees CSV and eMapR terra::extract."
+    subtitle = "Mean across fires in cohort | dashed = fire year (rel_year = 0) | facet = ignition year",
+    caption  = "eMapR: 1990–2015 CA TIFs. ctrees: 2000–2025 CA TIFs. Source: terra::extract."
   ) +
   theme_baci +
   theme(strip.text = element_text(face = "bold"))
@@ -721,24 +741,20 @@ ggplot(event_agg_cohort,
 ::: {.callout-note}
 **ctrees pre-fire baseline**
 
-ctrees data starts in 2000, giving ~`r min(STUDY_YEARS) - 2000` years of pre-fire
-observations for `r min(STUDY_YEARS)`-cohort fires (2000–`r min(STUDY_YEARS) - 1`).
-This is sufficient to assess pre-fire parallel trends in the Callaway-Sant'Anna framework.
+ctrees data starts in 2000. The earliest cohort (`r min(STUDY_YEARS)`) therefore has no
+ctrees pre-fire observations; the 2001 cohort has 1 year; the 2002 cohort 2 years, etc.
+eMapR extends back to 1990, providing up to `r min(STUDY_YEARS) - 1990` years of
+pre-fire baseline for the earliest cohort.
 :::
 
 ::: {.callout-note}
-**eMapR pre- and post-fire coverage**
+**eMapR post-fire coverage**
 
-eMapR CA TIFs are available from 1990, giving ~`r min(STUDY_YEARS) - 1990` years of
-pre-fire baseline for `r min(STUDY_YEARS)`-cohort fires
-(1990–`r min(STUDY_YEARS) - 1`). Post-fire coverage with current downloads extends to
-~2015 (~`r 2015 - max(STUDY_YEARS)` post-fire years for the latest cohort), but eMapR
-CONUS files for 2016–2023 have not yet been downloaded (disk space constraint).
-
-Once the remaining FTP downloads are complete and CA crops are run, re-render this
-document — the cache file is named for the current study years
-(`biomass_fire_polygons_emapr_`r years_hash`.csv`), so new years are picked up
-automatically without any manual deletion.
+eMapR CA TIFs currently run to 2015. The latest cohort (`r max(STUDY_YEARS)`) therefore
+has 0 post-fire eMapR years; 2014 has 1 year; 2010 has 5 years; 2000 has the full
+15-year recovery window. Once eMapR CONUS files for 2016–2023 are downloaded and
+cropped, re-render — the cache (`biomass_fire_polygons_emapr_`r years_hash`.csv`) picks
+up new TIF years automatically.
 :::
 
 ::: {.callout-important}

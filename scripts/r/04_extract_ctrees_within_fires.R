@@ -2,7 +2,7 @@
 # 04_extract_ctrees_within_fires.R
 #
 # Extract mean ctrees AGB within MTBS fire perimeters using local 100 m TIFs,
-# applying the NLCD 2001 forest mask before extraction.
+# applying the NLCD 2004 forest mask before extraction.
 #
 # Run ONCE after 03_prepare_forest_mask.R has produced the masks.
 # Run from the project root before rendering 05_biomass_within_fires.qmd.
@@ -37,12 +37,12 @@ sf_use_s2(FALSE)
 options(tigris_use_cache = TRUE)
 here::i_am("scripts/r/04_extract_ctrees_within_fires.R")
 
-STUDY_YEARS <- c(2000L, 2001L, 2002L)   # must match QMD params
+STUDY_YEARS <- 2000L:2005L   # must match QMD params (study_year_min / study_year_max)
 STATE_FIPS  <- "CA"
 
 MTBS_PATH    <- here("data", "raw", "mtbs", "mtbs_perimeter_data", "mtbs_perims_DD.shp")
 CTREES_DIR   <- here("data", "processed", "ctrees")
-FOREST_MASK  <- here("data", "processed", "forest_mask", "nlcd2001_forest_100m_ca.tif")
+FOREST_MASK  <- here("data", "processed", "forest_mask", "nlcd2004_forest_100m_ca.tif")
 OUT_CSV      <- here("data", "processed", "ctrees", "biomass_fire_polygons_ctrees_forested.csv")
 
 cat("Study years:  ", paste(STUDY_YEARS, collapse = ", "), "\n")
@@ -92,7 +92,7 @@ if (!file.exists(FOREST_MASK)) {
 forest_mask <- terra::rast(FOREST_MASK)
 cat("Forest mask loaded:", basename(FOREST_MASK), "\n\n")
 
-tifs_needed <- intersect(STUDY_YEARS, tifs_available)
+tifs_needed <- tifs_available  # extract all available years, not just fire cohort years
 
 done_years <- integer(0)
 if (file.exists(OUT_CSV)) {
@@ -131,14 +131,26 @@ for (i in seq_along(tifs_to_do)) {
 
   t1 <- proc.time()
   r  <- terra::rast(tif)
-  r  <- terra::mask(r, forest_mask)   # retain forest pixels only (NLCD 2001 classes 41/42/43)
-  ex <- terra::extract(r, mtbs_vect, fun = mean, na.rm = TRUE)
+
+  # Polygon-by-polygon: crop both rasters to each polygon's extent, mask, mean.
+  # Each crop reads only a few disk blocks (~KB RAM peak vs ~2 GB for full-raster ops).
+  agb_vec <- numeric(nrow(mtbs_4326))
+  for (j in seq_len(nrow(mtbs_4326))) {
+    poly      <- mtbs_vect[j]
+    r_c       <- terra::crop(r,           poly, snap = "out")
+    fm_c      <- terra::crop(forest_mask, poly, snap = "out")
+    r_masked  <- terra::mask(r_c, fm_c)
+    vals      <- terra::values(r_masked, na.rm = TRUE)
+    agb_vec[j] <- if (length(vals) > 0L) mean(vals) else NA_real_
+  }
+
   elapsed <- round((proc.time() - t1)[["elapsed"]], 1)
 
   df_yr <- data.frame(
     event_id      = mtbs_vect$event_id,
+    fire_year     = as.integer(mtbs_vect$year),
     year          = yr,
-    agb_mean_mgha = ex[[2L]]
+    agb_mean_mgha = agb_vec
   )
 
   readr::write_csv(df_yr, OUT_CSV, append = file.exists(OUT_CSV))

@@ -83,6 +83,7 @@ Estimating causal effects of wildfire severity on forest biomass recovery using:
 - `fixest` - fast fixed effects (alternative specifications)
 - `modelsummary` - regression tables
 - `ggplot2` + `tmap` - visualization
+- `FedData` - download NLCD land cover data
 
 ### Python Packages (for GEE only)
 - `earthengine-api`
@@ -357,6 +358,36 @@ Re-enable after download completes:
 ```powershell
 powercfg /change standby-timeout-ac 30
 ```
+#### 3.1.3 Forest Mask — NLCD 2004
+
+**Source:** USGS MRLC, downloaded via `FedData::get_nlcd()` R package (no login required)
+**Forest classes retained:** 41 Deciduous Forest, 42 Evergreen Forest, 43 Mixed Forest
+**Local destination:** `data/processed/forest_mask/`
+
+| Output file | CRS | Resolution | Matches |
+|---|---|---|---|
+| `nlcd2004_forest_30m_ca.tif` | EPSG:5070 | 30 m | eMapR native |
+| `nlcd2004_forest_100m_ca.tif` | EPSG:4326 | ~100 m | ctrees native |
+
+**Run order (one-time preprocessing, must precede extraction scripts):**
+
+```r
+# Step 1 — download NLCD and build both mask TIFs (~2 min)
+Rscript scripts/r/03_prepare_forest_mask.R
+
+# Step 2 — extract eMapR AGB within fire perimeters, forest pixels only
+# Output: data/processed/emapr_biomass_ca/biomass_fire_polygons_emapr_<years>_100m_forested.csv
+Rscript scripts/r/02_extract_emapr_within_fires.R
+
+# Step 3 — extract ctrees AGB within fire perimeters, forest pixels only
+# Output: data/processed/ctrees/biomass_fire_polygons_ctrees_forested.csv
+Rscript scripts/r/04_extract_ctrees_within_fires.R
+```
+
+Scripts 02 and 03 are crash-safe (append one year at a time) and skip already-completed years. Delete the output CSV to force a full re-extraction.
+
+**Note on terra::extract() inside Quarto on Windows:** Quarto buffers chunk output until the chunk finishes, which makes terra's C++ threading appear frozen. Always run extraction scripts from the R console or via `Rscript`, never inside a Quarto chunk.
+
 ```
 Post-download preprocessing (required before rendering QMD):
 
@@ -381,13 +412,19 @@ BACI/
 ├── scripts/
 │   ├── python/        # GEE extraction scripts
 │   └── r/             # Data processing & analysis scripts
+│       ├── 00_crop_emapr_to_ca.R          # crop CONUS eMapR TIFs to CA
+│       ├── 01_precompute_emapr_ca.R       # build 100m/300m display TIFs + stats RDS
+│       ├── 02_extract_emapr_within_fires.R # extract eMapR AGB within MTBS perimeters (forested)
+│       ├── 03_prepare_forest_mask.R       # download NLCD 2004, build 30m+100m forest masks
+│       └── 04_extract_ctrees_within_fires.R # extract ctrees AGB within MTBS perimeters (forested)
 ├── analysis/          # Quarto exploratory & analysis documents
 ├── paper/             # Final manuscript (manuscript.qmd)
 ├── data/
 │   ├── raw/           # Untouched downloaded data (MTBS shapefiles, eMapR GeoTIFFs)
 │   └── processed/
-│       ├── ctrees/    # ctrees_biomass_ca_1km.nc, biomass_fire_polygons_ctrees.csv
-│       └── emapr_biomass_ca/  # CA-clipped eMapR TIFs, pre-aggregated 300m TIFs, stats RDS
+│       ├── ctrees/    # ctrees TIFs, biomass_fire_polygons_ctrees_forested.csv
+│       ├── emapr_biomass_ca/  # CA-clipped eMapR TIFs, stats RDS, forested CSV
+│       └── forest_mask/       # nlcd2004_forest_30m_ca.tif, nlcd2004_forest_100m_ca.tif
 ├── figures/           # Output plots and maps
 └── output/            # GEE export outputs (e.g., panel CSVs)
 ```
