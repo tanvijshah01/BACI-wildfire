@@ -12,8 +12,8 @@ format:
     fig-height: 6
     theme: flatly
 params:
-  study_year_min: 2000   # first fire cohort year
-  study_year_max: 2005   # last fire cohort year
+  study_year_min: 2005   # first fire cohort year
+  study_year_max: 2010   # last fire cohort year
 execute:
   warning: false
   message: false
@@ -594,6 +594,327 @@ if (length(both_years) == 0) {
 
 ---
 
+### 5.4 Masking Progression — CA-wide, Year 2005
+
+This section makes explicit *why* ctrees and eMapR AGB means differ so much (§5.1–5.3):
+part of the gap is a genuine cross-product calibration difference (visible CA-wide,
+independent of fires), and part is that both datasets show fires disproportionately
+burn lower-biomass forest. Three masking levels, both datasets, year 2005 only:
+(1) CA-wide raw (no mask), (2) CA-wide forest-masked (NLCD 2004), (3) forest-masked
+within the 2005 fire perimeters only.
+
+```{r masking-load-rasters}
+# ── CA boundary in both CRS, needed up front to clip the raw ctrees raster ────
+ca_vect_5070 <- terra::vect(ca_5070)
+ca_vect_4326 <- terra::vect(sf::st_transform(ca_5070, 4326))
+
+# ── Load year-2005 raw rasters and forest masks (native CRS/grid per dataset) ─
+ctrees_2005_raw <- terra::rast(here("data", "processed", "ctrees", "ctrees_2005_ca_100m.tif"))
+emapr_2005_raw  <- terra::rast(here("data", "processed", "emapr_biomass_ca", "composite_2005_ca_100m.tif"))
+
+# ctrees_YYYY_ca_100m.tif is only cropped to a lon/lat bounding box in
+# scripts/python/03_download_ctrees_ca.py (Part C), never polygon-masked —
+# unlike eMapR's composite_YYYY_ca.tif, which scripts/r/00_crop_emapr_to_ca.R
+# both crops AND masks to the CA polygon. Mask here so the "raw" layer is
+# actually CA-shaped, not a rectangle, for both the map and table below.
+ctrees_2005_raw <- terra::mask(ctrees_2005_raw, ca_vect_4326)
+
+ctrees_mask_raw <- terra::rast(here("data", "processed", "forest_mask", "nlcd2004_forest_100m_ca.tif"))
+emapr_mask_raw  <- terra::rast(here("data", "processed", "forest_mask", "nlcd2004_forest_90m_ca.tif"))
+
+# eMapR raw raster and its forest mask are both 90 m/EPSG:5070 but were built from
+# different source rasters and have a ~30 m (1/3-pixel) origin offset — terra::mask()
+# errors on mismatched extents, so resample the mask onto the raw raster's grid first
+# (same fix already used per-polygon in scripts/r/02_extract_emapr_within_fires.R).
+emapr_mask_2005 <- terra::resample(emapr_mask_raw, emapr_2005_raw, method = "near")
+
+# ── Row 2: CA-wide, forest-masked ─────────────────────────────────────────────
+ctrees_2005_forest <- terra::mask(ctrees_2005_raw, ctrees_mask_raw)
+emapr_2005_forest  <- terra::mask(emapr_2005_raw,  emapr_mask_2005)
+
+# ── Row 3: within 2005 fire perimeters, forest-masked ─────────────────────────
+# Masking by a SpatVector keeps the full CA extent (only pixels outside the fire
+# perimeters become NA) — this is what lets the maps below "show CA" at every row.
+fire2005_5070 <- mtbs_study |> dplyr::filter(year == 2005) |> terra::vect()
+fire2005_4326 <- mtbs_study |> dplyr::filter(year == 2005) |> sf::st_transform(4326) |> terra::vect()
+
+ctrees_2005_fire <- terra::mask(ctrees_2005_forest, fire2005_4326)
+emapr_2005_fire  <- terra::mask(emapr_2005_forest,  fire2005_5070)
+
+cat("Rasters built:\n")
+cat("  ctrees:  raw / forest-masked / within-fire  —",
+    terra::global(ctrees_2005_raw,    "notNA")[[1]], "/",
+    terra::global(ctrees_2005_forest, "notNA")[[1]], "/",
+    terra::global(ctrees_2005_fire,   "notNA")[[1]], "valid px\n")
+cat("  eMapR:   raw / forest-masked / within-fire  —",
+    terra::global(emapr_2005_raw,    "notNA")[[1]], "/",
+    terra::global(emapr_2005_forest, "notNA")[[1]], "/",
+    terra::global(emapr_2005_fire,   "notNA")[[1]], "valid px\n")
+```
+
+```{r masking-table}
+# ── Summary stats computed directly from the same rasters used in the maps ────
+raster_stats <- function(r) {
+  s <- terra::global(r, c("mean", "sd"), na.rm = TRUE)
+  n <- terra::global(r, "notNA")[[1]]
+  dplyr::tibble(n_px = n, mean_agb = round(s$mean, 1), sd_agb = round(s$sd, 1))
+}
+
+# N fires with a valid (non-NA) value at year 2005, reusing the cached per-fire
+# CSVs already loaded above (ctrees_fires, emapr_fires) rather than re-extracting.
+n_fires_ctrees <- ctrees_fires |> dplyr::filter(fire_year == 2005, year == 2005) |> nrow()
+n_fires_emapr  <- emapr_fires  |> dplyr::filter(fire_year == 2005, year == 2005) |> nrow()
+
+masking_table <- dplyr::bind_rows(
+  dplyr::bind_cols(level = "CA-wide, raw",                                          raster_stats(ctrees_2005_raw)) |>
+    dplyr::rename_with(~paste0("ctrees_", .x), -level) |>
+    dplyr::bind_cols(raster_stats(emapr_2005_raw) |> dplyr::rename_with(~paste0("emapr_", .x))),
+  dplyr::bind_cols(level = "CA-wide, forest-masked",                                 raster_stats(ctrees_2005_forest)) |>
+    dplyr::rename_with(~paste0("ctrees_", .x), -level) |>
+    dplyr::bind_cols(raster_stats(emapr_2005_forest) |> dplyr::rename_with(~paste0("emapr_", .x))),
+  dplyr::bind_cols(level = as.character(glue::glue(
+                      "Within 2005 fire perimeters, forest-masked ",
+                      "({n_fires_ctrees} ctrees / {n_fires_emapr} eMapR fires)")),
+                    raster_stats(ctrees_2005_fire)) |>
+    dplyr::rename_with(~paste0("ctrees_", .x), -level) |>
+    dplyr::bind_cols(raster_stats(emapr_2005_fire) |> dplyr::rename_with(~paste0("emapr_", .x)))
+)
+
+knitr::kable(
+  masking_table,
+  col.names = c("Level", "ctrees N px", "ctrees Mean (Mg/ha)", "ctrees SD",
+                "eMapR N px", "eMapR Mean (Mg/ha)", "eMapR SD"),
+  format.args = list(big.mark = ","),
+  caption = "AGB masking progression, year 2005 — ctrees vs. eMapR at each masking level."
+)
+```
+
+::: {.callout-note}
+**Row 3 is a pixel-weighted pooled mean, not an average of per-fire means**
+
+The "within fire perimeters" row masks the whole CA raster to all 2005-cohort fire
+footprints combined and averages every valid forest pixel — so larger/more densely
+forested fires contribute proportionally more weight. This differs from §5.1's summary
+table, which averages one mean-per-fire value across fires equally (unweighted); the
+exact numbers will differ from earlier discussion of the 2000 cohort since this section
+now covers year 2005 (see the printed table above for the current unweighted vs.
+pixel-weighted comparison). Both weightings are valid; they just answer different
+questions ("typical fire" vs. "typical burned forest hectare").
+:::
+
+```{r masking-maps, fig.height=21, fig.width=10}
+# ── Timing checkpoints throughout — only visible live when this chunk is run
+# in the R console, not via Render (Quarto buffers console output on Windows
+# until the whole chunk finishes).
+elapsed <- function(t0) paste0(round(difftime(Sys.time(), t0, units = "secs"), 1), "s")
+t_chunk <- Sys.time()
+
+# ── Shared global color scale across all CA-wide/forest-masked map panels ────
+# Sample (not full-raster quantile) from the highest-magnitude layer — CA-wide
+# forest-masked eMapR — to keep this fast on a ~106M-cell raster.
+t0 <- Sys.time()
+agb_sample <- terra::spatSample(emapr_2005_forest, size = 500000, na.rm = TRUE, values = TRUE)
+agb_sample <- unlist(agb_sample, use.names = FALSE)
+agb_upper  <- round(stats::quantile(agb_sample, 0.99, na.rm = TRUE))
+cat("Shared color scale: 0 –", agb_upper, "Mg/ha (99th pct of CA-wide forest-masked eMapR) (", elapsed(t0), ")\n")
+
+viridis_cols <- hcl.colors(100, "viridis")
+
+# ── Dataset palette, matching §4.1/5.2/5.3/6.1/6.2 throughout this document ───
+CTREES_COL <- "#2166ac"
+EMAPR_COL  <- "#d6604d"
+
+# eMapR's native EPSG:5070 (Albers Conic) renders CA visibly rotated/skewed
+# relative to ctrees' native EPSG:4326 (plain lat/lon). Reproject display-only
+# copies to EPSG:4326 so every map panel shares the same north-up orientation
+# — the table above still uses the native-CRS objects, so stats are unaffected.
+# Reprojecting a rectangular Albers extent to lat/lon inflates its bounding
+# box (a warped rectangle needs a larger axis-aligned box to contain it), so
+# crop to ctrees' tighter native extent afterward — otherwise the eMapR
+# panels get a wider axis range than ctrees and CA renders visibly smaller.
+#
+# Aggregate to a coarser display resolution FIRST — bilinear-reprojecting the
+# full ~100m native-resolution CA-wide raster (~100M+ cells) is by far the
+# most expensive step in this chunk (unlike the analytic/sampling ops above,
+# it requires real per-cell interpolation across the whole grid). At this
+# figure's printed size (a ~5in-wide map panel at 300dpi covering ~800km of
+# California) native 100m resolution is roughly 10x finer than the image can
+# even show, so aggregating to ~800m (fact=8) first is visually lossless for
+# a map panel but cuts the reproject's cell count ~64x.
+t0 <- Sys.time()
+emapr_2005_raw_agg    <- terra::aggregate(emapr_2005_raw,    fact = 8, fun = "mean", na.rm = TRUE)
+emapr_2005_forest_agg <- terra::aggregate(emapr_2005_forest, fact = 8, fun = "mean", na.rm = TRUE)
+cat("eMapR aggregate for display (", elapsed(t0), ")\n")
+
+t0 <- Sys.time()
+emapr_2005_raw_disp    <- terra::project(emapr_2005_raw_agg,    "epsg:4326", method = "bilinear") |>
+  terra::crop(ctrees_2005_raw)
+emapr_2005_forest_disp <- terra::project(emapr_2005_forest_agg, "epsg:4326", method = "bilinear") |>
+  terra::crop(ctrees_2005_raw)
+cat("eMapR reproject+crop for display (", elapsed(t0), ")\n")
+
+panel <- function(r, ca_vect, title) {
+  t0 <- Sys.time()
+  par(mar = c(2, 2, 4, 6))
+  terra::plot(terra::clamp(r, lower = 0, upper = agb_upper, values = TRUE),
+              col = viridis_cols, range = c(0, agb_upper),
+              main = title, plg = list(title = "AGB\n(Mg/ha)", title.cex = 0.7, cex = 0.7),
+              cex.main = 0.9)
+  terra::plot(ca_vect, add = TRUE, col = NA, border = "grey20", lwd = 0.6)
+  cat("  panel:", title, "(", elapsed(t0), ")\n")
+}
+
+# ── Area-weighted histogram helpers ────────────────────────────────────────
+# Area per bin is ESTIMATED from a random subsample of valid pixels (these
+# CA-wide rasters are ~100M+ cells — see the ~106M-cell note above). Two
+# full-raster operations had to be avoided, in order of discovery:
+#   1. Binning: terra::as.data.frame() (pulls every pixel into R) and
+#      terra::classify()+terra::zonal() (whole-raster reclassify) were both
+#      too slow at this cell count. Fixed by sampling up to 500k valid
+#      cells with terra::spatSample() (same trick used above for the map
+#      color scale, proven fast on these rasters), then binning the small
+#      sample with cut()/tapply() and scaling each bin's summed area up by
+#      (total valid pixels / sample size).
+#   2. Area: terra::cellSize() computed over the FULL raster (materializing
+#      a 100M+-cell output layer before sampling from it) was the remaining
+#      untested full-raster op. Replaced with an analytic per-cell area
+#      computed only for the ~500k SAMPLED cells, from their latitude (area
+#      varies with latitude only in ctrees' unprojected EPSG:4326 grid;
+#      eMapR's equal-area EPSG:5070 grid has a constant per-cell area).
+cell_area_ha <- function(r, cells) {
+  res_deg <- terra::res(r)
+  if (terra::is.lonlat(r)) {
+    lat       <- terra::yFromCell(r, cells)
+    m_per_deg <- 111320
+    (res_deg[1] * m_per_deg * cos(lat * pi / 180)) * (res_deg[2] * m_per_deg) / 10000
+  } else {
+    rep(prod(res_deg) / 10000, length(cells))
+  }
+}
+
+sample_agb_area <- function(r, size = 500000, exact_below = 2e6) {
+  t0 <- Sys.time()
+  n_valid <- terra::global(r, "notNA")[[1]]
+  cat("    notNA count:", n_valid, "(", elapsed(t0), ")\n")
+
+  t0 <- Sys.time()
+  if (n_valid <= exact_below) {
+    # Exact enumeration for sparse rasters (e.g. the within-fire masks,
+    # where valid pixels are a tiny fraction of the full CA-wide grid
+    # extent). terra::spatSample()'s random-rejection sampling can fail to
+    # find enough — or ANY — valid cells when the valid fraction of the
+    # full extent is this low, which is what crashed barplot() here (0
+    # sampled rows -> scale = n_valid/0 -> non-finite bar heights). Exact
+    # enumeration via as.data.frame(na.rm=TRUE) is a fast linear scan
+    # regardless of sparsity, and safe memory-wise here specifically
+    # because it only ever materializes n_valid rows (small, by
+    # definition of this branch) — unlike the dense CA-wide rasters below.
+    cell_df <- terra::as.data.frame(r, na.rm = TRUE, cells = TRUE)
+    cat("    exact enumeration:", nrow(cell_df), "pts (", elapsed(t0), ")\n")
+    cells <- cell_df$cell
+    agb   <- cell_df[[2]]
+    scale <- 1
+  } else {
+    # terra::spatSample() does not reliably return a data.frame across
+    # terra versions when cells=TRUE + values=TRUE (sometimes a plain
+    # matrix) — as.data.frame() guarantees $cell / positional column
+    # access below works either way, instead of erroring with "$ operator
+    # is invalid for atomic vectors".
+    samp <- terra::spatSample(r, size = min(size, n_valid), na.rm = TRUE,
+                               values = TRUE, cells = TRUE)
+    samp <- as.data.frame(samp)
+    cat("    spatSample:", nrow(samp), "pts (", elapsed(t0), ")\n")
+    cells <- samp$cell
+    agb   <- samp[[2]]
+    scale <- n_valid / nrow(samp)
+  }
+
+  t0 <- Sys.time()
+  area_ha <- cell_area_ha(r, cells)
+  cat("    cell_area_ha (", elapsed(t0), ")\n")
+
+  list(agb = agb, area_ha = area_ha, scale = scale)
+}
+
+# Draws one ctrees/eMapR histogram pair for a given masking level, sharing
+# bin breaks across the two datasets so the x-axis is directly comparable
+# within that row (each masking level gets its own breaks, independent of
+# the other blocks below — raw/forest-masked/burned-area have different
+# AGB ranges).
+hist_panel_pair <- function(r_ctrees, r_emapr, label) {
+  cat(glue("  [{label}] sampling ctrees...\n"))
+  ctrees_s <- sample_agb_area(r_ctrees)
+  cat(glue("  [{label}] sampling eMapR...\n"))
+  emapr_s  <- sample_agb_area(r_emapr)
+
+  hist_max <- max(ctrees_s$agb, emapr_s$agb, na.rm = TRUE)
+  breaks   <- seq(0, ceiling(hist_max / 25) * 25, by = 25)
+
+  area_by_bin <- function(s) {
+    bins <- cut(s$agb, breaks = breaks, include.lowest = TRUE)
+    (as.numeric(tapply(s$area_ha, bins, sum))[seq_len(length(breaks) - 1)] |>
+      (\(x) ifelse(is.na(x), 0, x))()) * s$scale
+  }
+
+  par(mar = c(4, 4, 4, 2))
+  barplot(area_by_bin(ctrees_s), space = 0, col = CTREES_COL, border = NA,
+          names.arg = breaks[-length(breaks)], las = 2, cex.names = 0.6,
+          main = glue("ctrees — {label} AGB distribution"), cex.main = 0.85,
+          xlab = "AGB (Mg/ha)", ylab = "Area (ha)")
+  barplot(area_by_bin(emapr_s), space = 0, col = EMAPR_COL, border = NA,
+          names.arg = breaks[-length(breaks)], las = 2, cex.names = 0.6,
+          main = glue("eMapR — {label} AGB distribution"), cex.main = 0.85,
+          xlab = "AGB (Mg/ha)", ylab = "Area (ha)")
+  cat(glue("  [{label}] histograms drawn\n"))
+}
+
+map_fig_path <- here("figures", "masking_progression_2005.png")
+dir.create(here("figures"), showWarnings = FALSE)
+
+png(map_fig_path, width = 10, height = 21, units = "in", res = 300, bg = "white")
+# 6-column, 5-row layout: each map row (3 cols per panel) is immediately
+# followed by its own area-weighted histogram row (3 cols per panel), except
+# the final row which holds a locator map + 2 narrower histograms (2 cols).
+layout(matrix(c(1,1,1,   2,2,2,
+                 3,3,3,   4,4,4,
+                 5,5,5,   6,6,6,
+                 7,7,7,   8,8,8,
+                 9,9, 10,10, 11,11), nrow = 5, byrow = TRUE),
+       heights = c(1, 0.85, 1, 0.85, 0.85))
+
+# ── Row 1: CA-wide, raw ────────────────────────────────────────────────────
+panel(ctrees_2005_raw,       ca_vect_4326, "ctrees — CA-wide (raw)")
+panel(emapr_2005_raw_disp,   ca_vect_4326, "eMapR — CA-wide (raw)")
+
+# ── Row 2: CA-wide, raw — area-weighted histograms ─────────────────────────
+hist_panel_pair(ctrees_2005_raw, emapr_2005_raw, "CA-wide (raw)")
+
+# ── Row 3: CA-wide, forest-masked ──────────────────────────────────────────
+panel(ctrees_2005_forest,    ca_vect_4326, "ctrees — CA-wide (forest-masked)")
+panel(emapr_2005_forest_disp, ca_vect_4326, "eMapR — CA-wide (forest-masked)")
+
+# ── Row 4: CA-wide, forest-masked — area-weighted histograms ──────────────
+hist_panel_pair(ctrees_2005_forest, emapr_2005_forest, "CA-wide (forest-masked)")
+
+# ── Row 5, panel 1: fire-polygon locator map (EPSG:4326, matches all panels) ─
+t0 <- Sys.time()
+par(mar = c(2, 2, 4, 2))
+terra::plot(ca_vect_4326, col = "grey95", border = "grey20", lwd = 0.6,
+            main = "2005 fire perimeters", cex.main = 0.9)
+terra::plot(fire2005_4326, add = TRUE, col = "red", border = "darkred", lwd = 0.8)
+cat("  panel: 2005 fire perimeters (", elapsed(t0), ")\n")
+
+# ── Row 5, panels 2-3: within-fire, forest-masked — area-weighted histograms ─
+hist_panel_pair(ctrees_2005_fire, emapr_2005_fire, "within-fire")
+
+dev.off()
+cat("Total chunk time (", elapsed(t_chunk), ")\n")
+
+knitr::include_graphics(map_fig_path)
+```
+
+---
+
 ## 6. Before / After Fire Event Study
 
 This section adapts EDA_PLAN §4.2 to use actual AGB (Mg/ha) from both datasets,
@@ -601,8 +922,14 @@ indexed to each fire's ignition year (`rel_year = 0`).
 
 ```{r event-study-data}
 # ── Build combined long data frame indexed to fire year ───────────────────────
-REL_MIN <- -12L   # years before fire to show (eMapR reaches back to 1990 for 2002 cohort)
-REL_MAX <-  15L   # years after fire to show (2000 cohort + 15 = 2015, last eMapR year)
+# Derived from EMAPR_YEARS/STUDY_YEARS (not hardcoded) so these bounds stay
+# correct automatically if the study cohort changes. REL_MIN uses the latest
+# cohort year (gives the deepest/most-negative pre-fire rel_year back to
+# eMapR's earliest available year); REL_MAX uses the earliest cohort year
+# (gives the longest post-fire window still covered by eMapR's most recent
+# year) — matching the same eMapR-bounded logic used throughout this section.
+REL_MIN <- min(EMAPR_YEARS) - max(STUDY_YEARS)
+REL_MAX <- max(EMAPR_YEARS) - min(STUDY_YEARS)
 
 event_long <- dplyr::bind_rows(
   ctrees_fires |> dplyr::mutate(dataset = "ctrees (~100 m)"),
@@ -629,13 +956,13 @@ print(dplyr::count(event_agg, dataset))
 ```{r event-study-plot, fig.height=5}
 n_fires_total  <- dplyr::n_distinct(event_long$event_id)
 
-# Show the full window where data exists.
-# Pre-fire: eMapR reaches back to 1990 (rel_year = -12 for 2002 cohort);
-#   ctrees starts at 2000 so has no pre-fire coverage for 2000-cohort.
-# Post-fire: eMapR runs to 2015 (rel_year = +15 for 2000 cohort);
-#   ctrees continues to 2025 but we cap at +15 to keep axes matched.
-# Pooling cohorts at extreme rel_years means fewer fires contribute — note this
-# in interpretation (2002-cohort dominates rel_year < -10; 2000-cohort dominates > +13).
+# Show the full window where data exists (REL_MIN/REL_MAX derived above from
+# EMAPR_YEARS/STUDY_YEARS). eMapR bounds both edges: pre-fire it reaches back
+# to 1990, post-fire it currently stops at its most recent available year;
+# ctrees' own range is wider on both ends but is capped here to keep axes
+# matched to eMapR. Pooling cohorts at extreme rel_years means fewer fires
+# contribute — the latest cohort dominates the most-negative rel_years and
+# the earliest cohort dominates the most-positive ones.
 event_agg_pooled <- dplyr::filter(event_agg, rel_year >= REL_MIN, rel_year <= REL_MAX)
 
 # Build the tooltip text on the point layer; other layers get no tooltip
@@ -741,8 +1068,9 @@ ggplot(event_agg_cohort,
 ::: {.callout-note}
 **ctrees pre-fire baseline**
 
-ctrees data starts in 2000. The earliest cohort (`r min(STUDY_YEARS)`) therefore has no
-ctrees pre-fire observations; the 2001 cohort has 1 year; the 2002 cohort 2 years, etc.
+ctrees data starts in 2000, providing `r min(STUDY_YEARS) - 2000` pre-fire year(s) of
+ctrees baseline for the earliest cohort (`r min(STUDY_YEARS)`), up to
+`r max(STUDY_YEARS) - 2000` year(s) for the latest cohort (`r max(STUDY_YEARS)`).
 eMapR extends back to 1990, providing up to `r min(STUDY_YEARS) - 1990` years of
 pre-fire baseline for the earliest cohort.
 :::
@@ -751,10 +1079,10 @@ pre-fire baseline for the earliest cohort.
 **eMapR post-fire coverage**
 
 eMapR CA TIFs currently run to 2015. The latest cohort (`r max(STUDY_YEARS)`) therefore
-has 0 post-fire eMapR years; 2014 has 1 year; 2010 has 5 years; 2000 has the full
-15-year recovery window. Once eMapR CONUS files for 2016–2023 are downloaded and
-cropped, re-render — the cache (`biomass_fire_polygons_emapr_`r years_hash`.csv`) picks
-up new TIF years automatically.
+has `r 2015 - max(STUDY_YEARS)` post-fire eMapR year(s); the earliest cohort
+(`r min(STUDY_YEARS)`) has the full `r 2015 - min(STUDY_YEARS)`-year recovery window.
+Once eMapR CONUS files for 2016–2023 are downloaded and cropped, re-render — the cache
+(`biomass_fire_polygons_emapr_`r years_hash`.csv`) picks up new TIF years automatically.
 :::
 
 ::: {.callout-important}

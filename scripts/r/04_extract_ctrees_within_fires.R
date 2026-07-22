@@ -37,7 +37,7 @@ sf_use_s2(FALSE)
 options(tigris_use_cache = TRUE)
 here::i_am("scripts/r/04_extract_ctrees_within_fires.R")
 
-STUDY_YEARS <- 2000L:2005L   # must match QMD params (study_year_min / study_year_max)
+STUDY_YEARS <- 2005L:2010L   # must match QMD params (study_year_min / study_year_max)
 STATE_FIPS  <- "CA"
 
 MTBS_PATH    <- here("data", "raw", "mtbs", "mtbs_perimeter_data", "mtbs_perims_DD.shp")
