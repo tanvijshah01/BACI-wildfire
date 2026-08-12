@@ -4,8 +4,13 @@
 # Extract mean ctrees AGB within MTBS fire perimeters using local 100 m TIFs,
 # applying the NLCD 2004 forest mask before extraction.
 #
+# Retired: this feeds analysis/biomass_within_fires_old.qmd only, which used the
+# original CA-only forest-mask pipeline (03_prepare_forest_mask.R). The current
+# pipeline is 08_extract_ctrees_within_fires_new.R + 05_prepare_forest_masks_west.R,
+# feeding analysis/biomass_within_fires.qmd.
+#
 # Run ONCE after 03_prepare_forest_mask.R has produced the masks.
-# Run from the project root before rendering 05_biomass_within_fires.qmd.
+# Run from the project root before rendering biomass_within_fires_old.qmd.
 #
 # Why a separate script: same reason as 02_extract_emapr_within_fires.R —
 # terra::extract() on Windows can appear frozen inside Quarto.
@@ -167,4 +172,4 @@ final         <- readr::read_csv(OUT_CSV, show_col_types = FALSE)
 total_elapsed <- round((proc.time() - t0)[["elapsed"]] / 60, 1)
 cat(glue("\nDone. {nrow(final)} rows in {basename(OUT_CSV)}",
          " ({length(unique(final$year))} years) — {total_elapsed} min this run.\n"))
-cat("You can now render 05_biomass_within_fires.qmd.\n")
+cat("You can now render analysis/biomass_within_fires_old.qmd.\n")

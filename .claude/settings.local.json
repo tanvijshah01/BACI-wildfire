@@ -91,7 +91,29 @@
       "Bash(grep -E \"^ctrees_[0-9]{4}_ca_100m\\\\.tif$\")",
       "Bash(grep -E \"^composite_[0-9]{4}_ca_100m\\\\.tif$\")",
       "Bash(Rscript *)",
-      "Bash(grep *)"
+      "Bash(grep *)",
+      "PowerShell(& \"C:\\\\Program Files\\\\RStudio\\\\resources\\\\app\\\\bin\\\\quarto\\\\bin\\\\quarto.exe\" render \"analysis/05_biomass_within_fires.qmd\" 2>&1 | Select-Object -Last 150)",
+      "Bash(awk 'NR==5981,NR==6100' analysis/05_biomass_within_fires.html)",
+      "Bash(awk '{print length, NR}')",
+      "Bash(awk 'NR>=5981 && NR<=6075 {print NR, length\\($0\\)}' analysis/05_biomass_within_fires.html)",
+      "Bash(sort -k2 -rn)",
+      "Bash(awk 'NR>=6116 && NR<=6250 {print NR, length\\($0\\)}' analysis/05_biomass_within_fires.html)",
+      "Bash(where Rscript)",
+      "Read(//c/Program Files/R/**)",
+      "Bash(git mv *)",
+      "Bash(where quarto *)",
+      "Read(//c/Program Files/RStudio/resources/app/bin/quarto/bin/**)",
+      "Bash(node -e ' *)",
+      "Read(//c/Users/shaht/AppData/Local/Temp/claude/C--Users-shaht-Documents-Projects-BACI-local-BACI/1ce98f0a-9901-45c9-a122-fa122791b3a0/scratchpad/**)",
+      "Bash(command -v rclone)",
+      "Bash(rclone --version)",
+      "Bash(rclone listremotes *)",
+      "Bash(~/bin/rclone.exe listremotes *)",
+      "Bash(\"C:/Users/shaht/bin/rclone.exe\" listremotes *)",
+      "Bash(tasklist)",
+      "Bash(PowerShell -Command \"Get-PSDrive C | Select-Object Used,Free\")",
+      "PowerShell(& \"C:\\\\Users\\\\shaht\\\\anaconda3\\\\python.exe\" -m py_compile \"C:\\\\Users\\\\shaht\\\\Documents\\\\Projects\\\\BACI_local\\\\BACI\\\\scripts\\\\python\\\\04_download_ctrees_west.py\"; echo \"exit: $LASTEXITCODE\")",
+      "PowerShell(powercfg *)"
     ]
   }
 }

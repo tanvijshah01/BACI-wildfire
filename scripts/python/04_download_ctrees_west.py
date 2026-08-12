@@ -1,47 +1,65 @@
 # =============================================================================
-# 03_download_ctrees_ca.py
-# Download Ctrees aboveground biomass data for California from the
-# ucsb-emlab/BACI-wildfires arraylake zarr store.
+# 04_download_ctrees_west.py
+# Download Ctrees aboveground biomass data for the full 11-state Western study
+# region from the ucsb-emlab/BACI-wildfires arraylake zarr store.
+#
+# Generalizes 03_download_ctrees_ca.py from a California-only bounding box to
+# the union bbox of all 11 Western study states (AZ, CA, CO, ID, MT, NV, NM,
+# OR, UT, WA, WY) — same three-part structure, same extraction method. The
+# CA-only outputs from 03 are left untouched as the validated baseline
+# (see biomass_within_fires.qmd §7); this script writes a separate "_west_"
+# output tier alongside them, mirroring how 00_crop_emapr_to_west.R produces
+# a "_west_" tier alongside the retired CA-only eMapR crop.
+#
+# Part C's per-year GeoTIFFs (ctrees_YYYY_west_100m.tif) are meant to be
+# shared across all 11 states — scripts/r/07 and 08 will eventually loop
+# STATE_FIPS over WESTERN_STATES and crop this same West-wide TIF per state
+# per year, rather than needing one ctrees TIF per state.
 #
 # SCRIPT OUTLINE
 # 1.  Setup — connect to arraylake, define parameters
-# 2.  Open zarr store and resolve CA bounding-box indices
-# 3.  Part A — Coarsened CA raster (for R mapping)
-#       Load CA data year-by-year, coarsen to ~1 km, save as NetCDF
+# 2.  Open zarr store and resolve West bounding-box indices
+# 3.  Part A — Coarsened West raster (for R mapping)
+#       Load West data year-by-year, coarsen to ~1 km, checkpoint each year's
+#       array to scratch (resume-safe — a multi-hour run at 4x the CA-script's
+#       area is more exposed to interruption), then assemble into one NetCDF.
 # 4.  Part B — Fire polygon extraction (for R event-study / DiD)
 #       Precompute rasterized polygon masks once; then extract mean AGB
-#       per fire × year using pure numpy indexing (no shapely per year).
+#       per fire x year using pure numpy indexing (no shapely per year).
 # 5.  Part C — Native-resolution (~100 m) annual GeoTIFFs (for R comparison)
-#       Write one GeoTIFF per year at native 100 m resolution; used by
-#       04_data_summary.qmd and biomass_within_fires.qmd to compare
-#       ctrees and eMapR at the same ~100 m resolution.
+#       Write one GeoTIFF per year at native 100 m resolution, West-bbox
+#       extent — shared input for scripts/r/07 and 08 once generalized to
+#       loop over all 11 states.
 # 6.  Sanity checks on all outputs
 #
 # OUTPUTS
-#   output/ctrees_biomass_ca_1km.nc    — coarsened CA raster, 26 years
-#   output/biomass_fire_polygons_ctrees.csv — long panel: event_id × year × agb
-#   data/processed/ctrees/ctrees_YYYY_ca_100m.tif — native 100 m annual GeoTIFFs
+#   data/processed/ctrees/ctrees_biomass_west_1km.nc        — coarsened West raster, 26 years
+#   data/processed/ctrees/biomass_fire_polygons_ctrees_west.csv — long panel: event_id x year x agb
+#   data/processed/ctrees/ctrees_YYYY_west_100m.tif          — native 100 m annual GeoTIFFs
 #
-# EXTRACTION METHOD (Part B)
-#   Two approaches were evaluated:
+# RESOURCE NOTES (vs. 03_download_ctrees_ca.py)
+#   West bbox is ~4.1x the CA bbox by area (~511M px/year vs ~125M px/year at
+#   ~100 m). Per-year raw read is ~2 GB (float32) — fine in memory, but do NOT
+#   accumulate multiple years of the raw (uncoarsened) array at once. Part C's
+#   26 compressed GeoTIFFs total on the order of 8-20 GB on disk. Runtime is
+#   dominated by ~26 network reads at 4x the size, plus mask precompute over
+#   ~6.8k fires (vs. 1.1k for CA) — budget for a multi-hour run. Disable sleep
+#   before starting (`powercfg /change standby-timeout-ac 0`, matching the
+#   eMapR download guidance in DATA_DOWNLOAD_GUIDE.md) and run from a real
+#   terminal, not a notebook — Part B/C already checkpoint per-fire/per-year,
+#   and Part A now checkpoints per-year too (see PART A CHECKPOINTING below).
 #
-#   Approach 1 — Shapely point-in-polygon with grid thinning (abandoned):
-#     For each fire × year, build a meshgrid of pixel centres in the fire
-#     bounding box and call shapely.within() on each point. Large CA fires
-#     (e.g. August Complex, ~1M acres) have bounding boxes with millions of
-#     pixels, causing memory explosion and multi-hour runtimes even after
-#     thinning the grid to ≤80,000 test points. The thinning also introduces
-#     a sampling approximation that misses pixels at the polygon boundary.
+# PART A CHECKPOINTING (new vs. 03)
+#   03's Part A holds all 26 coarsened years in memory and writes the NetCDF
+#   once at the end — a fine tradeoff at CA scale, but risky at West scale
+#   given a multi-hour runtime (the eMapR West crop was already interrupted
+#   twice by laptop sleep at a similar wall-clock scale). Each coarsened year
+#   is now saved to a scratch .npy immediately after computing it and skipped
+#   on re-run if already present; the final NetCDF assembly step only runs
+#   once all years are checkpointed.
 #
-#   Approach 2 — Rasterio scanline rasterization + precomputed masks (current):
-#     For each fire polygon, rasterio.features.rasterize() burns the polygon
-#     onto a boolean grid aligned to the CA pixel grid. This is O(pixels) via
-#     a C-level scanline algorithm — no sampling approximation, and 10-50x
-#     faster than shapely point-in-polygon for large polygons. Masks are
-#     precomputed once for all 1,064 fires before the year loop, so the
-#     26-year extraction becomes pure numpy array indexing with zero
-#     shapely/rasterio overhead per year. Falls back to matplotlib.path
-#     (C extension, vectorised) if rasterio is unavailable.
+# EXTRACTION METHOD (Part B) — unchanged from 03; see that script for the
+# shapely-vs-rasterio evaluation notes.
 #
 # DATASET NOTES (from 02_explore_ctrees_zarr.py)
 #   - Group:        aboveground_biomass/
@@ -79,9 +97,12 @@ except ImportError:
 
 PROJ_ROOT     = Path(__file__).resolve().parent.parent.parent
 OUT_TIFS_DIR  = PROJ_ROOT / "data" / "processed" / "ctrees"
-OUT_NC        = OUT_TIFS_DIR / "ctrees_biomass_ca_1km.nc"
-OUT_CSV       = OUT_TIFS_DIR / "biomass_fire_polygons_ctrees.csv"
+OUT_NC        = OUT_TIFS_DIR / "ctrees_biomass_west_1km.nc"
+OUT_CSV       = OUT_TIFS_DIR / "biomass_fire_polygons_ctrees_west.csv"
 MTBS_PATH     = PROJ_ROOT / "data" / "raw" / "mtbs" / "mtbs_perimeter_data" / "mtbs_perims_DD.shp"
+
+# Scratch dir for Part A per-year checkpoints (deleted after successful NetCDF assembly)
+SCRATCH_DIR   = OUT_TIFS_DIR / "_west_1km_scratch"
 
 # -- Ctrees zarr parameters (from exploration script) -------------------------
 REPO_NAME    = "ucsb-emlab/BACI-wildfires"
@@ -91,9 +112,13 @@ VAR          = "agb"
 SCALE_FACTOR = 10.0     # divide stored int16 by 10 -> Mg ha^-1
 FILL_VALUE   = -9999
 
-# -- California bounding box (WGS84 degrees) ----------------------------------
-CA_LON = (-124.5, -114.1)
-CA_LAT = (32.5, 42.0)
+# -- Western study states (event_id prefix convention, matches WESTERN_STATES
+#    in scripts/r/00_crop_emapr_to_west.R and the R extraction pipeline) -----
+WESTERN_STATES = ["AZ", "CA", "CO", "ID", "MT", "NV", "NM", "OR", "UT", "WA", "WY"]
+
+# -- Western US bounding box (WGS84 degrees) — union of the 11 states' extents
+WEST_LON = (-124.8, -102.0)
+WEST_LAT = (31.3, 49.0)
 
 # -- Coarsening factor: 11 x 0.000889 deg ~= 0.0098 deg ~= 1.1 km -----------
 COARSEN = 11
@@ -103,6 +128,7 @@ MTBS_START = 2000
 MTBS_END   = 2025    # match Ctrees temporal range
 
 OUT_TIFS_DIR.mkdir(parents=True, exist_ok=True)
+SCRATCH_DIR.mkdir(parents=True, exist_ok=True)
 
 
 def coarsen_block(arr2d, factor):
@@ -115,7 +141,7 @@ def coarsen_block(arr2d, factor):
 
 def precompute_mask(geom, x_arr, y_arr, res):
     """
-    Rasterize a polygon onto the CA pixel grid; return (yi, xi, mask_2d).
+    Rasterize a polygon onto the West pixel grid; return (yi, xi, mask_2d).
 
     Uses rasterio.features.rasterize() for fast C-level scanline rasterization
     (O(pixels), no sampling approximation). Falls back to matplotlib.path if
@@ -186,7 +212,7 @@ def precompute_mask(geom, x_arr, y_arr, res):
     return yi, xi, mask
 
 
-# --- 2. CONNECT TO ARRAYLAKE & RESOLVE CA INDICES ----------------------------
+# --- 2. CONNECT TO ARRAYLAKE & RESOLVE WEST INDICES --------------------------
 print("Connecting to arraylake...", flush=True)
 try:
     client  = Client()
@@ -207,41 +233,49 @@ n_years = agb_zarr.shape[0]
 times   = pd.DatetimeIndex(time_raw.astype("datetime64[ns]"))
 years   = times.year.tolist()
 
-# CA index slices (y is descending so north-side has smaller index)
-x_mask = (x_all >= CA_LON[0]) & (x_all <= CA_LON[1])
-y_mask = (y_all >= CA_LAT[0]) & (y_all <= CA_LAT[1])
+# West index slices (y is descending so north-side has smaller index)
+x_mask = (x_all >= WEST_LON[0]) & (x_all <= WEST_LON[1])
+y_mask = (y_all >= WEST_LAT[0]) & (y_all <= WEST_LAT[1])
 
 x_idx  = np.where(x_mask)[0];  x_start, x_end = int(x_idx[0]), int(x_idx[-1]) + 1
 y_idx  = np.where(y_mask)[0];  y_start, y_end = int(y_idx[0]), int(y_idx[-1]) + 1
 
-x_ca = x_all[x_idx]   # ascending
-y_ca = y_all[y_idx]   # descending (northernmost first)
+x_west = x_all[x_idx]   # ascending
+y_west = y_all[y_idx]   # descending (northernmost first)
 
-print(f"  CA subset: {y_end - y_start} rows x {x_end - x_start} cols x {n_years} years")
-print(f"  Lat range: {y_ca.min():.3f} - {y_ca.max():.3f}")
-print(f"  Lon range: {x_ca.min():.3f} - {x_ca.max():.3f}")
+print(f"  West subset: {y_end - y_start} rows x {x_end - x_start} cols x {n_years} years")
+print(f"  Lat range: {y_west.min():.3f} - {y_west.max():.3f}")
+print(f"  Lon range: {x_west.min():.3f} - {x_west.max():.3f}")
 print(f"  Extraction backend: {'rasterio.features' if USE_RASTERIO else 'matplotlib.path (fallback)'}")
 
 
-# --- 3. PART A — COARSENED CA RASTER -----------------------------------------
+# --- 3. PART A — COARSENED WEST RASTER ----------------------------------------
 if OUT_NC.exists():
     print(f"\nPart A: {OUT_NC.name} already exists — skipping.")
 else:
-    print(f"\nPart A: Building coarsened (~1 km) CA raster -> {OUT_NC.name}")
-    coarsened_layers = []
+    print(f"\nPart A: Building coarsened (~1 km) West raster -> {OUT_NC.name}")
 
     for t_idx, (yr, ts) in enumerate(zip(years, times)):
+        scratch_path = SCRATCH_DIR / f"coarsened_{yr}.npy"
+        if scratch_path.exists():
+            print(f"  {t_idx + 1}/{n_years} years — {yr} already checkpointed, skipping", flush=True)
+            continue
+
         raw = agb_zarr[t_idx, y_start:y_end, x_start:x_end].astype("float32")
         raw[raw == FILL_VALUE] = np.nan
         raw /= SCALE_FACTOR                          # -> Mg ha^-1
-        coarsened_layers.append(coarsen_block(raw, COARSEN))
+        coarsened = coarsen_block(raw, COARSEN)
+        del raw
 
-        print(f"  {t_idx + 1}/{n_years} years processed ({yr})", flush=True)
+        np.save(scratch_path, coarsened)
+        print(f"  {t_idx + 1}/{n_years} years processed ({yr}) — checkpointed", flush=True)
 
-    # Build coarsened coordinate arrays
+    # All years checkpointed — assemble into one NetCDF
+    coarsened_layers = [np.load(SCRATCH_DIR / f"coarsened_{yr}.npy") for yr in years]
+
     ny_c, nx_c = coarsened_layers[0].shape
-    x_c = x_ca[: nx_c * COARSEN].reshape(nx_c, COARSEN).mean(axis=1)
-    y_c = y_ca[: ny_c * COARSEN].reshape(ny_c, COARSEN).mean(axis=1)
+    x_c = x_west[: nx_c * COARSEN].reshape(nx_c, COARSEN).mean(axis=1)
+    y_c = y_west[: ny_c * COARSEN].reshape(ny_c, COARSEN).mean(axis=1)
 
     agb_stack = np.stack(coarsened_layers, axis=0)   # (26, ny_c, nx_c)
 
@@ -253,7 +287,7 @@ else:
             "x":    ("x", x_c),
         },
         attrs={
-            "title":        "Ctrees aboveground biomass — California ~1 km",
+            "title":        "Ctrees aboveground biomass — Western US ~1 km",
             "source":       "ucsb-emlab/BACI-wildfires (arraylake)",
             "units":        "Mg ha-1",
             "scale_note":   "Coarsened to ~1 km by block-averaging native 100 m pixels",
@@ -267,42 +301,50 @@ else:
     ds_out.to_netcdf(OUT_NC, encoding=encoding)
     print(f"  Saved: {OUT_NC}  ({OUT_NC.stat().st_size / 1e6:.1f} MB)")
 
+    # Clean up scratch checkpoints now that the NetCDF is safely written
+    for yr in years:
+        (SCRATCH_DIR / f"coarsened_{yr}.npy").unlink(missing_ok=True)
+    try:
+        SCRATCH_DIR.rmdir()
+    except OSError:
+        pass   # leave it if anything unexpected remains
+
 
 # --- 4. PART B — FIRE POLYGON EXTRACTION -------------------------------------
 if OUT_CSV.exists():
     print(f"\nPart B: {OUT_CSV.name} already exists — skipping.")
 else:
-    print(f"\nPart B: Extracting AGB within MTBS CA fire polygons -> {OUT_CSV.name}")
+    print(f"\nPart B: Extracting AGB within MTBS West fire polygons -> {OUT_CSV.name}")
     assert MTBS_PATH.exists(), f"MTBS shapefile not found: {MTBS_PATH}"
 
-    # -- Load and filter MTBS California wildfires ----------------------------
+    # -- Load and filter MTBS Western US wildfires -----------------------------
     mtbs_raw = gpd.read_file(MTBS_PATH)
     mtbs_raw.columns = [c.lower() for c in mtbs_raw.columns]
     mtbs_raw["fire_year"] = mtbs_raw["ig_date"].str[:4].astype(int)
 
-    mtbs_ca = (mtbs_raw
-               .loc[mtbs_raw["incid_type"] == "Wildfire"]
-               .loc[mtbs_raw["fire_year"].between(MTBS_START, MTBS_END)]
-               .loc[mtbs_raw["event_id"].str[:2] == "CA"]
-               .to_crs("EPSG:4326")
-               .reset_index(drop=True))
+    mtbs_west = (mtbs_raw
+                 .loc[mtbs_raw["incid_type"] == "Wildfire"]
+                 .loc[mtbs_raw["fire_year"].between(MTBS_START, MTBS_END)]
+                 .loc[mtbs_raw["event_id"].str[:2].isin(WESTERN_STATES)]
+                 .to_crs("EPSG:4326")
+                 .reset_index(drop=True))
 
-    print(f"  CA wildfires in MTBS ({MTBS_START}-{MTBS_END}): {len(mtbs_ca)}", flush=True)
-    assert len(mtbs_ca) > 0, "No CA wildfires found — check MTBS path and filters"
+    print(f"  West wildfires in MTBS ({MTBS_START}-{MTBS_END}): {len(mtbs_west)}", flush=True)
+    assert len(mtbs_west) > 0, "No Western US wildfires found — check MTBS path and filters"
 
     # -- Precompute polygon masks (once per fire, reused across 26 years) -----
-    # This is the key optimisation: rasterize each polygon onto the CA pixel
+    # This is the key optimisation: rasterize each polygon onto the West pixel
     # grid a single time, storing (row_indices, col_indices, boolean_mask).
     # The year loop then uses only numpy indexing — no shapely or rasterio work.
-    RES = float(abs(x_ca[1] - x_ca[0]))   # ~0.000889 degrees
+    RES = float(abs(x_west[1] - x_west[0]))   # ~0.000889 degrees
 
-    print(f"  Precomputing {len(mtbs_ca)} polygon masks...", flush=True)
+    print(f"  Precomputing {len(mtbs_west)} polygon masks...", flush=True)
     fire_masks = []
-    for _, fire in mtbs_ca.iterrows():
-        fire_masks.append((fire, precompute_mask(fire.geometry, x_ca, y_ca, RES)))
+    for _, fire in mtbs_west.iterrows():
+        fire_masks.append((fire, precompute_mask(fire.geometry, x_west, y_west, RES)))
 
     n_with_mask = sum(1 for _, m in fire_masks if m is not None)
-    print(f"  {n_with_mask}/{len(mtbs_ca)} fire polygons overlap the CA raster grid", flush=True)
+    print(f"  {n_with_mask}/{len(mtbs_west)} fire polygons overlap the West raster grid", flush=True)
 
     # -- Extract year by year using precomputed masks -------------------------
     records = []
@@ -327,11 +369,13 @@ else:
 
             records.append({
                 "event_id":      fire["event_id"],
+                "state":         fire["event_id"][:2],
                 "fire_year":     fire["fire_year"],
                 "year":          yr,
                 "agb_mean_mgha": round(mean_agb, 2) if not np.isnan(mean_agb) else np.nan,
             })
 
+        del raw
         print(f"  {t_idx + 1}/{n_years} years processed ({yr})", flush=True)
 
     df = pd.DataFrame(records)
@@ -345,10 +389,10 @@ else:
 
 
 # --- 5. PART C — NATIVE-RESOLUTION (~100 m) ANNUAL GeoTIFFs -----------------
-# Writes one GeoTIFF per zarr year at the native ~100 m pixel grid.
-# Used by 04_data_summary.qmd and biomass_within_fires.qmd to compare
-# ctrees and eMapR at the same ~100 m resolution (eMapR side is 3× aggregated
-# from 30 m → ~90 m; both sides labeled "~100 m" by convention).
+# Writes one GeoTIFF per zarr year at the native ~100 m pixel grid, full West
+# bbox. Meant to be shared across all 11 states once scripts/r/07 and 08 loop
+# STATE_FIPS over WESTERN_STATES — each state crops its slice from the same
+# per-year West TIF rather than needing a separate download per state.
 #
 # Requires rasterio (USE_RASTERIO=True). If rasterio is not installed, Part C
 # is skipped — install it with: pip install rasterio
@@ -356,10 +400,10 @@ else:
 if not USE_RASTERIO:
     print("\nPart C: rasterio not available — skipping 100 m GeoTIFF export.")
     print("  Install rasterio (pip install rasterio) and re-run to generate")
-    print("  ctrees_YYYY_ca_100m.tif files.")
+    print("  ctrees_YYYY_west_100m.tif files.")
 else:
     tifs_needed = [yr for yr in years
-                   if not (OUT_TIFS_DIR / f"ctrees_{yr}_ca_100m.tif").exists()]
+                   if not (OUT_TIFS_DIR / f"ctrees_{yr}_west_100m.tif").exists()]
     if not tifs_needed:
         print(f"\nPart C: All {len(years)} 100 m TIFs already exist — skipping.")
     else:
@@ -367,15 +411,15 @@ else:
               f" -> {OUT_TIFS_DIR.name}/")
 
         # Pixel spacing in degrees (~0.000889); all years share the same grid
-        RES_C = float(abs(x_ca[1] - x_ca[0]))
+        RES_C = float(abs(x_west[1] - x_west[0]))
         # rasterio transform: origin = upper-left corner of top-left pixel;
-        # y_ca is descending so y_ca[0] is the northernmost (largest) latitude.
-        west_c  = float(x_ca[0]) - RES_C / 2
-        north_c = float(y_ca[0]) + RES_C / 2
+        # y_west is descending so y_west[0] is the northernmost (largest) latitude.
+        west_c  = float(x_west[0]) - RES_C / 2
+        north_c = float(y_west[0]) + RES_C / 2
         transform_c = _rio_from_origin(west_c, north_c, RES_C, RES_C)
 
         for t_idx, yr in enumerate(years):
-            tif_path = OUT_TIFS_DIR / f"ctrees_{yr}_ca_100m.tif"
+            tif_path = OUT_TIFS_DIR / f"ctrees_{yr}_west_100m.tif"
             if tif_path.exists():
                 print(f"  {yr} — already exists, skipping", flush=True)
                 continue
@@ -401,10 +445,11 @@ else:
             ) as dst:
                 dst.write(raw, 1)
 
+            del raw
             size_mb = tif_path.stat().st_size / 1e6
             print(f"  {yr} — {size_mb:.1f} MB", flush=True)
 
-        n_done = len(list(OUT_TIFS_DIR.glob("ctrees_*_ca_100m.tif")))
+        n_done = len(list(OUT_TIFS_DIR.glob("ctrees_*_west_100m.tif")))
         print(f"  Done. {n_done}/{len(years)} 100 m TIFs present in {OUT_TIFS_DIR.name}/")
 
 
@@ -420,20 +465,22 @@ pct_valid = 100 * np.sum(~np.isnan(agb_vals)) / agb_vals.size
 print(f"  NetCDF: {len(ds_check.time)} years, "
       f"{ds_check.dims['y']} x {ds_check.dims['x']} pixels, "
       f"{pct_valid:.1f}% valid")
-assert pct_valid > 10, "Less than 10% valid pixels — check CA bbox or fill masking"
+assert pct_valid > 10, "Less than 10% valid pixels — check West bbox or fill masking"
 
 # Part B
 df_check = pd.read_csv(OUT_CSV)
-assert {"event_id", "fire_year", "year", "agb_mean_mgha"}.issubset(df_check.columns)
+assert {"event_id", "state", "fire_year", "year", "agb_mean_mgha"}.issubset(df_check.columns)
 pct_valid_csv = 100 * df_check["agb_mean_mgha"].notna().mean()
 print(f"  CSV: {df_check['event_id'].nunique()} fires x {df_check['year'].nunique()} years "
       f"= {len(df_check):,} records, {pct_valid_csv:.1f}% with valid AGB")
+print("  Fires per state:")
+print(df_check.drop_duplicates("event_id")["state"].value_counts().sort_index().to_string())
 if pct_valid_csv < 50:
     print("  WARNING: <50% valid — check polygon alignment with Ctrees grid")
 
 # Part C
 if USE_RASTERIO:
-    tif_count = len(list(OUT_TIFS_DIR.glob("ctrees_*_ca_100m.tif")))
+    tif_count = len(list(OUT_TIFS_DIR.glob("ctrees_*_west_100m.tif")))
     print(f"  100 m TIFs: {tif_count}/{n_years} year(s) in {OUT_TIFS_DIR.name}/")
     if tif_count < n_years:
         print(f"  WARNING: Only {tif_count} of {n_years} 100 m TIFs present")

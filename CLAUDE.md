@@ -1,36 +1,220 @@
-# Wildfire Biomass Recovery - Causal Inference Study
+# Wildfire Biomass Recovery — Causal Inference Study (BACI)
+
+This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
 ## Project Overview
-Estimating causal effects of wildfire severity on forest biomass recovery using:
-- MTBS fire perimeters (2000-2023, Western US)
-- eMapR biomass data from Google Earth Engine
-- Callaway-Sant'Anna staggered difference-in-differences
+
+**BACI-wildfire** is an academic research project (UCSB MESM) estimating the causal effect of
+wildfire severity on forest biomass recovery using a Before-After-Control-Intervention (BACI) /
+staggered difference-in-differences design:
+
+- MTBS fire perimeters (2000–2023, Western US)
+- eMapR and ctrees biomass (annual, Landsat-based)
+- Callaway-Sant'Anna (2021) staggered DiD estimator, which handles the heterogeneous treatment
+  timing inherent in wildfire occurrence data
 
 **Current phase:** Exploratory data analysis (EDA)
 
-**Goal:** Panel-based causal inference paper for ecology/fire science journal
+**Goal:** Panel-based causal inference paper for an ecology/fire science journal
 
 ---
 
-## Data Sources
+## Directory Structure
 
-### MTBS Fire Perimeters
-- **Source:** https://www.mtbs.gov/direct-download
-- **File:** `data/raw/mtbs_perims_DD.shp`
-- **Key fields:** Fire_ID, Year, BurnBndAc, Severity1
-- **Coverage:** All fires >1000 acres, 1984-2023
-- **Focus:** 11 contiguous Western US states (AZ, CA, CO, ID, MT, NV, NM, OR, UT, WA, WY), conifer forests, 2000-2023
+```
+BACI/
+├── scripts/
+│   ├── python/                                  # ctrees/arraylake extraction
+│   │   ├── 02_explore_ctrees_zarr.py            # inspect arraylake zarr store structure
+│   │   ├── 03_download_ctrees_ca.py             # download ctrees AGB: CA raster, fire-polygon
+│   │   │                                        #   extraction, native ~100m GeoTIFFs (validated
+│   │   │                                        #   baseline — do not modify)
+│   │   └── 04_download_ctrees_west.py           # same, generalized to the 11-state West bbox
+│   │                                             #   (~4.1x CA's pixel area); outputs "_west_"
+│   │                                             #   tier, meant to be shared across states by 07/08
+│   └── r/                                       # data processing & analysis
+│       ├── 00_crop_emapr_to_ca.R                # [retired] crop CONUS eMapR TIFs to CA
+│       ├── 00_crop_emapr_to_west.R              # crop/mask each raw eMapR year to the union of
+│       │                                        #   all 11 Western states (skip-safe)
+│       ├── 01_create_emapr_100m_tifs.R          # downsample CA eMapR 30m -> ~90m ("100m")
+│       ├── 01_create_emapr_300m_tifs.R          # downsample CA eMapR 30m -> 300m (fast extraction)
+│       ├── 01_precompute_emapr_ca.R             # summary stats + display TIFs for EDA years
+│       ├── 02_compare_biomass_ranges.R          # eMapR vs ctrees range comparison (2000/2001/2003)
+│       ├── 02_extract_emapr_within_fires.R      # [retired] eMapR AGB within fires, CA-only mask
+│       ├── 03_prepare_forest_mask.R             # [retired] CA-only NLCD 2004 mask (30m/100m, 1/NA)
+│       ├── 04_extract_ctrees_within_fires.R     # [retired] ctrees AGB within fires, CA-only mask
+│       ├── 05_prepare_forest_masks_west.R       # CURRENT: per-state NLCD 2004 forest masks (0/1);
+│       │                                        #   STATES_TO_RUN currently "CA" only, though
+│       │                                        #   WESTERN_STATES already lists all 11
+│       ├── 06_extract_pct_forest_within_fires.R # % forest cover within each MTBS fire perimeter
+│       │                                        #   (STATES_TO_RUN currently "CA" only)
+│       ├── 07_extract_emapr_within_fires_new.R  # CURRENT: eMapR AGB within fires, per-state mask
+│       │                                        #   (STATE_FIPS currently hardcoded "CA")
+│       └── 08_extract_ctrees_within_fires_new.R # CURRENT: ctrees AGB within fires, per-state mask
+│                                                 #   (STATE_FIPS currently hardcoded "CA")
+├── analysis/                                    # Quarto exploratory & analysis documents
+│   ├── 01_mtbs_exploration.qmd
+│   ├── 02_ctrees_biomass_exploration.qmd
+│   ├── 03_emapr_biomass_exploration.qmd
+│   ├── 04_data_summary.qmd
+│   ├── 05_biomass_masking_slides.qmd            # slide deck on the forest-masking approach
+│   ├── biomass_within_fires.qmd                 # CURRENT: ctrees vs eMapR within fires (Western pipeline)
+│   ├── biomass_within_fires_old.qmd             # [retired] CA-only forest-mask version
+│   └── mtbs_assessment_comparison.qmd           # MTBS Initial vs Extended assessment bias
+├── paper/                                       # final manuscript (manuscript.qmd)
+├── data/
+│   ├── raw/                                     # untouched downloaded data — do not modify/delete
+│   │   ├── mtbs/                                # MTBS + Burn Severity Program shapefiles
+│   │   └── emapr_biomass/                       # CONUS-wide eMapR composites (~27.7 GB/year)
+│   └── processed/
+│       ├── ctrees/                               # ctrees TIFs + biomass_fire_polygons_ctrees*.csv
+│       ├── emapr_biomass_ca/                     # CA-clipped eMapR TIFs, stats RDS, forested CSVs
+│       ├── emapr_biomass_west/                   # West-wide clipped eMapR TIFs (~1 GB/year)
+│       ├── forest_mask/                          # NLCD 2004 forest masks (per-state, multi-resolution)
+│       └── control_pixels/                       # never-burned control pixel locations & time series
+├── figures/                                      # output plots and maps
+├── output/                                       # panel/export CSVs
+└── DATA_DOWNLOAD_GUIDE.md                        # eMapR FTP/Nextcloud + ctrees arraylake download instructions
+```
 
-### eMapR Biomass
-- **Source:** Google Earth Engine (requires Python extraction)
-- **Asset:** `projects/eMapR/biomass` (check actual name in GEE catalog)
-- **Resolution:** 30m Landsat-based
-- **Temporal:** Annual, 2000-2023
-- **Extraction status:** NOT YET DONE (planned for `scripts/python/01_extract_biomass_gee.py`)
+---
 
-### Control Sites
-- **Approach:** Never-burned sites within same ecoregion
-- **Status:** TO BE DETERMINED in EDA
+## Technology Stack
+
+- **R** — primary language: all data processing, panel construction, visualization, and causal
+  inference
+- **Python** — biomass data acquisition only: ctrees AGB download/extraction via the arraylake
+  zarr store (`scripts/python/`)
+- **Quarto (`.qmd`)** — exploratory analysis documents and the final manuscript
+
+### Key R Packages
+- `tidyverse` — data wrangling
+- `sf` — spatial vector data (MTBS fires)
+- `terra` — raster data
+- `did` — Callaway-Sant'Anna implementation
+- `fixest` — fast fixed effects (alternative specifications)
+- `modelsummary` — regression tables
+- `ggplot2` + `tmap` — visualization
+- `FedData` — download NLCD land cover data
+- `here`, `glue` — path/string handling in scripts
+
+### Key Python Packages
+- `arraylake`, `zarr`, `xarray` — ctrees zarr store access
+- `geopandas`, `shapely` — vector/polygon operations
+- `pandas`, `numpy` — tabular/array handling
+
+---
+
+## Data
+
+### Data Sources
+
+| Dataset | Source | Contents |
+|---|---|---|
+| `data/raw/mtbs/mtbs_fod_pts_data/` | USGS MTBS Program | Fire occurrence point locations (1984–2025, ~30,390 fires) |
+| `data/raw/mtbs/mtbs_perimeter_data/` | USGS MTBS Program | Fire perimeter polygons — key fields: Fire_ID, Year, BurnBndAc, Severity1 |
+| `data/raw/mtbs/burn_severity_fod_pts_data/` | USGS Burn Severity Program | BSP fire occurrence points |
+| `data/raw/mtbs/burn_severity_perimeter_data/` | USGS Burn Severity Program | BSP fire perimeter polygons |
+| `data/raw/emapr_biomass/` | Google Earth Engine (eMapR/LandTrendR) | 30m annual AGB, CONUS composites |
+| `data/processed/ctrees/` | ctrees (arraylake zarr) | Annual ML-based AGB, ~100m native |
+
+All raw data comes from federal/public sources — do not modify or delete files in `data/raw/`.
+Shapefiles are standard ESRI format (`.shp`, `.dbf`, `.shx`, `.prj`, `.cpg`) with FGDC metadata
+(`.xml`). Files are large (100MB+ each) — avoid loading entire datasets into memory; use spatial
+filters or chunked reads.
+
+**Coverage:** All fires >1000 acres; 11 contiguous Western US states (AZ, CA, CO, ID, MT, NV, NM,
+OR, UT, WA, WY), conifer forests, 2000–2023.
+
+**Control sites:** Never-burned sites within the same ecoregion — exact strategy still being
+determined in EDA (see `data/processed/control_pixels/`).
+
+### Data Download
+
+- **eMapR (FTP/Nextcloud) and ctrees (arraylake zarr)** — full download/access instructions,
+  including the required `arraylake auth login` step and the Nextcloud (`rclone`) archive flow
+  for raw eMapR composites, are in **[`DATA_DOWNLOAD_GUIDE.md`](DATA_DOWNLOAD_GUIDE.md)**. Use the
+  Nextcloud/rclone flow for new years — do not go back to the old manual `curl.exe --ftp-pasv`
+  loop.
+- **Forest mask (NLCD)** — downloaded via `FedData::get_nlcd()` (no login required). The current
+  pipeline uses **NLCD 2004**, per-state, 0/1-encoded fraction-forest masks built by
+  `scripts/r/05_prepare_forest_masks_west.R` (forest classes 41 Deciduous, 42 Evergreen,
+  43 Mixed). This replaces the retired CA-only, 1/NA-encoded mask from
+  `scripts/r/03_prepare_forest_mask.R`.
+- **CONUS eMapR composites** (~27.7 GB/year) must be cropped to the study region before use —
+  loading them directly in Quarto causes multi-minute stalls. `scripts/r/00_crop_emapr_to_west.R`
+  crops/masks each locally-available raw year to the union of all 11 Western states
+  (`data/processed/emapr_biomass_west/`, ~1 GB/year); `00_crop_emapr_to_ca.R` is the retired
+  CA-only predecessor. Both are skip-safe and only process missing years.
+
+**Note on `terra::extract()` inside Quarto on Windows:** Quarto buffers chunk output until the
+chunk finishes, which makes terra's C++ threading appear frozen. Always run extraction scripts
+from the R console or via `Rscript`, never inside a Quarto chunk.
+
+---
+
+## Script Pipeline
+
+The current pipeline builds per-state NLCD forest masks, then extracts biomass (eMapR and
+ctrees) within MTBS fire perimeters, restricted to forested pixels. Ctrees data acquisition
+(Python) and the R processing/extraction pipeline run independently; their outputs are combined
+in the `analysis/` documents.
+
+**Current run order (R, from project root, outside Quarto):**
+
+```r
+# 1 — per-state NLCD 2004 forest masks (0/1), multiple resolutions
+#     STATES_TO_RUN currently c("CA") — edit to add more states as West-wide eMapR/ctrees
+#     rasters become available for them
+Rscript scripts/r/05_prepare_forest_masks_west.R
+
+# 2 — % forest cover within each MTBS fire perimeter
+#     -> feeds analysis/mtbs_assessment_comparison.qmd
+Rscript scripts/r/06_extract_pct_forest_within_fires.R
+
+# 3 — eMapR AGB within fire perimeters, forested pixels only
+#     -> data/processed/emapr_biomass_ca/biomass_fire_polygons_emapr_..._newpipeline.csv
+Rscript scripts/r/07_extract_emapr_within_fires_new.R
+
+# 4 — ctrees AGB within fire perimeters, forested pixels only
+#     -> data/processed/ctrees/biomass_fire_polygons_ctrees_forested_newpipeline.csv
+Rscript scripts/r/08_extract_ctrees_within_fires_new.R
+```
+
+Scripts 05–08 feed `analysis/biomass_within_fires.qmd` and
+`analysis/mtbs_assessment_comparison.qmd`, are skip-safe (append one state/year at a time), and
+skip already-completed work. Delete the relevant output CSV to force a full re-extraction.
+
+**Known gap:** scripts 07 and 08 still hardcode `STATE_FIPS <- "CA"`, and the `STATES_TO_RUN` in
+scripts 05 and 06 is still `c("CA")` even though `WESTERN_STATES` already lists all 11 — these
+need to be generalized once West-wide eMapR/ctrees rasters exist for the other states (see
+`00_crop_emapr_to_west.R` above and Current Status below).
+
+**Retired pipeline (`00`–`04`, CA-only):** an earlier, 1/NA-encoded forest-mask version of the
+same idea (`03_prepare_forest_mask.R` → `02_extract_emapr_within_fires.R` /
+`04_extract_ctrees_within_fires.R`), kept only because it feeds
+`analysis/biomass_within_fires_old.qmd` as a validation baseline — the `05`–`08` pipeline was
+cross-checked against it (ctrees matched exactly, r = 1.000; eMapR had a residual bias not yet
+root-caused, see `biomass_within_fires.qmd` §7). Do not extend the retired pipeline for new work.
+
+**Ctrees acquisition (Python, one-time, before the R pipeline needs ctrees TIFs):**
+
+```
+python scripts/python/02_explore_ctrees_zarr.py   # inspect zarr store structure (run first)
+python scripts/python/03_download_ctrees_ca.py    # download CA raster + fire-polygon extraction
+                                                    # + native ~100m annual GeoTIFFs
+python scripts/python/04_download_ctrees_west.py  # same, generalized to the 11-state West bbox
+                                                    # (~4.1x CA's pixel area, ~6,800 fires);
+                                                    # multi-hour run — see DATA_DOWNLOAD_GUIDE.md
+```
+
+**Ancillary R scripts** (`01_create_emapr_100m_tifs.R`, `01_create_emapr_300m_tifs.R`,
+`01_precompute_emapr_ca.R`, `02_compare_biomass_ranges.R`) build downsampled/display rasters and
+summary stats for the EDA documents (`03_emapr_biomass_exploration.qmd`,
+`04_data_summary.qmd`) and are not required by the fire-extraction pipeline above.
+
+**Planned:** build the unit×year panel from these extraction outputs and run the Callaway-Sant'Anna
+estimator (see Current Status below).
 
 ---
 
@@ -55,78 +239,42 @@ Estimating causal effects of wildfire severity on forest biomass recovery using:
 
 ---
 
-## Literature Context
-
-### Existing Work
-- **Descriptive:** Garcia 2017 (Rim Fire carbon), Reisch 2024, Stenzel 2019
-- **Predictive:** Bright et al. 2019 (random forest, R²>0.7)
-- **Causal attempts:** Ilangakoon et al. 2026 (GAM with space-for-time, lacks formal identification)
-
-### Our Contribution
-- First application of modern staggered DiD and continuous DiD to wildfire-biomass
-- Relaxes untestable conditional independence assumption
-- Leverages natural staggered timing of fires
-
----
-
-## Technical Stack
-
-### Languages
-- **Python:** Google Earth Engine data extraction only
-- **R:** All analysis, visualization, manuscript
-
-### Key R Packages
-- `tidyverse` - data wrangling
-- `sf` - spatial vector data (MTBS fires)
-- `terra` - raster data
-- `did` - Callaway-Sant'Anna implementation
-- `fixest` - fast fixed effects (alternative specifications)
-- `modelsummary` - regression tables
-- `ggplot2` + `tmap` - visualization
-- `FedData` - download NLCD land cover data
-
-### Python Packages (for GEE only)
-- `earthengine-api`
-- `geopandas`
-- `pandas`
-
----
-
 ## Current Status
 
-**Scope note:** The project is currently in a downscaled EDA state — California only, years
-1990/1992/1993. Full Western US coverage and all available years are pending the tasks below.
+**Scope note:** EDA is expanding from a downscaled California-only pilot to the full 11-state
+Western pipeline (scripts `05`–`08`). See `analysis/biomass_within_fires.qmd` and
+`analysis/mtbs_assessment_comparison.qmd` for the current state of that expansion.
 
 ### Completed
 - [x] Download MTBS fire perimeters
-- [x] Set up project structure
-- [x] Install R packages
-- [x] Download eMapR CONUS composites via FTP for years 1990–1998, 2000–2001, 2003–2015
-      (`data/raw/emapr_biomass/`, ~27.7 GB per file)
-- [x] Pre-save CA-clipped rasters for 1990–2003 (`data/processed/emapr_biomass_ca/`)
-- [x] EDA of eMapR biomass for CA, 1990/1992/1993 (`analysis/03_emapr_biomass_exploration.qmd`)
+- [x] Build per-state NLCD 2004 forest masks for CA (`05_prepare_forest_masks_west.R`)
+- [x] Extract eMapR + ctrees AGB within CA fire perimeters, forested pixels, current pipeline
+      (`07`, `08`)
+- [x] Cross-validate current pipeline against retired CA-only pipeline (ctrees r = 1.000; eMapR
+      residual bias open, see `biomass_within_fires.qmd` §7)
+- [x] West-wide crop script (`00_crop_emapr_to_west.R`) crops/masks each locally-available raw
+      eMapR year to the union of all 11 Western states (skip-safe; run again as new raw years land)
 
 ### Incomplete — resume before expanding scope
-- [ ] **FTP download:** Years 1999, 2002, 2016–2023 not yet downloaded (disk space issue).
-      Use `curl.exe --ftp-pasv` loop in `CLAUDE.md §3.1.2`. Re-enable sleep prevention
-      (`powercfg /change standby-timeout-ac 0`) and keep lid open.
-- [ ] **Pre-save CA crops:** `scripts/r/00_crop_emapr_to_ca.R` completed 1990–2003 then
-      failed at 2004 (disk full). Run again once disk space is freed; script skips
-      already-saved years automatically.
-- [ ] **Expand EDA to all available years:** Once CA crops are complete, update
-      `STUDY_YEARS` in `03_emapr_biomass_exploration.qmd` to include all years.
-
-### In Progress
-- [ ] **Exploratory Data Analysis (CURRENT PHASE)**
-  - Understand MTBS data structure
-  - Map fire locations
-  - Examine severity distributions
-  - Identify suitable study region
-  - Determine control site strategy
+- [ ] **Raw eMapR archive → Nextcloud:** years 1997–1999 and 2013–2023 are still not downloaded
+      due to repeated local disk-space failures. Fix in progress: archive raw CONUS composites on
+      Nextcloud instead of the laptop, fetched via `rclone` (installed at
+      `C:\Users\shaht\bin\rclone.exe`, anonymous eMapR FTP remote configured, Nextcloud WebDAV
+      remote still needs credentials). See "Nextcloud Archive (rclone)" in
+      `DATA_DOWNLOAD_GUIDE.md` — do not use the old manual `curl.exe --ftp-pasv` loop for new years.
+- [ ] **Generalize extraction scripts to all 11 states:** flip `STATE_FIPS`/`STATES_TO_RUN` in
+      scripts `05`–`08` from `"CA"` to the full `WESTERN_STATES` list once West-wide eMapR/ctrees
+      rasters exist for the needed years. `scripts/python/04_download_ctrees_west.py` (West-wide
+      ctrees, ~6,800 fires) is written but not yet run — a multi-hour job, see
+      `DATA_DOWNLOAD_GUIDE.md`.
+- [ ] **Root-cause the residual eMapR bias vs. ctrees**
+- [ ] **Resolve MTBS Initial vs. Extended assessment bias** (`mtbs_assessment_comparison.qmd`)
+- [ ] **Expand EDA to all available years:** once West crops are complete for all years, update
+      the relevant `STUDY_YEARS`/year-range params in the analysis `.qmd` files
 
 ### Planned
-- [ ] Extract eMapR biomass from GEE (Python script)
-- [ ] Create panel dataset (combine MTBS + biomass)
+- [ ] Build the unit × year panel (combine MTBS + eMapR + ctrees extraction outputs)
+- [ ] Finalize control-site strategy
 - [ ] Run Callaway-Sant'Anna analysis
 - [ ] Event study plots
 - [ ] Robustness checks
@@ -146,7 +294,6 @@ Estimating causal effects of wildfire severity on forest biomass recovery using:
 ### Panel Structure
 6. How many fires per year (treatment timing)?
 7. What years have sufficient pre-fire data (for parallel trends testing)?
-
 
 ---
 
@@ -176,7 +323,7 @@ Estimating causal effects of wildfire severity on forest biomass recovery using:
 ## File Naming Conventions
 
 ### Scripts
-- Number prefix: `01_`, `02_`, `03_` (execution order)
+- Number prefix: `01_`, `02_`, `03_` (execution order within a pipeline; see Script Pipeline above)
 - Descriptive name: `extract_biomass_gee`, `process_mtbs`
 - Language suffix: `.py` for Python, `.R` for R, `.qmd` for Quarto
 
@@ -191,7 +338,27 @@ Estimating causal effects of wildfire severity on forest biomass recovery using:
 
 ---
 
-## References
+## Coding Style and Organization
+
+- **Commented outline at the top of every script**: Each script should open with a block comment listing the major sections/steps in order (e.g., `# 1. Load data`, `# 2. Filter by severity`, `# 3. Export`). This acts as a table of contents so the logic is legible without reading every line.
+- **Section headers throughout**: Divide scripts into clearly labeled sections that match the outline above.
+- **Inline comments for non-obvious logic**: Explain *why*, not just *what* — especially for spatial operations, parameter choices, and DiD assumptions.
+- **One concern per function**: Helper functions should do one thing and be named to reflect it.
+- **All hardcoded values centralized**: Paths, CRS, date ranges, and filter thresholds belong at the top of each script (or a shared config), not scattered through the body.
+
+---
+
+## Literature Context
+
+### Existing Work
+- **Descriptive:** Garcia 2017 (Rim Fire carbon), Reisch 2024, Stenzel 2019
+- **Predictive:** Bright et al. 2019 (random forest, R²>0.7)
+- **Causal attempts:** Ilangakoon et al. 2026 (GAM with space-for-time, lacks formal identification)
+
+### Our Contribution
+- First application of modern staggered DiD and continuous DiD to wildfire-biomass
+- Relaxes untestable conditional independence assumption
+- Leverages natural staggered timing of fires
 
 ### Methods Papers
 - Callaway & Sant'Anna (2021) - Staggered DiD
@@ -217,13 +384,15 @@ Estimating causal effects of wildfire severity on forest biomass recovery using:
 
 When helping with this project:
 
-1. **R is primary language** - use R for all analysis, Python only for GEE
+1. **R is primary language** - use R for all analysis, Python only for ctrees/GEE data acquisition
 2. **Quarto for reports** - use `.qmd` for exploratory analysis, `.R` for production scripts
 3. **Spatial data:** Use `sf` package for vectors, `terra` for rasters
 4. **Citations:** This is for academic publication, provide proper citations
 5. **Causality:** Be precise about causal language vs. correlational
 6. **Fire ecology:** Assume user knows fire ecology, focus on methods
 7. **Current phase:** Focus on EDA - understanding data before extraction
+8. **Pipeline currency:** Prefer scripts `05`–`08` over the retired `00`–`04` pipeline for any new
+   extraction work (see Script Pipeline above)
 
 ### Common Tasks
 - Mapping fire perimeters
@@ -237,254 +406,3 @@ When helping with this project:
 - Using TWFE without noting bias issues
 - Mixing causal and correlational language
 - Overcomplicated code (keep it readable)
-
-
-# CLAUDE.md
-
-This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
-
-## Project Overview
-
-**BACI-wildfire** is an academic research project (UCSB MESM) analyzing the causal impact of wildfires on forest biomass using a Before-After-Control-Intervention (BACI) / Difference-in-Differences design. The primary causal inference method is the **Callaway-Sant'Anna staggered DiD estimator**, which handles the heterogeneous treatment timing inherent in wildfire occurrence data.
-
-## Technology Stack
-
-- **Python** — biomass data extraction via Google Earth Engine (GEE) API
-- **R** — data processing, panel construction, and causal inference (primary analysis language)
-- **Quarto (.qmd)** — reproducible analysis documents and final manuscript
-
-## Script Pipelines
-
-The two pipelines run independently and their outputs are merged in `03_create_panel.R`.
-
-### R Pipeline — MTBS Investigation (`scripts/r/`)
-
-The R pipeline investigates the MTBS dataset located in `data/mtbs/` to characterize fire events, assign treatment status, and build the analysis panel.
-
-| Script | Purpose |
-|---|---|
-| `config.R` | Project-wide parameters: file paths, CRS, date ranges, filter thresholds |
-| `04_helper_functions.R` | Shared utility functions — sourced at the top of every other R script |
-| `02_process_mtbs.R` | Load MTBS shapefiles, filter by region/severity/size, standardize fields, export clean fire event table |
-| `03_create_panel.R` | Join MTBS fire events with GEE biomass outputs; assign treatment/control; build unit-year panel for DiD |
-
-**Execution order:** `config.R` → `04_helper_functions.R` → `02_process_mtbs.R` → `03_create_panel.R`
-
-### Python Pipeline — Biomass Extraction via LandTrendR (`scripts/python/`)
-
-The Python pipeline uses the **LandTrendR (LT-GEE)** spectral-temporal segmentation algorithm inside Google Earth Engine to extract annual biomass trajectories for fire-affected and control pixels. Reference: https://emapr.github.io/LT-GEE/
-
-| Script | Purpose |
-|---|---|
-| `01_extract_biomass_gee.py` | Authenticate GEE, define AOI from MTBS perimeters, build annual SR image collection, run LandTrendR, export fitted biomass time series to `output/` |
-
-**LandTrendR key inputs and parameters:**
-- Annual surface reflectance image collection (one composite per year, cloud-masked, within a target season)
-- Core parameters to configure in `config.R` / script header:
-  - `maxSegments` — maximum number of fitted temporal segments
-  - `spikeThreshold` (default 0.9) — dampens single-year spectral spikes
-  - `recoveryThreshold` (default 0.25) — prevents implausibly fast post-fire recovery
-  - `pvalThreshold` (default 0.1) — rejects poorly fitting segment models
-  - `minObservationsNeeded` (default 6) — minimum annual observations required to fit
-
-**LandTrendR key GEE API calls:** `buildSRcollection()` → `buildLTcollection()` → `runLT()` → `getSegmentData()`
-
-Analysis documents in `analysis/` follow the same numeric ordering and depend on the processed outputs of both pipelines.
-
-## Data
-
-All raw data lives in `data/` and comes from federal sources — do not modify or delete these files.
-
-| Dataset | Source | Contents |
-|---|---|---|
-| `data/mtbs_fod_pts_data/` | USGS MTBS Program | Fire occurrence point locations (1984–2025, ~30,390 fires) |
-| `data/mtbs_perimeter_data/` | USGS MTBS Program | Fire perimeter polygons |
-| `data/burn_severity_fod_pts_data/` | USGS Burn Severity Program | BSP fire occurrence points |
-| `data/burn_severity_perimeter_data/` | USGS Burn Severity Program | BSP fire perimeter polygons |
-
-All datasets are standard ESRI shapefiles (`.shp`, `.dbf`, `.shx`, `.prj`, `.cpg`) with FGDC metadata (`.xml`). Files are large (100MB+ each) — avoid loading entire datasets into memory; use spatial filters or chunked reads.
-
-## 3. Data Download
-
-### 3.1 Biomass Data
-
-#### 3.1.2 eMapR Biomass (islay.ceoas.oregonstate.edu)
-
-**Server:** `islay.ceoas.oregonstate.edu` (FTP, anonymous login)
-**Remote path:** `STEM_CONUS_BIOMASS/biomassfiaald-v1990-2023-1/`
-**Local destination:** `data/raw/emapr_biomass/` (files confirmed here, not in `data/raw/` directly)
-**Files:** `composite_YYYY_median.tif` — one per year, 1990–2023, ~27.7 GB each (BigTIFF format)
-**CRS:** EPSG:5070 (NAD83 / Conus Albers), 30 m resolution, ~96,815 × 153,809 pixels CONUS-wide
-
-**Important:** Windows `ftp.exe` does not support passive mode and will get `Connection closed by remote host` when running `mget *`. Use `curl.exe` instead (built into Windows 10/11). Do not use `curl` in PowerShell — it is an alias for `Invoke-WebRequest` and will fail; always use `curl.exe` explicitly.
-
-Download all years from a PowerShell prompt opened in `data/raw/emapr_biomass/`:
-
-```powershell
-for ($yr = 1990; $yr -le 2023; $yr++) {
-    $url = "ftp://islay.ceoas.oregonstate.edu/STEM_CONUS_BIOMASS/biomassfiaald-v1990-2023-1/composite_${yr}_median.tif"
-    Write-Host "Downloading $yr..."
-    curl.exe --ftp-pasv --user "anonymous:" -O $url
-}
-```
-
-To resume from a specific year (e.g., if 1990–1991 already downloaded), change the loop start:
-
-```powershell
-for ($yr = 1992; $yr -le 2023; $yr++) { ... }
-```
-
-Monitor download progress in a second PowerShell window:
-
-```powershell
-while ($true) {
-    $files = Get-ChildItem . -Filter "*.tif"
-    $tmp   = Get-ChildItem . -Filter "*.tmp"
-    $totalGB = [math]::Round(($files + $tmp | Measure-Object Length -Sum).Sum / 1GB, 2)
-    Write-Host "$(Get-Date -Format 'HH:mm:ss')  $($files.Count) tif complete | downloading: $($tmp.Name) | total on disk: $totalGB GB"
-    ($files + $tmp) | ForEach-Object { $_.Refresh() }
-    Start-Sleep 15
-}
-```
-
-Prevent the laptop from sleeping during download (required — closing the lid interrupts the transfer):
-
-```powershell
-powercfg /change standby-timeout-ac 0   # disable sleep on AC power
-```
-
-Re-enable after download completes:
-
-```powershell
-powercfg /change standby-timeout-ac 30
-```
-#### 3.1.3 Forest Mask — NLCD 2004
-
-**Source:** USGS MRLC, downloaded via `FedData::get_nlcd()` R package (no login required)
-**Forest classes retained:** 41 Deciduous Forest, 42 Evergreen Forest, 43 Mixed Forest
-**Local destination:** `data/processed/forest_mask/`
-
-| Output file | CRS | Resolution | Matches |
-|---|---|---|---|
-| `nlcd2004_forest_30m_ca.tif` | EPSG:5070 | 30 m | eMapR native |
-| `nlcd2004_forest_100m_ca.tif` | EPSG:4326 | ~100 m | ctrees native |
-
-**Run order (one-time preprocessing, must precede extraction scripts):**
-
-```r
-# Step 1 — download NLCD and build both mask TIFs (~2 min)
-Rscript scripts/r/03_prepare_forest_mask.R
-
-# Step 2 — extract eMapR AGB within fire perimeters, forest pixels only
-# Output: data/processed/emapr_biomass_ca/biomass_fire_polygons_emapr_<years>_100m_forested.csv
-Rscript scripts/r/02_extract_emapr_within_fires.R
-
-# Step 3 — extract ctrees AGB within fire perimeters, forest pixels only
-# Output: data/processed/ctrees/biomass_fire_polygons_ctrees_forested.csv
-Rscript scripts/r/04_extract_ctrees_within_fires.R
-```
-
-Scripts 02 and 03 are crash-safe (append one year at a time) and skip already-completed years. Delete the output CSV to force a full re-extraction.
-
-**Note on terra::extract() inside Quarto on Windows:** Quarto buffers chunk output until the chunk finishes, which makes terra's C++ threading appear frozen. Always run extraction scripts from the R console or via `Rscript`, never inside a Quarto chunk.
-
-```
-Post-download preprocessing (required before rendering QMD):
-
-    The CONUS-wide composites (~27.7 GB each) must be cropped to the study region before use — loading them directly in
-    Quarto causes multi-minute stalls.
-
-    - California EDA: Run scripts/r/00_crop_emapr_to_ca.R once after downloading. Outputs land in
-    data/processed/emapr_biomass_ca/composite_YYYY_ca.tif (~100–300 MB each). analysis/03_emapr_biomass_exploration.qmd
-    reads from these, not the raw CONUS files.
-    - Western US analysis (planned): When the analysis expands to all 11 Western states (AZ, CA, CO, ID, MT, NV, NM, OR,
-     UT, WA, WY), write a separate scripts/r/00_crop_emapr_to_west.R following the same pattern. Expected output ~1 GB
-    per year.
-
-    Both preprocessing scripts are skip-safe — they check for existing output files and only process missing years.
-```
----
-
-## Directory Structure
-
-```
-BACI/
-├── scripts/
-│   ├── python/        # GEE extraction scripts
-│   └── r/             # Data processing & analysis scripts
-│       ├── 00_crop_emapr_to_ca.R          # crop CONUS eMapR TIFs to CA
-│       ├── 01_precompute_emapr_ca.R       # build 100m/300m display TIFs + stats RDS
-│       ├── 02_extract_emapr_within_fires.R # extract eMapR AGB within MTBS perimeters (forested)
-│       ├── 03_prepare_forest_mask.R       # download NLCD 2004, build 30m+100m forest masks
-│       └── 04_extract_ctrees_within_fires.R # extract ctrees AGB within MTBS perimeters (forested)
-├── analysis/          # Quarto exploratory & analysis documents
-├── paper/             # Final manuscript (manuscript.qmd)
-├── data/
-│   ├── raw/           # Untouched downloaded data (MTBS shapefiles, eMapR GeoTIFFs)
-│   └── processed/
-│       ├── ctrees/    # ctrees TIFs, biomass_fire_polygons_ctrees_forested.csv
-│       ├── emapr_biomass_ca/  # CA-clipped eMapR TIFs, stats RDS, forested CSV
-│       └── forest_mask/       # nlcd2004_forest_30m_ca.tif, nlcd2004_forest_100m_ca.tif
-├── figures/           # Output plots and maps
-└── output/            # GEE export outputs (e.g., panel CSVs)
-```
-
-## Coding Style and Organization
-
-- **Commented outline at the top of every script**: Each script should open with a block comment listing the major sections/steps in order (e.g., `# 1. Load data`, `# 2. Filter by severity`, `# 3. Export`). This acts as a table of contents so the logic is legible without reading every line.
-- **Section headers throughout**: Divide scripts into clearly labeled sections that match the outline above.
-- **Inline comments for non-obvious logic**: Explain *why*, not just *what* — especially for spatial operations, parameter choices, and DiD assumptions.
-- **One concern per function**: Helper functions in `04_helper_functions.R` should do one thing and be named to reflect it.
-- **All hardcoded values in `config.R`**: Paths, CRS, date ranges, LandTrendR parameters, and filter thresholds belong in `config.R`, not scattered through scripts.
-
-## Testing and Sanity Checks
-
-Sanity checks and plot QA are not optional — embed them directly in each script/Quarto chunk immediately after the operation they validate. See `EDA_PLAN.md` for the full checklist. Summary of requirements:
-
-### Data Checks (R and Python)
-- Print row counts before and after every filter step to catch silent data loss
-- Use `stopifnot()` (R) or `assert` (Python) to enforce expected field names, CRS, year range, and no duplicate IDs
-- Check geometry validity with `st_is_valid()` before any spatial join; call `st_make_valid()` if needed
-- After GEE export: confirm CSV has expected columns, year range 2000–2023, no all-NA fire records, and values within a plausible index range (e.g., NBR −1 to 1)
-- Confirm all 11 target states (AZ, CA, CO, ID, MT, NV, NM, OR, UT, WA, WY) are present after spatial filtering
-
-### Quick Visual Confirmation (run before saving final figures)
-- After filtering MTBS: plot raw fire locations over state boundaries (`plot(st_geometry(...))`) to confirm spatial extent is correct
-- After GEE export: plot a single fire's biomass time series to confirm the trajectory is non-flat and shows expected post-fire dip
-
-### Plot and Map QA
-Every saved figure must pass these checks before the script is considered complete:
-
-**Legend**
-- Title is human-readable (not a raw column name)
-- Font size ≥ 10pt
-- Colors are colorblind-safe — use `viridis`, `RColorBrewer "Set2"`, or `MetBrewer`
-- Legend does not overlap data; reposition with `theme(legend.position = ...)` if needed
-
-**Map scale** (`fire_locations_map.png` and any spatial figure)
-- Scale bar present: `ggspatial::annotation_scale(location = "bl")` or `tmap::tm_scale_bar()`
-- North arrow present: `ggspatial::annotation_north_arrow()` or `tmap::tm_compass()`
-- Zoom covers all 11 Western states without excess whitespace; set bounding box explicitly if `ggplot2` auto-zoom crops states
-
-**Plot 1 (biomass trend)**
-- X-axis spans 2000–2023 with labeled ticks; Y-axis label includes index name and units
-- Trend line and annual means are visually distinct; no flat line at zero (signals missing data)
-
-**Plot 2 (before/after fire)**
-- X-axis labeled "Years relative to fire"; year 0 marked with vertical dashed line
-- Confidence intervals visible but not wider than the signal
-- Severity strata (if shown) clearly labeled in legend
-
-**Resolution check (R)**
-```r
-# Confirm saved PNG is publication-quality (300 dpi, ~10x7 in → ~3000x2100 px)
-img <- png::readPNG("figures/biomass_trend_over_time.png")
-cat("Image dimensions (px):", dim(img)[2], "x", dim(img)[1], "\n")
-```
-
-## Key Concepts
-
-- **Treatment**: A pixel/unit being burned in a given fire event (identified by MTBS perimeter overlap)
-- **Control**: Unburned pixels in the same region and time period
-- **Running the Callaway-Sant'Anna estimator**: Use the `did` R package (`att_gt()` and `aggte()` functions)
-- **CRS**: All spatial data should be projected to a consistent CRS before analysis — set this in `config.R`

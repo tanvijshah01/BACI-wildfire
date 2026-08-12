@@ -26,6 +26,13 @@ execute:
 # 4. Bias investigation plots
 #    4.1 Fire counts by state — Extended only + Extended/Initial stacked (patchwork)
 #    4.2 Fire count by ignition month — Initial vs Extended (stacked bar)
+#    4.3 % forest cover within fire perimeters — histogram by state x assessment
+#        type (reads cached CSV from scripts/r/05_prepare_forest_masks_west.R +
+#        scripts/r/06_extract_pct_forest_within_fires.R; no raster work here)
+#    4.4 % Extended vs. minimum forest-cover threshold — sweep 0-90% within
+#        whichever state(s) are in the forest-cover cache (currently CA only),
+#        to test whether the Initial/Extended split shifts once low-forest-cover
+#        fires are excluded
 # =============================================================================
 ```
 
@@ -72,14 +79,22 @@ MTBS assigns each fire an `asmnt_type` that records which post-fire Landsat imag
 
 ```{r comparison-table}
 #| code-fold: false
+bullets <- function(...) paste0("&bull; ", c(...), collapse = "<br>")
+
 defn_tbl <- tribble(
-  ~`Assessment Type`, ~`Post-fire image timing`,                                                                         ~`Primary ecosystem`,
-  "Initial",          "Acquired shortly after containment; captures first-order mortality and ash cover (Kolden 2012)", "Grasslands, shrublands",
-  "Extended",         "Acquired the first growing season after fire; allows vegetation to stabilize (Kolden 2012)",     "Forests"
+  ~`Assessment Type`, ~`Post-fire image timing`,                          ~`Primary ecosystem`,       ~`Perimeter quality`,
+  "Initial",          bullets("Shortly after containment",
+                               "Ash/char cover, not regrowth"),            "Grasslands, shrublands",   bullets("Ash/char can mimic bare soil",
+                                                                                                                 "Edges blur before growing season"),
+  "Extended",         bullets("First growing season after fire",
+                               "Vegetation response stabilized"),          "Forests",                  bullets("Green-up sharpens burn/unburn contrast",
+                                                                                                                 "More refined low-severity edges")
 )
 
-knitr::kable(defn_tbl, align = "lll")
+knitr::kable(defn_tbl, align = "llll", escape = FALSE)
 ```
+
+Source: Kolden 2012.
 
 ## 3. Load and Filter MTBS Data
 
@@ -125,11 +140,26 @@ cat("After Wildfire filter:         ", nrow(mtbs_wf), "(removed", n0 - nrow(mtbs
 mtbs_wf <- mtbs_wf |> filter(year >= YEAR_MIN, year <= YEAR_MAX)
 cat("After year filter (2000–2023): ", nrow(mtbs_wf), "\n")
 
-mtbs_study <- st_join(mtbs_wf, western_states_sf["STUSPS"], join = st_intersects, left = FALSE)
-cat("After Western US spatial filter:", nrow(mtbs_study), "\n")
+mtbs_joined <- st_join(mtbs_wf, western_states_sf["STUSPS"], join = st_intersects, left = FALSE)
+cat("After Western US spatial filter (pre-dedup):", nrow(mtbs_joined), "\n")
 
+# st_join() emits one row per polygon-boundary match, so a fire whose perimeter
+# clips into a second state's boundary (e.g. an AZ fire nicking NM) gets counted
+# twice — once per matching state. Replace the spatial match with MTBS's own
+# state attribution (the event_id prefix, e.g. "AZ" in AZ3140510908020160321 —
+# the same trick the CA-only extraction scripts use via startsWith(event_id, "CA"))
+# and dedup to one row per fire. This also drops the rare case of a bordering
+# non-Western state's fire poking into a Western state (event_id prefix outside
+# WESTERN_STATES) — correctly excluded, since it isn't a Western-state fire.
+mtbs_study <- mtbs_joined |>
+  mutate(STUSPS = substr(event_id, 1, 2)) |>
+  filter(STUSPS %in% WESTERN_STATES) |>
+  distinct(event_id, .keep_all = TRUE)
+cat("After state-attribution dedup:     ", nrow(mtbs_study), "\n")
+
+stopifnot("Duplicate event_ids after dedup" = !any(duplicated(mtbs_study$event_id)))
 stopifnot(length(setdiff(WESTERN_STATES, unique(mtbs_study$STUSPS))) == 0)
-cat("All 11 Western states present. ✓\n")
+cat("All 11 Western states present, no duplicate fires. ✓\n")
 
 # Drop geometry for non-spatial summaries
 mtbs_df <- st_drop_geometry(mtbs_study)
@@ -159,12 +189,21 @@ overall_pct <- 100 * sum(state_asmnt$Extended) / sum(state_asmnt$total)
 cat("Overall % Extended (Western US wildfires, 2000–2023):", round(overall_pct, 1), "%\n")
 print(arrange(state_asmnt, desc(Extended)))
 
-# Shared state order: descending by Extended count
+# State order for Plot A: descending by Extended count (its own bar length)
 state_order <- state_asmnt |> arrange(Extended) |> pull(STUSPS)
+
+# State order for Plot B: descending by total count (its own bar length) —
+# using the Extended-only order here would leave Plot B's stacked bars out
+# of sequence whenever a state's Initial count reshuffles its total rank.
+state_order_total <- state_asmnt |> arrange(total) |> pull(STUSPS)
 
 state_long <- mtbs_df |>
   count(STUSPS, asmnt_binary) |>
   mutate(STUSPS = factor(STUSPS, levels = state_order))
+
+state_long_total <- mtbs_df |>
+  count(STUSPS, asmnt_binary) |>
+  mutate(STUSPS = factor(STUSPS, levels = state_order_total))
 
 # -- Plot A: Extended only ---------------------------------------------------
 p_ext_only <- state_long |>
@@ -184,12 +223,12 @@ p_ext_only <- state_long |>
   )
 
 # -- Plot B: Extended + Initial stacked --------------------------------------
-p_stacked <- state_long |>
+p_stacked <- state_long_total |>
   mutate(asmnt_binary = factor(asmnt_binary, levels = c("Initial", "Extended"))) |>
   ggplot(aes(x = n, y = STUSPS, fill = asmnt_binary)) +
   geom_col(alpha = 0.85, width = 0.7) +
   geom_text(
-    data = state_asmnt |> mutate(STUSPS = factor(STUSPS, levels = state_order)),
+    data = state_asmnt |> mutate(STUSPS = factor(STUSPS, levels = state_order_total)),
     aes(x = total, y = STUSPS, label = comma(total), fill = NULL),
     hjust = -0.15, size = 3.3, color = "grey20"
   ) +
@@ -211,7 +250,7 @@ p_state_counts <- (p_ext_only | p_stacked) +
   plot_annotation(
     title    = "Wildfire Counts by State — Extended vs Initial Assessments",
     subtitle = glue("Western US wildfires ≥ 1,000 acres, 2000–2023  (n = {comma(sum(state_asmnt$total))})"),
-    caption  = "States ordered by Extended fire count. Source: USGS MTBS.",
+    caption  = "Each panel ordered independently, highest to lowest, by its own bar length (Extended count / total count). Source: USGS MTBS.",
     theme    = theme(
       plot.title    = element_text(face = "bold", size = 14),
       plot.subtitle = element_text(color = "grey40"),
@@ -298,6 +337,242 @@ ggsave(here("figures/asmnt_counts_by_month.png"),
        plot = p_month_counts, width = 14, height = 6, dpi = 300, bg = "white")
 img_dims <- dim(png::readPNG(here("figures/asmnt_counts_by_month.png")))
 cat("Plot 4.2 saved — dimensions (px):", img_dims[2], "x", img_dims[1], "\n")
+```
+
+---
+
+### 4.3 Forest Cover Within Fire Perimeters
+
+Extended assessments wait for the first growing season and are documented (§2) to
+suit forest ecosystems better than Initial assessments. This section checks that
+directly: for each fire, what % of its perimeter is forest (NLCD 2004, classes 41/42/43
+— Deciduous/Evergreen/Mixed), and does that distribution differ between Initial and
+Extended fires, by state?
+
+Heavy raster work (NLCD download + per-polygon crop/mask) runs outside Quarto — see
+`scripts/r/05_prepare_forest_masks_west.R` and `scripts/r/06_extract_pct_forest_within_fires.R`.
+This section only reads their cached CSV output.
+
+```{r pct-forest-load}
+PCT_FOREST_CSV <- here("data", "processed", "forest_mask", "pct_forest_by_fire_west.csv")
+PCT_FOREST_AVAILABLE <- file.exists(PCT_FOREST_CSV)
+
+if (!PCT_FOREST_AVAILABLE) {
+  message("Forest-cover cache not found (", basename(PCT_FOREST_CSV), ").\n",
+          "Run, from the project root:\n",
+          "  Rscript scripts/r/05_prepare_forest_masks_west.R\n",
+          "  Rscript scripts/r/06_extract_pct_forest_within_fires.R\n",
+          "then re-render this document. Skipping §4.3.")
+} else {
+  pct_forest_raw <- readr::read_csv(PCT_FOREST_CSV, show_col_types = FALSE)
+
+  cat("States in forest-cover cache:", paste(sort(unique(pct_forest_raw$STUSPS)), collapse = ", "), "\n")
+
+  # Sanity: 0 masked pixels signals a CRS/off-grid crop-mask mismatch (the same
+  # bug class documented elsewhere in this repo for eMapR extraction), not a
+  # genuinely 0%-forest fire.
+  n_zero_px <- sum(pct_forest_raw$n_pixels == 0, na.rm = TRUE)
+  if (n_zero_px > 0) {
+    message(n_zero_px, " fire(s) have 0 masked pixels — check CRS/grid alignment before trusting pct_forest for these.")
+  }
+
+  # Restrict to fires also present in this doc's own study cohort (mtbs_df),
+  # so §4.3 always reflects exactly the same population as §4.1/4.2.
+  pct_forest_df <- pct_forest_raw |>
+    filter(event_id %in% mtbs_df$event_id, n_pixels > 0) |>
+    mutate(asmnt_binary = factor(asmnt_binary, levels = c("Initial", "Extended")))
+
+  stopifnot("Duplicate event_id in forest-cover cache" = !any(duplicated(pct_forest_df$event_id)))
+
+  cat("Fires with forest-cover data:", nrow(pct_forest_df), "of", nrow(mtbs_df),
+      glue(" ({round(100 * nrow(pct_forest_df) / nrow(mtbs_df), 1)}%)"), "\n")
+}
+```
+
+```{r plot-pct-forest-hist, fig.height=5}
+if (PCT_FOREST_AVAILABLE && nrow(pct_forest_df) > 0) {
+  p_pct_forest <- ggplot(pct_forest_df, aes(x = pct_forest, fill = asmnt_binary)) +
+    geom_histogram(binwidth = 5, boundary = 0, alpha = 0.75, position = "identity") +
+    scale_fill_manual(values = BINARY_COLORS, name = NULL) +
+    scale_x_continuous(labels = function(x) paste0(x, "%"),
+                        breaks = seq(0, 100, 25)) +
+    scale_y_continuous(labels = comma) +
+    facet_wrap(~STUSPS, scales = "free_y") +
+    labs(
+      title    = "Distribution of % Forest Cover Within Fire Perimeters",
+      subtitle = glue("Western US wildfires, 2000–2023 (n = {comma(nrow(pct_forest_df))}) — ",
+                       "Initial vs Extended assessment"),
+      x        = "% forest cover within fire perimeter (NLCD 2004)",
+      y        = "Number of fires",
+      caption  = "Forest = NLCD 2004 classes 41/42/43 (Deciduous/Evergreen/Mixed). Source: USGS MTBS, USGS MRLC NLCD."
+    ) +
+    theme_minimal(base_size = 12) +
+    theme(
+      plot.title       = element_text(face = "bold", size = 14),
+      plot.subtitle    = element_text(color = "grey40"),
+      plot.caption     = element_text(color = "grey50", size = 9),
+      panel.grid.minor = element_blank(),
+      legend.position  = "top",
+      legend.text      = element_text(size = 10),
+      strip.text       = element_text(face = "bold")
+    )
+
+  print(p_pct_forest)
+
+  ggsave(here("figures/pct_forest_hist_by_state.png"),
+         plot = p_pct_forest, width = 14, height = 5, dpi = 300, bg = "white")
+  img_dims <- dim(png::readPNG(here("figures/pct_forest_hist_by_state.png")))
+  cat("Plot 4.3 saved — dimensions (px):", img_dims[2], "x", img_dims[1], "\n")
+} else {
+  cat("Skipping plot — forest-cover cache not available.\n")
+}
+```
+
+```{r pct-forest-summary-table}
+if (PCT_FOREST_AVAILABLE && nrow(pct_forest_df) > 0) {
+  pct_forest_tbl <- pct_forest_df |>
+    group_by(STUSPS, asmnt_binary) |>
+    summarise(
+      n_fires            = n(),
+      median_pct_forest  = median(pct_forest, na.rm = TRUE),
+      mean_pct_forest    = mean(pct_forest, na.rm = TRUE),
+      .groups = "drop"
+    ) |>
+    arrange(STUSPS, asmnt_binary)
+
+  knitr::kable(
+    pct_forest_tbl, digits = 1,
+    col.names = c("State", "Assessment", "n fires", "Median % forest", "Mean % forest"),
+    caption = "Forest cover within fire perimeters by state and assessment type (NLCD 2004)."
+  )
+} else {
+  cat("Skipping summary table — forest-cover cache not available.\n")
+}
+```
+
+---
+
+### 4.4 % Extended vs. Minimum Forest-Cover Threshold
+
+§4.3 showed the *distribution* of % forest cover differs somewhat by assessment type,
+but didn't test whether restricting to more-forested fires shifts the overall
+Initial/Extended split reported in §4.1. This sweeps a minimum `pct_forest` threshold
+from 0% to 90% and recomputes % Extended among fires at or above that threshold each
+time — if Extended assessments really do concentrate in forested fires (as §2's
+definitions would predict), % Extended should rise as the threshold rises. Sample size
+(fires remaining) is plotted alongside so a rising % Extended at a high threshold isn't
+misread when only a handful of fires remain.
+
+::: {.callout-warning}
+**This section currently covers only the state(s) present in the forest-cover cache,
+not all 11 Western states**
+
+`scripts/r/06_extract_pct_forest_within_fires.R` defaults to `STATES_TO_RUN <- c("CA")`
+and has not yet been re-run for the other 10 states. So unlike §4.1/4.2 (all 11 states),
+§4.3 and this section reflect only the state(s) printed below under "States in
+forest-cover cache." The baseline reference line in the plot below is therefore the
+%-Extended for *that same state subset* at threshold 0 (not §4.1's all-11-state
+baseline of `r round(overall_pct, 1)`%) — otherwise the comparison would conflate
+"restricting to CA" with "restricting to forest." Re-run `05_prepare_forest_masks_west.R`
++ `06_extract_pct_forest_within_fires.R` with the other states added to
+`STATES_TO_RUN` before generalizing this trend beyond CA.
+:::
+
+```{r pct-forest-threshold-sweep}
+if (PCT_FOREST_AVAILABLE && nrow(pct_forest_df) > 0) {
+  THRESHOLDS <- seq(0, 90, by = 5)
+
+  sweep_tbl <- purrr::map_dfr(THRESHOLDS, function(th) {
+    subset  <- pct_forest_df |> filter(pct_forest >= th)
+    n_tot   <- nrow(subset)
+    n_ext   <- sum(subset$asmnt_binary == "Extended")
+    tibble(
+      threshold    = th,
+      n_fires      = n_tot,
+      n_extended   = n_ext,
+      pct_extended = if (n_tot > 0) 100 * n_ext / n_tot else NA_real_
+    )
+  })
+
+  # Baseline for reference: % Extended at threshold 0 WITHIN the same state
+  # subset the sweep uses (pct_forest_df), not §4.1's all-11-state overall_pct
+  # — comparing to the all-state baseline would conflate "restricted to the
+  # cached state(s)" with "restricted by forest cover" (see callout above).
+  cache_states      <- sort(unique(pct_forest_df$STUSPS))
+  baseline_pct_ext  <- sweep_tbl$pct_extended[sweep_tbl$threshold == 0]
+
+  stopifnot(
+    "n_fires must be non-increasing as threshold rises" =
+      all(diff(sweep_tbl$n_fires) <= 0),
+    "pct_extended must stay within [0, 100]" =
+      all(sweep_tbl$pct_extended[!is.na(sweep_tbl$pct_extended)] >= 0 &
+          sweep_tbl$pct_extended[!is.na(sweep_tbl$pct_extended)] <= 100)
+  )
+
+  cat("States in forest-cover cache used by this sweep:", paste(cache_states, collapse = ", "), "\n")
+
+  cat("Threshold sweep (0-90% by 5):\n")
+  print(sweep_tbl, n = Inf)
+} else {
+  cat("Skipping threshold sweep — forest-cover cache not available.\n")
+}
+```
+
+```{r plot-pct-forest-threshold-sweep, fig.height=8}
+if (PCT_FOREST_AVAILABLE && nrow(pct_forest_df) > 0) {
+  p_sweep_pct <- ggplot(sweep_tbl, aes(x = threshold, y = pct_extended)) +
+    geom_hline(yintercept = baseline_pct_ext, linetype = "dashed", color = "grey50") +
+    annotate("text", x = 0, y = baseline_pct_ext, label = "no forest filter",
+             hjust = 0, vjust = -0.6, size = 3.2, color = "grey40") +
+    geom_line(color = BINARY_COLORS["Extended"], linewidth = 0.9) +
+    geom_point(color = BINARY_COLORS["Extended"], size = 2) +
+    scale_x_continuous(labels = function(x) paste0(x, "%"), breaks = THRESHOLDS) +
+    scale_y_continuous(labels = function(x) paste0(x, "%")) +
+    labs(
+      title = glue("% Extended, by Minimum Forest-Cover Threshold ({paste(cache_states, collapse = ', ')})"),
+      x     = NULL,
+      y     = "% Extended"
+    ) +
+    theme_minimal(base_size = 12) +
+    theme(
+      plot.title       = element_text(face = "bold", size = 13),
+      panel.grid.minor = element_blank(),
+      axis.text.x      = element_blank()
+    )
+
+  p_sweep_n <- ggplot(sweep_tbl, aes(x = threshold, y = n_fires)) +
+    geom_col(fill = "grey60", width = 3.5) +
+    geom_text(aes(label = comma(n_fires)), vjust = -0.4, size = 2.8, color = "grey30") +
+    scale_x_continuous(labels = function(x) paste0(x, "%"), breaks = THRESHOLDS) +
+    scale_y_continuous(labels = comma, expand = expansion(mult = c(0, 0.15))) +
+    labs(
+      title = "Fires Remaining at Threshold",
+      x     = "Minimum % forest cover within fire perimeter",
+      y     = "n fires"
+    ) +
+    theme_minimal(base_size = 12) +
+    theme(
+      plot.title       = element_text(face = "bold", size = 12),
+      panel.grid.minor = element_blank()
+    )
+
+  p_sweep <- p_sweep_pct / p_sweep_n +
+    plot_layout(heights = c(2, 1)) +
+    plot_annotation(
+      caption = glue("{paste(cache_states, collapse = ', ')} only ({comma(nrow(pct_forest_df))} fires with forest-cover data) — ",
+                      "see callout above. Dashed line = % Extended with no forest filter, same state(s) ({round(baseline_pct_ext, 1)}%)."),
+      theme = theme(plot.caption = element_text(color = "grey50", size = 9))
+    )
+
+  print(p_sweep)
+
+  ggsave(here("figures/pct_extended_by_forest_threshold.png"),
+         plot = p_sweep, width = 10, height = 8, dpi = 300, bg = "white")
+  img_dims <- dim(png::readPNG(here("figures/pct_extended_by_forest_threshold.png")))
+  cat("Plot 4.4 saved — dimensions (px):", img_dims[2], "x", img_dims[1], "\n")
+} else {
+  cat("Skipping plot — forest-cover cache not available.\n")
+}
 ```
 
 ---

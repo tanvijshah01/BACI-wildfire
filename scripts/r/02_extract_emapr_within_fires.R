@@ -4,7 +4,12 @@
 # One-time preprocessing: extract mean eMapR AGB within MTBS fire perimeters
 # for all available ~100 m CA TIFs and cache results to CSV.
 #
-# Run ONCE from the project root before rendering 05_biomass_within_fires.qmd:
+# Retired: this feeds analysis/biomass_within_fires_old.qmd only, which used the
+# original CA-only forest-mask pipeline (03_prepare_forest_mask.R). The current
+# pipeline is 07_extract_emapr_within_fires_new.R + 05_prepare_forest_masks_west.R,
+# feeding analysis/biomass_within_fires.qmd.
+#
+# Run ONCE from the project root before rendering biomass_within_fires_old.qmd:
 #   Rscript scripts/r/02_extract_emapr_within_fires.R
 #
 # Why a separate script: terra::extract() on Windows can appear frozen inside
@@ -174,4 +179,4 @@ final      <- readr::read_csv(EMAPR_FIRE_CSV, show_col_types = FALSE)
 total_elapsed <- round((proc.time() - t0)[["elapsed"]] / 60, 1)
 cat(glue("\nDone. {nrow(final)} rows in {basename(EMAPR_FIRE_CSV)}",
          " ({length(unique(final$year))} years) — {total_elapsed} min this run.\n"))
-cat("You can now render 05_biomass_within_fires.qmd.\n")
+cat("You can now render analysis/biomass_within_fires_old.qmd.\n")
