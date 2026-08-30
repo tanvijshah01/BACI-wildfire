@@ -4,6 +4,54 @@ Working notes on decisions, findings, and open questions. Add entries in reverse
 
 ---
 
+## 2026-08-12 — ctrees West-wide download in progress, paused for the night
+
+`scripts/python/04_download_ctrees_west.py` (generalizes `03_download_ctrees_ca.py` to
+the 11-state West bbox, ~4.1x CA's pixel area, ~6,800 fires) is partway through. Progress
+as of tonight:
+
+- **Part A** (coarsened 1km NetCDF): ✅ complete — `ctrees_biomass_west_1km.nc` (315 MB)
+- **Part B** (fire-polygon CSV): ✅ complete — `biomass_fire_polygons_ctrees_west.csv`
+  (177,242 records = 6,817 fires × 26 years, checks out exactly)
+- **Part C** (26 annual ~100m GeoTIFFs): **18/26 done** (2000–2017, ~730 MB each). Years
+  **2018–2025 still need to run.**
+
+**Resume command** (from project root, sleep-safe now — see below):
+```powershell
+& "C:\Users\shaht\anaconda3\python.exe" "scripts\python\04_download_ctrees_west.py" *>> "data\processed\ctrees\04_download_ctrees_west_log.txt"
+```
+Uses the `anaconda3` base env, not the `wildfire` conda env (which lacks `arraylake`/
+`geopandas`/`rasterio`). Both Parts A and B will skip instantly (already done); Part C
+resumes at 2018.
+
+**Root cause of 3 interrupted runs tonight:** the laptop's **lid-close action** was
+triggering Modern Standby regardless of the `standby-timeout-ac` idle setting (which was
+already disabled) — closing the lid kills the background process outright, same failure
+mode already documented for the eMapR west-crop. Fixed by unhiding and setting the lid
+power setting directly:
+```powershell
+powercfg -attributes SUB_BUTTONS LIDACTION -ATTRIB_HIDE
+powercfg /setacvalueindex SCHEME_CURRENT SUB_BUTTONS LIDACTION 0   # 0 = Do nothing
+powercfg /setactive SCHEME_CURRENT
+```
+Confirmed via `powercfg /query SCHEME_CURRENT SUB_BUTTONS` → `Current AC Power Setting
+Index: 0x00000000`. This should already be in place — verify it's still set before
+walking away from a future long run, since `powercfg` state doesn't survive an OS
+reinstall/reset.
+
+**One more finding from tonight, already fixed in the script:** Part B originally had no
+per-year checkpointing (only Part A did) — the second kill lost 16/26 years of Part B
+progress because it held everything in memory and wrote the CSV once at the end. Part B
+now checkpoints to `data/processed/ctrees/_west_fireagb_scratch/` per year, same pattern
+as Part A's `_west_1km_scratch/`. Part C was already safe (checks each year's TIF file
+before writing) — but note that check is existence-only, not validity: the 3rd kill left
+a **truncated `ctrees_2018_west_100m.tif`** (15.6 MB instead of ~730 MB) that had to be
+manually deleted before resuming, since Part C would have silently treated it as done. If
+a run gets killed again mid-Part-C, check the last-written year's file size against the
+others (~730 MB) before trusting it and resuming.
+
+---
+
 ## 2026-05-13 — Fire polygon extraction: shapely thinning replaced by rasterio rasterization
 
 Part B of `scripts/python/03_download_ctrees_ca.py` extracts mean Ctrees AGB within each MTBS CA fire polygon for every year. Two approaches were tried:

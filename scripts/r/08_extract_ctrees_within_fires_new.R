@@ -217,13 +217,21 @@ for (i in seq_along(years_to_do)) {
     poly_4326 <- vect_yr[j]
     st_j      <- vect_yr$STUSPS[j]
 
-    r_c        <- terra::crop(r, poly_4326, snap = "out")
-    r_ext_5070 <- terra::project(terra::as.polygons(r_c, extent = TRUE), "EPSG:5070")
-    fm_c_5070  <- terra::crop(forest_masks[[st_j]], terra::ext(r_ext_5070) + 200, snap = "out")
-    fm_c_4326  <- terra::project(fm_c_5070, r_c, method = "near")
-    r_masked   <- terra::mask(r_c, fm_c_4326, maskvalues = 0)
-    vals       <- terra::values(r_masked, na.rm = TRUE)
-    agb_vec[j] <- if (length(vals) > 0L) mean(vals) else NA_real_
+    # A single problematic polygon (transient I/O hiccup, GDAL block-read
+    # failure, a genuinely degenerate MTBS geometry, etc.) skips to NA with a
+    # logged event_id instead of halting a multi-hour, many-state run.
+    agb_vec[j] <- tryCatch({
+      r_c        <- terra::crop(r, poly_4326, snap = "out")
+      r_ext_5070 <- terra::project(terra::as.polygons(r_c, extent = TRUE), "EPSG:5070")
+      fm_c_5070  <- terra::crop(forest_masks[[st_j]], terra::ext(r_ext_5070) + 200, snap = "out")
+      fm_c_4326  <- terra::project(fm_c_5070, r_c, method = "near")
+      r_masked   <- terra::mask(r_c, fm_c_4326, maskvalues = 0)
+      vals       <- terra::values(r_masked, na.rm = TRUE)
+      if (length(vals) > 0L) mean(vals) else NA_real_
+    }, error = function(e) {
+      cat(glue("    [WARN] {vect_yr$event_id[j]} ({yr}) failed: {conditionMessage(e)} — set NA\n"))
+      NA_real_
+    })
   }
 
   elapsed <- round((proc.time() - t1)[["elapsed"]], 1)

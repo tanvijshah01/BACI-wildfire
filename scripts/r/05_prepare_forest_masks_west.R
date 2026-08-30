@@ -51,7 +51,7 @@ here::i_am("scripts/r/05_prepare_forest_masks_west.R")
 WESTERN_STATES <- c("AZ", "CA", "CO", "ID", "MT", "NV", "NM", "OR", "UT", "WA", "WY")
 
 # Override for a pilot run, e.g.: STATES_TO_RUN <- c("WY", "CO")
-STATES_TO_RUN <- c("CA")
+STATES_TO_RUN <- c("CA", "WY")
 
 MASK_DIR   <- here("data", "processed", "forest_mask")
 CTREES_DIR <- here("data", "processed", "ctrees")
@@ -60,6 +60,17 @@ dir.create(file.path(MASK_DIR, "nlcd_raw"), recursive = TRUE, showWarnings = FAL
 
 FOREST_CLASSES <- c(41L, 42L, 43L)   # Deciduous, Evergreen, Mixed Forest
 rcl <- matrix(c(FOREST_CLASSES, rep(1L, length(FOREST_CLASSES))), ncol = 2)
+
+# A writeRaster() interrupted mid-write (e.g. laptop sleep — the same failure
+# mode already seen with 00_crop_emapr_to_west.R) can leave a GeoTIFF with a
+# correct header/extent/CRS but zero actual pixel data. file.exists() alone
+# doesn't catch this, and these are 0/1 masks where every cell should be
+# valid (never NA) — so any all-NA file is unambiguously corrupt. Caught this
+# in practice on nlcd2004_forestfrac_30m_wy.tif (2026-08-12): correct 17066 x
+# 20554 / EPSG:5070 header, 100% of cells NA.
+raster_is_valid <- function(path) {
+  terra::global(terra::rast(path), "notNA")[[1]] > 0
+}
 
 cat("States to build:", paste(STATES_TO_RUN, collapse = ", "), "\n\n")
 
@@ -76,13 +87,21 @@ for (st in STATES_TO_RUN) {
                             full.names = TRUE)[1]
   need_100m  <- !file.exists(out_100m) && !is.na(ctrees_tif)
 
-  if (file.exists(out_30m) && file.exists(out_90m) && (file.exists(out_100m) || is.na(ctrees_tif))) {
+  ok_30m  <- file.exists(out_30m)  && raster_is_valid(out_30m)
+  ok_90m  <- file.exists(out_90m)  && raster_is_valid(out_90m)
+  ok_100m <- file.exists(out_100m) && raster_is_valid(out_100m)
+
+  if (ok_30m && ok_90m && (ok_100m || is.na(ctrees_tif))) {
     cat(glue("[SKIP] {st} — 30 m/90 m/100 m masks already built (or 100 m unavailable, no ctrees template).\n"))
     next
   }
 
   # ── 30 m mask — download (or reuse cached NLCD) + reclassify ────────────────
-  if (file.exists(out_30m)) {
+  if (file.exists(out_30m) && !ok_30m) {
+    cat(glue("[REBUILD] {st} — {basename(out_30m)} exists but is corrupt (all-NA); deleting and rebuilding.\n"))
+    file.remove(out_30m)
+  }
+  if (ok_30m) {
     cat(glue("[SKIP] {st} — {basename(out_30m)} already exists.\n"))
     mask_30m <- terra::rast(out_30m)
   } else {
@@ -123,6 +142,10 @@ for (st in STATES_TO_RUN) {
   # ── 90 m mask — EPSG:5070, modal-aggregated (matches eMapR 100m TIF's ─────────
   # native resolution closely enough for 07's crop+resample step; mirrors old
   # 03_prepare_forest_mask.R §4, but 0/1-encoded like everything else here).
+  if (file.exists(out_90m) && !raster_is_valid(out_90m)) {
+    cat(glue("[REBUILD] {st} — {basename(out_90m)} exists but is corrupt (all-NA); deleting and rebuilding.\n"))
+    file.remove(out_90m)
+  }
   if (file.exists(out_90m)) {
     cat(glue("[SKIP] {st} — {basename(out_90m)} already exists.\n"))
   } else {
@@ -141,6 +164,10 @@ for (st in STATES_TO_RUN) {
   # Mirrors old 03_prepare_forest_mask.R §5. Requires a ctrees 100m TIF for
   # this state as the target grid — skip (not fail) if none exists yet, since
   # ctrees downloads currently only cover CA.
+  if (file.exists(out_100m) && !raster_is_valid(out_100m)) {
+    cat(glue("[REBUILD] {st} — {basename(out_100m)} exists but is corrupt (all-NA); deleting and rebuilding.\n"))
+    file.remove(out_100m)
+  }
   if (file.exists(out_100m)) {
     cat(glue("[SKIP] {st} — {basename(out_100m)} already exists.\n"))
   } else if (is.na(ctrees_tif)) {

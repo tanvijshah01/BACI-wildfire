@@ -1,0 +1,435 @@
+---
+title: "West Pipeline Sanity Check"
+subtitle: "Regression validation for the 2026-08-12 multi-state rewrite of scripts 05-08"
+date: today
+format:
+  html:
+    embed-resources: true
+    toc: true
+    toc-depth: 3
+    code-fold: true
+    fig-width: 10
+    fig-height: 6
+    theme: flatly
+params:
+  pct_diff_flag_threshold: 5    # % — fires above this in either dataset are flagged for review
+execute:
+  warning: false
+  message: false
+  cache: false
+---
+
+This document is a **gate, not an EDA document**: before spending more time cropping new
+eMapR years (`00_crop_emapr_to_west.R`) or scaling extraction to more states, it checks
+whether the 2026-08-12 rewrite of `05`-`08` (multi-state `STATES_TO_RUN`, per-polygon
+eMapR extraction from the native West crop, shared West-wide ctrees TIF) actually
+reproduces the previously-validated CA-only pipeline, and whether the new
+multi-state machinery (event_id-prefix MTBS dedup, per-state forest masks) behaves
+sanely on a second state (WY).
+
+It answers four questions with real data already on disk today — it does **not**
+require the in-progress West eMapR crop (`00`, currently 1990-1993 only) or the West
+ctrees download to be complete, since it re-derives eMapR/ctrees values from CA's
+existing raw 30 m / precomputed ~100 m TIFs rather than the West-wide files.
+
+```{r outline}
+# =============================================================================
+# SCRIPT OUTLINE
+# 1. Setup — load scripts/r/validate_west_pipeline.R's cached CSV outputs
+# 2. MTBS dedup — CA, old single-state filter vs new event_id-prefix filter
+# 3. MTBS dedup smoke test — WY (new filter only, no CA baseline to compare to)
+# 4. Forest mask validity — CA + WY, all tiers
+# 5. eMapR extraction method — old (precomputed ~90m TIF) vs new (per-polygon
+#    native-30m crop + aggregate) — a real methodology change, some drift expected
+# 6. ctrees extraction method — old (per-state TIF) vs new (shared-file code
+#    path) — math is UNCHANGED, should match almost exactly; drift here is a bug
+# 7. Verdict — go/no-go before scaling to more years/states
+# =============================================================================
+```
+
+---
+
+## 1. Setup
+
+```{r setup}
+library(here)
+library(dplyr)
+library(readr)
+library(ggplot2)
+library(scales)
+library(glue)
+library(knitr)
+library(tidyr)
+
+options(knitr.kable.NA = "—")
+here::i_am("analysis/west_pipeline_sanity_check.qmd")
+
+VAL_DIR <- here("data", "processed", "validation")
+PCT_FLAG <- params$pct_diff_flag_threshold
+
+need <- function(path) {
+  if (!file.exists(path)) {
+    stop("Missing: ", basename(path), "\nRun: Rscript scripts/r/validate_west_pipeline.R")
+  }
+  path
+}
+
+theme_baci <- theme_minimal(base_size = 12) +
+  theme(
+    plot.title       = element_text(face = "bold", size = 14),
+    plot.subtitle    = element_text(color = "grey40", size = 11),
+    plot.caption     = element_text(color = "grey50", size = 9),
+    panel.grid.minor = element_blank()
+  )
+```
+
+---
+
+## 2. MTBS Dedup — CA: Old Filter vs New Filter
+
+The old `07`/`08` selected a state's study fires with `st_filter(ca_5070)` (perimeter
+intersection with the state boundary) followed by `startsWith(event_id, "CA")`. The new
+`06`/`07`/`08` (2026-08-12) instead spatially joins to the union of all 11 Western states,
+then treats the MTBS `event_id`'s own state prefix as authoritative and deduplicates on
+it — this was a deliberate fix for border fires (see the pending diagnostic noted in
+`biomass_within_fires.qmd` §7: ctrees matched 272 study fires, eMapR only 234, suspected
+to be border fires losing eMapR data to the old CA-polygon `st_filter()`). This section
+checks that the fix actually changed only what it was meant to.
+
+```{r dedup-load}
+dedup <- readr::read_csv(need(file.path(VAL_DIR, "mtbs_dedup_comparison_ca.csv")),
+                         show_col_types = FALSE)
+
+cat("Old-approach CA fires: ", sum(dedup$in_old), "\n")
+cat("New-approach CA fires: ", sum(dedup$in_new), "\n")
+cat("In both:               ", sum(dedup$in_old & dedup$in_new), "\n")
+cat("Old-only (dropped):    ", sum(dedup$in_old & !dedup$in_new), "\n")
+cat("New-only (added):      ", sum(!dedup$in_old & dedup$in_new), "\n")
+```
+
+### 2.1 Fires Where Old and New Disagree
+
+```{r dedup-table}
+disagree <- dedup |>
+  dplyr::filter(in_old != in_new) |>
+  dplyr::mutate(
+    status = dplyr::if_else(in_old, "Dropped by new filter", "Added by new filter"),
+    fire_year = substr(ig_date, 1, 4)
+  ) |>
+  dplyr::select(event_id, status, fire_year, burnbndac) |>
+  dplyr::arrange(status, dplyr::desc(burnbndac))
+
+if (nrow(disagree) == 0) {
+  cat("No disagreements — old and new filters selected the exact same CA fire set.\n")
+} else {
+  knitr::kable(
+    disagree,
+    col.names = c("Event ID", "Status", "Fire year", "Acres"),
+    format.args = list(big.mark = ","),
+    caption = glue("{nrow(disagree)} fire(s) where the old and new dedup logic disagree.")
+  )
+}
+```
+
+::: {.callout-note}
+**How to read this table**
+
+"Added by new filter" fires are almost certainly the border-fire fix working as intended
+— MTBS perimeters that clip into CA but whose authoritative `event_id` prefix is a
+neighboring state (or vice versa) were previously mis-attributed by the old
+perimeter-intersection `st_filter()`. "Dropped by new filter" fires deserve closer
+inspection — if any appear, check whether they're genuinely non-CA fires the old logic
+mis-included, not fires the new logic is incorrectly excluding.
+:::
+
+---
+
+## 3. MTBS Dedup Smoke Test — WY
+
+WY has no old-pipeline baseline to compare against (the retired `00`-`04` pipeline was
+CA-only), so this just checks the new dedup logic produces a well-formed fire set for a
+second state.
+
+```{r wy-smoke-test}
+wy <- readr::read_csv(need(file.path(VAL_DIR, "wy_mtbs_smoke_test.csv")),
+                      show_col_types = FALSE)
+
+n_dup    <- sum(duplicated(wy$event_id))
+n_badpfx <- sum(!startsWith(wy$event_id, "WY"))
+
+cat("WY study fires (", paste(range(wy$year), collapse = "-"), "):", nrow(wy), "\n")
+cat("Duplicate event_ids:      ", n_dup, "\n")
+cat("Wrong event_id prefix:    ", n_badpfx, "\n")
+cat(if (nrow(wy) > 0 && n_dup == 0 && n_badpfx == 0) "PASS" else "FAIL",
+    "— WY fire set is well-formed\n")
+
+knitr::kable(
+  wy |> dplyr::count(year, name = "n_fires") |> dplyr::arrange(year),
+  col.names = c("Fire year", "N fires"),
+  caption = "WY study fires by ignition year (new dedup logic)."
+)
+```
+
+---
+
+## 4. Forest Mask Validity — CA + WY
+
+Formalizes the corruption check that caught `nlcd2004_forestfrac_30m_wy.tif` dead
+(correct header, 100% NA cells) on 2026-08-12 — `05_prepare_forest_masks_west.R` now
+runs this automatically before treating an existing mask file as reusable, but this
+table is a standing record for every state/tier this pipeline currently has.
+
+```{r mask-validity}
+masks <- readr::read_csv(need(file.path(VAL_DIR, "forest_mask_validity_report.csv")),
+                         show_col_types = FALSE)
+
+masks_display <- masks |>
+  dplyr::mutate(
+    status = dplyr::case_when(
+      !exists         ~ "missing",
+      !valid          ~ "CORRUPT",
+      TRUE            ~ paste0(pct_forest, "% forest")
+    )
+  ) |>
+  dplyr::select(state, tier, status) |>
+  tidyr::pivot_wider(names_from = tier, values_from = status)
+
+knitr::kable(
+  masks_display,
+  caption = "Forest mask status by state x resolution tier. 100m tier requires a per-state ctrees TIF template and is not needed by 07/08 (only display maps) — \"missing\" there is expected until West-wide ctrees data lands."
+)
+
+if (any(!masks$valid %in% TRUE & masks$exists)) {
+  warning("At least one forest mask file exists but is corrupt — re-run 05_prepare_forest_masks_west.R.")
+}
+```
+
+---
+
+## 5. eMapR Extraction Method — Old vs New
+
+**This comparison tests a real methodology change.** The old `07` read a precomputed,
+whole-CA ~90 m TIF (30 m → 90 m via a single `aggregate()` call over the full state,
+then per-polygon resample+mask). The new `07` crops the *native 30 m* West-wide TIF to
+each fire polygon first, then aggregates just that small crop to ~90 m. These are not
+guaranteed to produce identical numbers — different aggregation block boundaries at each
+polygon's edge is expected to introduce small, name-of-the-game differences. This section
+checks that those differences are small and not systematically biased, not that they're
+exactly zero (§6 is the exactly-zero check).
+
+```{r emapr-diff-load}
+emapr_diff_path <- file.path(VAL_DIR, "emapr_method_comparison_ca_diff.csv")
+if (!file.exists(emapr_diff_path)) {
+  message("eMapR comparison not yet available — validate_west_pipeline.R may still be ",
+          "running, or the old-pipeline cache was missing. Skipping this section.")
+  emapr_diff <- NULL
+} else {
+  emapr_diff <- readr::read_csv(emapr_diff_path, show_col_types = FALSE) |>
+    dplyr::filter(!is.na(pct_diff))
+  cat("Fire x year pairs compared:", nrow(emapr_diff), "\n")
+  cat("Median % diff (new - old): ", round(median(emapr_diff$pct_diff), 2), "%\n")
+  cat("Mean |% diff|:             ", round(mean(abs(emapr_diff$pct_diff)), 2), "%\n")
+  cat("Max |% diff|:              ", round(max(abs(emapr_diff$pct_diff)), 2), "%\n")
+  cat(glue("Pairs exceeding ±{PCT_FLAG}%:      "),
+      sum(abs(emapr_diff$pct_diff) > PCT_FLAG), "\n")
+}
+```
+
+### 5.1 Old vs New — Scatter
+
+```{r emapr-scatter, fig.height=6}
+if (is.null(emapr_diff)) {
+  message("Skipping — no data.")
+} else {
+  r_val <- round(cor(emapr_diff$agb_mean_mgha, emapr_diff$agb_new, use = "complete.obs"), 4)
+  xy_max <- max(emapr_diff$agb_mean_mgha, emapr_diff$agb_new, na.rm = TRUE) * 1.05
+
+  ggplot(emapr_diff, aes(x = agb_mean_mgha, y = agb_new)) +
+    geom_abline(slope = 1, intercept = 0, linetype = "dashed", color = "grey50") +
+    geom_point(alpha = 0.4, size = 1.5, color = "#d6604d") +
+    annotate("text", x = 0.05 * xy_max, y = 0.92 * xy_max,
+             label = glue("r = {r_val}\nn = {nrow(emapr_diff)}"),
+             hjust = 0, size = 3.5) +
+    scale_x_continuous(limits = c(0, xy_max), labels = scales::comma_format()) +
+    scale_y_continuous(limits = c(0, xy_max), labels = scales::comma_format()) +
+    coord_fixed() +
+    labs(
+      title = "eMapR AGB — Old Method vs New Method",
+      subtitle = "Dashed line = perfect agreement",
+      x = "Old (precomputed ~90m TIF)",
+      y = "New (per-polygon native-30m crop + aggregate)"
+    ) +
+    theme_baci
+}
+```
+
+### 5.2 Distribution of % Difference
+
+```{r emapr-hist, fig.height=4}
+if (is.null(emapr_diff)) {
+  message("Skipping — no data.")
+} else {
+  ggplot(emapr_diff, aes(x = pct_diff)) +
+    geom_histogram(bins = 50, fill = "#d6604d", alpha = 0.75) +
+    geom_vline(xintercept = 0, linetype = "dashed", color = "grey30") +
+    labs(
+      title = "eMapR: % Difference (New - Old) / Old",
+      x = "% difference", y = "N fire x year pairs"
+    ) +
+    theme_baci
+}
+```
+
+### 5.3 Largest Outliers
+
+```{r emapr-outliers}
+if (is.null(emapr_diff)) {
+  message("Skipping — no data.")
+} else {
+  outliers <- emapr_diff |>
+    dplyr::arrange(dplyr::desc(abs(pct_diff))) |>
+    dplyr::slice_head(n = 15) |>
+    dplyr::select(event_id, year, agb_mean_mgha, agb_new, pct_diff)
+
+  knitr::kable(
+    outliers,
+    col.names = c("Event ID", "Year", "Old AGB", "New AGB", "% diff"),
+    digits = c(0, 0, 1, 1, 1),
+    caption = "15 largest |% difference| fire x year pairs, eMapR old vs new."
+  )
+}
+```
+
+---
+
+## 6. ctrees Extraction Method — Old vs New
+
+**This comparison should show near-zero difference.** Unlike eMapR, the ctrees
+extraction math in `08` is unchanged by the 2026-08-12 rewrite — the crop → project →
+mask logic is identical to before; only the source file path (per-state TIF vs the
+eventual shared West-wide TIF) and the mask-lookup mechanism (single variable vs a
+per-state named list) changed. This re-runs it against the SAME `ctrees_YYYY_ca_100m.tif`
+files the old pipeline used, so any drift here is a refactor bug, not a methodology
+difference — it needs to be root-caused, not just noted, before trusting `08`'s output
+once the West ctrees TIFs land.
+
+```{r ctrees-diff-load}
+ctrees_diff_path <- file.path(VAL_DIR, "ctrees_method_comparison_ca_diff.csv")
+if (!file.exists(ctrees_diff_path)) {
+  message("ctrees comparison not yet available — validate_west_pipeline.R may still be ",
+          "running, or the old-pipeline cache was missing. Skipping this section.")
+  ctrees_diff <- NULL
+} else {
+  ctrees_diff <- readr::read_csv(ctrees_diff_path, show_col_types = FALSE) |>
+    dplyr::filter(!is.na(pct_diff))
+  cat("Fire x year pairs compared:", nrow(ctrees_diff), "\n")
+  cat("Median % diff (new - old): ", round(median(ctrees_diff$pct_diff), 4), "%\n")
+  cat("Mean |% diff|:             ", round(mean(abs(ctrees_diff$pct_diff)), 4), "%\n")
+  cat("Max |% diff|:              ", round(max(abs(ctrees_diff$pct_diff)), 4), "%\n")
+  cat(glue("Pairs exceeding ±{PCT_FLAG}%:      "),
+      sum(abs(ctrees_diff$pct_diff) > PCT_FLAG), "\n")
+}
+```
+
+### 6.1 Old vs New — Scatter
+
+```{r ctrees-scatter, fig.height=6}
+if (is.null(ctrees_diff)) {
+  message("Skipping — no data.")
+} else {
+  r_val <- round(cor(ctrees_diff$agb_mean_mgha, ctrees_diff$agb_new, use = "complete.obs"), 6)
+  xy_max <- max(ctrees_diff$agb_mean_mgha, ctrees_diff$agb_new, na.rm = TRUE) * 1.05
+
+  ggplot(ctrees_diff, aes(x = agb_mean_mgha, y = agb_new)) +
+    geom_abline(slope = 1, intercept = 0, linetype = "dashed", color = "grey50") +
+    geom_point(alpha = 0.4, size = 1.5, color = "#2166ac") +
+    annotate("text", x = 0.05 * xy_max, y = 0.92 * xy_max,
+             label = glue("r = {r_val}\nn = {nrow(ctrees_diff)}"),
+             hjust = 0, size = 3.5) +
+    scale_x_continuous(limits = c(0, xy_max), labels = scales::comma_format()) +
+    scale_y_continuous(limits = c(0, xy_max), labels = scales::comma_format()) +
+    coord_fixed() +
+    labs(
+      title = "ctrees AGB — Old Code Path vs New Code Path",
+      subtitle = "Dashed line = perfect agreement — expected to lie exactly on it",
+      x = "Old (per-state TIF)",
+      y = "New (shared-file code path)"
+    ) +
+    theme_baci
+}
+```
+
+### 6.2 Distribution of % Difference
+
+```{r ctrees-hist, fig.height=4}
+if (is.null(ctrees_diff)) {
+  message("Skipping — no data.")
+} else {
+  ggplot(ctrees_diff, aes(x = pct_diff)) +
+    geom_histogram(bins = 50, fill = "#2166ac", alpha = 0.75) +
+    geom_vline(xintercept = 0, linetype = "dashed", color = "grey30") +
+    labs(
+      title = "ctrees: % Difference (New - Old) / Old",
+      x = "% difference", y = "N fire x year pairs"
+    ) +
+    theme_baci
+}
+```
+
+### 6.3 Any Non-Zero Outliers
+
+```{r ctrees-outliers}
+if (is.null(ctrees_diff)) {
+  message("Skipping — no data.")
+} else {
+  outliers <- ctrees_diff |>
+    dplyr::filter(abs(pct_diff) > 0.01) |>
+    dplyr::arrange(dplyr::desc(abs(pct_diff))) |>
+    dplyr::select(event_id, year, agb_mean_mgha, agb_new, pct_diff)
+
+  if (nrow(outliers) == 0) {
+    cat("No fire x year pairs differ by more than 0.01% — old and new ctrees code paths agree exactly.\n")
+  } else {
+    knitr::kable(
+      outliers |> head(15),
+      col.names = c("Event ID", "Year", "Old AGB", "New AGB", "% diff"),
+      digits = c(0, 0, 2, 2, 4),
+      caption = glue("{nrow(outliers)} fire x year pair(s) differing by >0.01% ",
+                     "(showing up to 15) — investigate before trusting 08's new output.")
+    )
+  }
+}
+```
+
+---
+
+## 7. Verdict
+
+```{r verdict}
+checks <- list(
+  "MTBS dedup (CA) has no unexplained drops" = nrow(disagree |> dplyr::filter(status == "Dropped by new filter")) == 0,
+  "WY dedup produces a well-formed fire set" = nrow(wy) > 0 && n_dup == 0 && n_badpfx == 0,
+  "All existing forest masks are valid (not corrupt)" = !any(!masks$valid %in% TRUE & masks$exists),
+  "eMapR old-vs-new outliers within threshold" = if (is.null(emapr_diff)) NA else sum(abs(emapr_diff$pct_diff) > PCT_FLAG) == 0,
+  "ctrees old-vs-new matches near-exactly" = if (is.null(ctrees_diff)) NA else max(abs(ctrees_diff$pct_diff), na.rm = TRUE) < 0.1
+)
+
+check_df <- tibble::tibble(
+  check  = names(checks),
+  result = purrr::map_chr(checks, ~ dplyr::case_when(is.na(.x) ~ "⏳ pending", .x ~ "✅ pass", TRUE ~ "❌ FAIL"))
+)
+
+knitr::kable(check_df, col.names = c("Check", "Result"))
+
+n_fail <- sum(check_df$result == "❌ FAIL")
+n_pending <- sum(check_df$result == "⏳ pending")
+
+if (n_fail > 0) {
+  cat("\n**", n_fail, "check(s) FAILED — do not scale to more years/states until resolved.**\n")
+} else if (n_pending > 0) {
+  cat("\n**", n_pending, "check(s) pending (validate_west_pipeline.R still running or missing baseline). Re-render once complete.**\n")
+} else {
+  cat("\n**All checks passed. Safe to resume cropping more eMapR years / scale to more states,",
+      "subject to reviewing any eMapR §5 outliers and dedup disagreements above.**\n")
+}
+```

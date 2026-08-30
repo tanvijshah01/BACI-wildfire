@@ -95,14 +95,18 @@ MTBS_PATH  <- here("data", "raw", "mtbs", "mtbs_perimeter_data", "mtbs_perims_DD
 EMAPR_DIR  <- here("data", "processed", "emapr_biomass_ca")
 CTREES_DIR <- here("data", "processed", "ctrees")
 
-# Fire-level AGB caches built by the generalized per-state pipeline
+# Fire-level AGB caches built by the West-wide, multi-state pipeline
 # (scripts/r/07_extract_emapr_within_fires_new.R, scripts/r/08_extract_ctrees_within_fires_new.R),
-# sourced from the new 0/1 forest mask (scripts/r/05_prepare_forest_masks_west.R).
+# sourced from the per-state 0/1 forest mask (scripts/r/05_prepare_forest_masks_west.R).
+# Both caches now carry a STUSPS column and may hold rows for states beyond
+# CA if 07/08 were ever run with a wider STATES_TO_RUN — the mtbs_study
+# event_id join below (§3/§4) restricts everything in this CA-scoped document
+# to CA fires regardless of what else is cached.
 years_hash      <- paste(params$study_year_min, params$study_year_max, sep = "_")
 CTREES_FIRE_CSV <- here("data", "processed", "ctrees",
-                        "biomass_fire_polygons_ctrees_forested_newpipeline.csv")
-EMAPR_FIRE_CSV  <- here("data", "processed", "emapr_biomass_ca",
-                        glue("biomass_fire_polygons_emapr_{years_hash}_100m_forested_newpipeline.csv"))
+                        "biomass_fire_polygons_ctrees_west_forested.csv")
+EMAPR_FIRE_CSV  <- here("data", "processed", "emapr_biomass_west",
+                        glue("biomass_fire_polygons_emapr_west_{years_hash}_100m_forested.csv"))
 
 # Forest masks (0/1, not 1/NA — use maskvalues = 0 wherever these are applied
 # with terra::mask() below).
@@ -290,7 +294,7 @@ knitr::kable(
 
 ctrees AGB has already been extracted within MTBS fire perimeters, forest-masked
 with the generalized per-state pipeline, and cached to
-`biomass_fire_polygons_ctrees_forested_newpipeline.csv` (columns: `event_id`,
+`biomass_fire_polygons_ctrees_west_forested.csv` (columns: `event_id`, `STUSPS`,
 `fire_year`, `year`, `agb_mean_mgha`) by `scripts/r/08_extract_ctrees_within_fires_new.R`.
 Each row is the mean AGB within one fire polygon for one observation year.
 
@@ -389,6 +393,9 @@ if (!EMAPR_AVAILABLE) {
     dplyr::select(event_id, fire_year = year)
 
   emapr_fires <- emapr_raw |>
+    # Cache may hold other states' rows (see setup chunk note) — restrict to
+    # this document's CA study fires before joining, same as ctrees-load.
+    dplyr::filter(event_id %in% mtbs_study$event_id) |>
     dplyr::left_join(fire_meta, by = "event_id") |>
     dplyr::mutate(
       rel_year  = year - fire_year,
@@ -1402,7 +1409,7 @@ eMapR CA TIFs currently run to 2015. The latest cohort (`r max(STUDY_YEARS)`) th
 has `r 2015 - max(STUDY_YEARS)` post-fire eMapR year(s); the earliest cohort
 (`r min(STUDY_YEARS)`) has the full `r 2015 - min(STUDY_YEARS)`-year recovery window.
 Once eMapR CONUS files for 2016–2023 are downloaded and cropped, re-render — the cache
-(`biomass_fire_polygons_emapr_`r years_hash`_100m_forested_newpipeline.csv`) picks up
+(`biomass_fire_polygons_emapr_west_`r years_hash`_100m_forested.csv`) picks up
 new TIF years automatically once `07_extract_emapr_within_fires_new.R` is re-run.
 :::
 

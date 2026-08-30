@@ -346,16 +346,28 @@ else:
     n_with_mask = sum(1 for _, m in fire_masks if m is not None)
     print(f"  {n_with_mask}/{len(mtbs_west)} fire polygons overlap the West raster grid", flush=True)
 
-    # -- Extract year by year using precomputed masks -------------------------
-    records = []
-    errors  = []
+    # -- Extract year by year using precomputed masks --------------------------
+    # Checkpointed per year (mirrors Part A) — two prior runs of this script
+    # were killed unexpectedly after several hours, once mid-Part-B, losing
+    # all in-memory progress since the original version only wrote the CSV
+    # once at the end. Each year's records now land in SCRATCH_DIR_B
+    # immediately and are skipped on re-run if already present.
+    SCRATCH_DIR_B = OUT_TIFS_DIR / "_west_fireagb_scratch"
+    SCRATCH_DIR_B.mkdir(parents=True, exist_ok=True)
+    errors = []
 
     for t_idx, (yr, ts) in enumerate(zip(years, times)):
+        scratch_path = SCRATCH_DIR_B / f"records_{yr}.csv"
+        if scratch_path.exists():
+            print(f"  {t_idx + 1}/{n_years} years — {yr} already checkpointed, skipping", flush=True)
+            continue
+
         # One zarr read per year (the only I/O in this loop)
         raw = agb_zarr[t_idx, y_start:y_end, x_start:x_end].astype("float32")
         raw[raw == FILL_VALUE] = np.nan
         raw /= SCALE_FACTOR   # -> Mg ha^-1
 
+        year_records = []
         for fire, mask_result in fire_masks:
             if mask_result is None:
                 mean_agb = np.nan
@@ -367,7 +379,7 @@ else:
                 else:
                     mean_agb = np.nan
 
-            records.append({
+            year_records.append({
                 "event_id":      fire["event_id"],
                 "state":         fire["event_id"][:2],
                 "fire_year":     fire["fire_year"],
@@ -376,11 +388,22 @@ else:
             })
 
         del raw
-        print(f"  {t_idx + 1}/{n_years} years processed ({yr})", flush=True)
+        pd.DataFrame(year_records).to_csv(scratch_path, index=False)
+        print(f"  {t_idx + 1}/{n_years} years processed ({yr}) — checkpointed", flush=True)
 
-    df = pd.DataFrame(records)
+    # All years checkpointed — assemble into one CSV
+    df = pd.concat([pd.read_csv(SCRATCH_DIR_B / f"records_{yr}.csv") for yr in years],
+                    ignore_index=True)
     df.to_csv(OUT_CSV, index=False)
     print(f"  Saved: {OUT_CSV}  ({len(df):,} records)")
+
+    # Clean up scratch checkpoints now that the CSV is safely written
+    for yr in years:
+        (SCRATCH_DIR_B / f"records_{yr}.csv").unlink(missing_ok=True)
+    try:
+        SCRATCH_DIR_B.rmdir()
+    except OSError:
+        pass   # leave it if anything unexpected remains
 
     if errors:
         print(f"  WARNING: {len(errors)} extraction errors (first 3):")

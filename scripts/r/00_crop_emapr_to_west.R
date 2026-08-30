@@ -50,6 +50,16 @@ west_ext  <- terra::ext(west_bbox["xmin"], west_bbox["xmax"],
 
 cat("West extent (EPSG:5070):", paste(round(as.vector(west_ext), 0), collapse = ", "), "\n")
 
+# A writeRaster() interrupted mid-write (laptop sleep, background-task kill —
+# a recurring failure mode on this machine, see NOTES.md 2026-08-12/13 and
+# scripts/r/05_prepare_forest_masks_west.R) can leave a GeoTIFF with a correct
+# header/extent/CRS but no actual pixel data. file.exists() alone doesn't
+# catch this. Mirrors 05's raster_is_valid() — an all-NA output here means the
+# crop/mask/write was never really completed, so it isn't safe to skip.
+raster_is_valid <- function(path) {
+  terra::global(terra::rast(path), "notNA")[[1]] > 0
+}
+
 # ── 3. Discover available years ───────────────────────────────────────────────
 RAW_DIR  <- here("data", "raw", "emapr_biomass")
 raw_files <- list.files(RAW_DIR, pattern = "^composite_\\d{4}_median\\.tif$", full.names = TRUE)
@@ -70,10 +80,15 @@ for (yr in avail_years) {
   out_path <- file.path(OUT_DIR, glue("composite_{yr}_west.tif"))
 
   if (file.exists(out_path)) {
-    size_mb <- round(file.size(out_path) / 1e6, 1)
-    cat(glue("[SKIP] {yr} — already exists ({size_mb} MB)\n"))
-    results <- rbind(results, data.frame(year = yr, status = "skipped", size_mb = size_mb))
-    next
+    if (raster_is_valid(out_path)) {
+      size_mb <- round(file.size(out_path) / 1e6, 1)
+      cat(glue("[SKIP] {yr} — already exists ({size_mb} MB)\n"))
+      results <- rbind(results, data.frame(year = yr, status = "skipped", size_mb = size_mb))
+      next
+    } else {
+      cat(glue("[REBUILD] {yr} — existing file is corrupt (all-NA, interrupted write), deleting and redoing...\n"))
+      file.remove(out_path)
+    }
   }
 
   cat(glue("[PROC] {yr} — cropping and masking..."))
