@@ -15,6 +15,17 @@ See `CLAUDE.md` for the full directory structure, pipeline diagram, and
 current project status. If you just want the command to run right now, jump
 to **Part 5: End-to-End Checklist**.
 
+**The two datasets don't work the same way — this trips people up, so read
+this table before anything else:**
+
+| | eMapR | ctrees |
+|---|---|---|
+| **Raw state** | A real, discrete file per year: the full CONUS `composite_YYYY_median.tif` (~27.7 GB BigTIFF), served over plain FTP. This is genuinely "the raw file" — an unmodified copy of the source. | **No discrete raw file exists.** The source is a live, cloud-hosted array (`arraylake`/zarr) — not something distributed as a downloadable file at all. |
+| **How it's accessed (the "query")** | A literal file copy: `rclone`/FTP pull of one named path, byte-for-byte, same every time. | A live index/slice query into the remote array via the `arraylake` Python client — request a bounding box + year range, get back whatever pixels are inside it. Nothing is "downloaded" in the traditional sense until a script chooses to save what it read. |
+| **Then manipulated by...** | Crop+mask to the 11-state West region (`00_crop_emapr_to_west.R`, Part 2.3), then per-fire extraction + forest-masking (`07`, Part 4). | The download scripts (`03`/`04`, Part 3) *are* the extraction step — in one pass they save native-resolution regional GeoTIFFs (the closest thing to "raw" that gets kept locally, see Part 3) alongside already-aggregated NetCDF/CSV outputs. Forest-masked fire extraction (`08`, Part 4) then reads those saved GeoTIFFs. |
+| **Raw data retention** | **Kept permanently as of 2026-08-30** (PI request) — every downloaded `composite_YYYY_median.tif` stays in `data/raw/emapr_biomass/`, not deleted after cropping. See the storage-size callout in Part 2. | N/A — there's nothing to "keep" beyond what's already described above; the native-resolution GeoTIFFs from Part 3 are the retained artifact. |
+| **Analysis-ready output** | `biomass_fire_polygons_emapr_west_<years>_100m_forested.csv` | `biomass_fire_polygons_ctrees_west_forested.csv` |
+
 **Contents**
 - [Part 1: One-Time Setup](#part-1-one-time-setup)
 - [Part 2: eMapR Biomass](#part-2-emapr-biomass)
@@ -67,17 +78,24 @@ powercfg /change standby-timeout-ac 30  # re-enable, after it finishes
 | **Local raw destination** | `data/raw/emapr_biomass/composite_YYYY_median.tif` |
 
 Raw composites are too large to work with directly (loading one in Quarto
-causes multi-minute stalls) and too large to keep permanently on the laptop
-(~1 TB for the full archive, which has already caused repeated disk-space
-failures). The pattern is: **get a year's raw file onto the laptop just long
-enough to crop it, then discard the raw file** — the small cropped output is
-what actually gets used.
+causes multi-minute stalls), so they always get cropped down before use —
+see §2.3. What happens to the raw file *after* cropping has changed:
+
+> **Policy as of 2026-08-30: raw files are kept, not deleted.** The PI wants
+> the raw archive on hand. Earlier guidance here said to delete each raw
+> file after cropping to avoid disk-space failures — **that delete step is
+> no longer used.** The tradeoff is real and unavoidable: the **full 34-year
+> archive is ~950 GB–1 TB**. That will not fit on a laptop (this is exactly
+> what caused the repeated disk-space failures that motivated the old
+> delete-after-crop pattern in the first place) — it needs a location with
+> real headroom, e.g. GRIT. Confirm available storage/quota there before
+> assuming "keep everything" is free to do.
 
 ### 2.1 Storage tiers
 
 | Tier | Where it lives | Contents | Size |
 |---|---|---|---|
-| Raw (archival) | Nextcloud: `BACI/raw/emapr_biomass/` | full CONUS `composite_YYYY_median.tif` | ~30 GB/yr |
+| Raw (kept permanently) | `data/raw/emapr_biomass/` — also archived to Nextcloud `BACI/raw/emapr_biomass/` where possible, as a second copy, not instead of the local one | full CONUS `composite_YYYY_median.tif` | ~30 GB/yr, ~1 TB for the full 1990–2023 archive |
 | Processed (West-cropped) | `data/processed/emapr_biomass_west/`, also mirrored to Nextcloud `BACI/processed/emapr_biomass_west/` | `composite_YYYY_west.tif` | ~1 GB/yr |
 | Analysis-ready | local / git | fire-polygon extraction CSVs (Part 4) | KB–MB |
 
@@ -89,30 +107,32 @@ retired fallback kept in §2.4 only for machines without rclone available.
 
 **A — Year's raw file is already local** (`data/raw/emapr_biomass/`): skip straight to §2.3 (crop).
 
-**B — Year is archived on Nextcloud but not local:** pull it down, crop it, push the small result back up, then delete the scratch raw file so it doesn't accumulate on disk:
+**B — Year is archived on Nextcloud but not local:** pull it down and crop it. The raw file **stays** in `data/raw/emapr_biomass/` afterward (see the retention policy above) — this no longer deletes it:
 
 ```powershell
 & "C:\Users\shaht\bin\rclone.exe" copy nextcloud:BACI/raw/emapr_biomass/composite_<yr>_median.tif data/raw/emapr_biomass/ --progress
 Rscript scripts/r/00_crop_emapr_to_west.R
-& "C:\Users\shaht\bin\rclone.exe" copy data/processed/emapr_biomass_west/composite_<yr>_west.tif nextcloud:BACI/processed/emapr_biomass_west/
-Remove-Item data/raw/emapr_biomass/composite_<yr>_median.tif
 ```
 
-**C — Year isn't on Nextcloud or local yet (first-ever fetch):** stream it FTP → Nextcloud directly — bytes flow server-to-server, so it never lands as a full file on the laptop — then follow branch B:
+Optionally also push the small cropped result up to Nextcloud as a second copy of the processed tier:
 
 ```powershell
-& "C:\Users\shaht\bin\rclone.exe" copy emapr-ftp:STEM_CONUS_BIOMASS/biomassfiaald-v1990-2023-1/composite_<yr>_median.tif nextcloud:BACI/raw/emapr_biomass/ --progress
-# then run branch B for the same year
+& "C:\Users\shaht\bin\rclone.exe" copy data/processed/emapr_biomass_west/composite_<yr>_west.tif nextcloud:BACI/processed/emapr_biomass_west/
 ```
 
-**Archiving years you already have locally** (e.g. after using the legacy FTP method below), without deleting them:
+**C — Year isn't on Nextcloud or local yet (first-ever fetch):** pull it straight from FTP to local, then follow branch B's crop step. Also archive a copy to Nextcloud while you're at it, since you have the file local anyway:
+
+```powershell
+& "C:\Users\shaht\bin\rclone.exe" copy emapr-ftp:STEM_CONUS_BIOMASS/biomassfiaald-v1990-2023-1/composite_<yr>_median.tif data/raw/emapr_biomass/ --progress
+& "C:\Users\shaht\bin\rclone.exe" copy data/raw/emapr_biomass/composite_<yr>_median.tif nextcloud:BACI/raw/emapr_biomass/ --progress
+Rscript scripts/r/00_crop_emapr_to_west.R
+```
+
+**Archiving years you already have locally** to Nextcloud, as a second copy (this never deletes the local one — see the retention policy above):
 
 ```powershell
 & "C:\Users\shaht\bin\rclone.exe" copy data/raw/emapr_biomass/ nextcloud:BACI/raw/emapr_biomass/ --progress
 ```
-
-Deleting the local raw archive after an upload is confirmed is a manual,
-user-triggered step — not automated by any script here.
 
 ### 2.3 Crop to the study region (required before use in Quarto)
 
@@ -133,10 +153,11 @@ needed for any new work; the West-wide script above supersedes it.
 
 ### 2.4 Legacy fallback: direct FTP to the laptop (no rclone)
 
-Only use this if rclone truly isn't available. It downloads the full raw
-archive straight to `data/raw/emapr_biomass/` with no Nextcloud step, which
-is exactly the disk-space-failure pattern §2 is designed to avoid — prefer
-§2.2 whenever possible.
+Only use this if rclone truly isn't available. It downloads straight to
+`data/raw/emapr_biomass/` with no Nextcloud step — functionally fine now
+that raw files are kept either way (§2 retention policy), just skips the
+automatic second copy on Nextcloud that §2.2 gives you. Prefer §2.2 when
+rclone is available, mainly for that archival copy.
 
 **Windows `ftp.exe` does not support passive mode** and will fail with
 `Connection closed by remote host`. Use `curl.exe` instead (built into
@@ -181,6 +202,19 @@ while ($true) {
 
 Unlike eMapR, there's nothing to crop afterward — each script below pulls
 data already limited to its target bounding box.
+
+**On "raw" ctrees data:** there is no equivalent of eMapR's downloadable
+CONUS file — the zarr array above *is* the raw/source dataset, and it lives
+entirely on arraylake's infrastructure. A script "downloading" ctrees really
+means: connect, ask for a bounding box + year slice, and choose what to save
+from what comes back. Of the three outputs below, **Part C (the native ~100m
+GeoTIFFs) is the closest thing to a retained raw copy** — full pixel
+resolution, just spatially clipped to the study region, no aggregation.
+Parts A and B are both already-aggregated derivatives (spatially coarsened
+to ~1km, and collapsed to one fire×year mean, respectively) — keep that
+distinction in mind if anyone asks "do we have the raw ctrees data on hand":
+yes, in the form of Part C's regional GeoTIFFs, not as a literal copy of
+arraylake's own storage.
 
 ### 3.1 Explore the store (optional — run first if the schema is unfamiliar)
 
