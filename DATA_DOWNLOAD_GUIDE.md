@@ -65,6 +65,15 @@ powercfg /change standby-timeout-ac 0   # disable sleep, before starting
 powercfg /change standby-timeout-ac 30  # re-enable, after it finishes
 ```
 
+**On GRIT specifically:** the code repo (`~/BACI-wildfire`, matches this repo) and the actual
+data live in two separate places — raw/processed data lives in `~/BACI-review`, a separate
+project-storage repo also shared with other collaborators. `~/BACI-wildfire` has no `data/`
+directory of its own; instead `data` there is a symlink to `~/BACI-review/data`
+(`ln -s ~/BACI-review/data ~/BACI-wildfire/data`). This works transparently with every script's
+existing `here()`/`PROJ_ROOT`-relative paths — no code changes needed — and is safe because
+`data/raw/`, `data/processed/`, `data/final/` are already gitignored. If `~/BACI-wildfire/data`
+is ever missing, re-create the symlink rather than downloading a second copy of the data.
+
 ---
 
 ## Part 2: eMapR Biomass
