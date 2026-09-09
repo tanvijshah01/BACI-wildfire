@@ -35,8 +35,15 @@ here::i_am("scripts/r/check_raw_emapr_files.R")
 
 RAW_DIR        <- here("data", "raw", "emapr_biomass")
 EXPECTED_YEARS <- 1990:2023
-SIZE_MIN_GB    <- 20   # generous bounds around the ~27.7 GB nominal size
-SIZE_MAX_GB    <- 35   # (DATA_DOWNLOAD_GUIDE.md) — flags truncated downloads
+# 96,815 x 153,809 px, int16, uncompressed -> every complete year is this exact
+# size (confirmed against 19 verified-complete downloaded years on GRIT,
+# 2026-09-08). A wider 20-35 GB band was tried first but let a truncated file
+# through (2009 landed at 20.1 GB, just above a 20 GB floor, containing only
+# 67.6% of the expected pixel count while its header still claimed full
+# dimensions) - so this is now a tight tolerance around the known-exact size
+# rather than a generous nominal range.
+SIZE_EXACT_BYTES <- 29783198966
+SIZE_TOLERANCE_GB <- 0.05
 SAMPLE_HALFWIN <- 250  # read a (2*250+1)^2 pixel block centered on the raster
 
 cat("Checking", length(EXPECTED_YEARS), "expected years in", RAW_DIR, "\n\n")
@@ -53,7 +60,7 @@ for (yr in EXPECTED_YEARS) {
   if (file.exists(path)) {
     row$exists  <- TRUE
     row$size_gb <- round(file.size(path) / 1e9, 1)
-    row$size_ok <- row$size_gb >= SIZE_MIN_GB && row$size_gb <= SIZE_MAX_GB
+    row$size_ok <- abs(file.size(path) - SIZE_EXACT_BYTES) <= SIZE_TOLERANCE_GB * 1e9
 
     r <- tryCatch(terra::rast(path), error = function(e) NULL)
 
