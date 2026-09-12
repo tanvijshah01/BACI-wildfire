@@ -283,18 +283,40 @@ python scripts/python/04_download_ctrees_west.py
 
 Same as §3.2 but over the union bbox of all 11 Western study states
 (`lon -124.8 to -102.0`, `lat 31.3 to 49.0`, ~4.1x the CA pixel area,
-~6,800 fires):
+~6,800 fires). **Unlike §3.2's script, this one runs Part C first**, then
+Part A, then Part B — see below.
 
 | Part | Output | Purpose |
 |---|---|---|
-| A | `data/processed/ctrees/ctrees_biomass_west_1km.nc` | Coarsened (~1 km) West raster, 26 years, for R mapping |
-| B | `data/processed/ctrees/biomass_fire_polygons_ctrees_west.csv` | Long panel: `event_id` × `year` × mean AGB within each Western fire polygon |
-| C | `data/processed/ctrees/ctrees_YYYY_west_100m.tif` | One native-resolution (~100 m) GeoTIFF per year, West-bbox extent |
+| C | `data/processed/ctrees/ctrees_YYYY_west_100m.tif` | Raw download: one native-resolution (~100 m) GeoTIFF per year, straight from arraylake, West-bbox extent |
+| A | `data/processed/ctrees/ctrees_biomass_west_1km.nc` | Coarsened (~1 km) West raster, 26 years, for R mapping — built by reading Part C's local TIFFs back, not arraylake |
+| B | `data/processed/ctrees/biomass_fire_polygons_ctrees_west.csv` | Long panel: `event_id` × `year` × mean AGB within each Western fire polygon — also reads Part C's local TIFFs |
+
+**Why Part C runs first here (unlike §3.2):** a West-scale run on GRIT was
+killed (OOM) during Part A against a 4 GiB per-session memory cap — Part A's
+in-memory coarsening on top of a live arraylake/icechunk read pushed peak
+memory over the limit even though the raw per-year array itself is only
+~2 GB. Downloading the raw GeoTIFFs first, then having Part A/B read those
+plain local files back, keeps arraylake's connection overhead out of the
+coarsening/extraction steps. This also means "raw ctrees data" now really is
+on disk as its own step before any processing happens — see the "On raw
+ctrees data" note above. (§3.2's CA script is untouched and still does
+A → B → C in one pass; it's validated at CA scale and not worth touching.)
+
+Because Part A/B now read the GeoTIFFs Part C writes, **rasterio is a hard
+requirement** for this script (no fallback) — install it if `pip install
+arraylake zarr xarray netCDF4 geopandas rasterio` (Part 1) was skipped.
 
 Part C's per-year West TIFs are meant to be **shared across all 11
 states** — each state's extraction (script `08`, Part 4 below) crops its
 own slice from the same file rather than needing a separate download per
 state.
+
+**If you still hit an OOM kill** even with this reordering (the ~2 GB
+per-year raw read is unavoidable regardless of source), the memory cap
+itself is the constraint — check it with `ulimit -a` (look at `max memory
+size`) and `cat /sys/fs/cgroup/memory.max`, and ask whoever administers
+GRIT/JupyterHub for a higher limit or a larger server profile.
 
 **This is a multi-hour job** (4x the reads, ~6.4x the fire polygons vs.
 CA). Before starting:
