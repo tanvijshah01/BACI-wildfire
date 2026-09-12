@@ -296,23 +296,36 @@ TIFF, B = 1km NetCDF, C = fire CSV) — but unlike §3.2, this script actually
 | B | `data/processed/ctrees/ctrees_biomass_west_1km.nc` | Coarsened (~1 km) West raster, 26 years, for R mapping — built by reading Part A's local TIFFs back, not arraylake |
 | C | `data/processed/ctrees/biomass_fire_polygons_ctrees_west.csv` | Long panel: `event_id` × `year` × mean AGB within each Western fire polygon — also reads Part A's local TIFFs |
 
-**Why the raw download runs first here (unlike §3.2):** a West-scale run on
-GRIT was killed (OOM) during the coarsening step against a 4 GiB per-session
-memory cap. The actual root cause: West's grid isn't an exact multiple of
-the coarsening factor (25650 cols / 11 truncates to 25641), so the naive
-`reshape()` in `coarsen_block()` was non-contiguous and numpy silently
-copied the entire ~2 GB truncated array to satisfy it — briefly ~4 GB (raw
-array + copy) plus library overhead, over the cap. This is fixed by having
-`coarsen_block()` process one row-strip at a time instead of reshaping the
-whole array (see the function's docstring) — that's the main fix. Separately,
-downloading the raw GeoTIFFs first and having Parts B/C read those plain
-local files back removes some smaller arraylake/icechunk overhead from the
-coarsening/extraction steps, and means "raw ctrees data" is now on disk as
-its own step before any processing happens — see the "On raw ctrees data"
-note above. (§3.2's CA script is untouched and still runs B → C → A,
-coarsen/extract before raw-TIFF-export, using the original whole-array
-reshape — CA's grid is ~4x smaller, so the same truncation-copy never got
-close to a 4 GiB cap; it's validated at CA scale and not worth touching.)
+**Why the raw download runs first here (unlike §3.2):** downloading the raw
+GeoTIFFs first, then having Parts B/C read those plain local files back,
+means "raw ctrees data" is on disk as its own step before any processing
+happens — see the "On raw ctrees data" note above. (§3.2's CA script is
+untouched and still runs B → C → A, coarsen/extract before raw-TIFF-export;
+it's validated at CA scale and not worth touching.)
+
+**Memory on GRIT — two rounds of OOM kills, two different root causes:**
+1. A run was first killed during the coarsening step against a 4 GiB
+   per-session memory cap. Root cause: West's grid isn't an exact multiple
+   of the coarsening factor (25650 cols / 11 truncates to 25641), so a
+   whole-array `reshape()` for coarsening was non-contiguous and numpy
+   silently copied the entire ~2 GB truncated array to satisfy it — briefly
+   ~4 GB (array + copy) plus library overhead, over the cap.
+2. After reordering Part A first, **a second run was killed during Part A's
+   plain raw download** — no coarsening math involved at all. Turns out
+   just holding one ~2 GB float32 year array (from an int16→float32 cast
+   plus a same-shape boolean fill-mask), alongside several hundred MB–1 GB
+   of geopandas/rasterio/arraylake/xarray import overhead, was enough to
+   exceed the cap on its own.
+
+Both are now fixed the same way: neither Part A (raw download, via
+`STRIP_ROWS`) nor Part B (coarsening, via `coarsen_year_from_tif()`) ever
+materializes a full year array anymore — both read/write in small row-strips
+via rasterio windows, so peak memory per step is tens–hundreds of MB instead
+of ~2–4 GB. Part C still loads a full raster per year (it needs scattered
+access across the whole extent for polygon masks) — if that OOMs too, it
+would need the same per-fire windowed-read treatment. (§3.2's CA script uses
+none of this — CA's grid is ~4x smaller, so neither failure mode got
+anywhere near a 4 GiB cap there.)
 
 Because Parts B/C now read the GeoTIFFs Part A writes, **rasterio is a hard
 requirement** for this script (no fallback) — install it if `pip install

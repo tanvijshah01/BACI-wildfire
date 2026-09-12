@@ -60,18 +60,24 @@
 #   download guidance in DATA_DOWNLOAD_GUIDE.md) and run from a real
 #   terminal, not a notebook — Part A/B/C all checkpoint per-year/per-fire.
 #
-#   GRIT note: a run against a 4 GiB per-session memory cap was killed (OOM)
-#   during the coarsening step. Root cause: West's dimensions aren't exact
-#   multiples of COARSEN (25650 cols / 11 truncates to 25641), so
-#   coarsen_block()'s reshape() was non-contiguous and numpy silently copied
-#   the entire ~2 GB truncated array to satisfy it — briefly ~4 GB (raw +
-#   copy) plus library overhead, over the cap. Fixed by having coarsen_block
-#   process one row-strip at a time (bounds any such copy to ~1 MB instead
-#   of the whole array) — see its docstring. Having Part B/C read back from
-#   Part A's local GeoTIFF instead of a live arraylake read (this version)
-#   is a smaller, secondary win (removes icechunk decompress overhead from
-#   that step) but was not the main fix. If OOM kills persist after both
-#   fixes, ask GRIT admin for a higher memory cap.
+#   GRIT note: multiple runs were killed (OOM) against a 4 GiB per-session
+#   memory cap — first during the coarsening step, then even during Part A's
+#   plain raw download (no coarsening math at all). Root cause both times was
+#   materializing a full ~2 GB year array: (1) West's dimensions aren't exact
+#   multiples of COARSEN (25650 cols / 11 truncates to 25641), so a whole-
+#   array reshape for coarsening was non-contiguous and numpy silently
+#   copied the entire truncated array to satisfy it; (2) even without any
+#   coarsening, holding one ~2 GB float32 year array (from an int16->float32
+#   cast plus a same-shape boolean fill-mask) alongside library import
+#   overhead (geopandas/rasterio/arraylake/xarray, easily several hundred
+#   MB-1 GB) was enough to exceed the cap on its own. Both Part A (raw
+#   download) and Part B (coarsening) now read/write in row-strips
+#   (STRIP_ROWS for A, `factor`-row windows in coarsen_year_from_tif for B)
+#   so no step ever holds more than one strip (~tens-hundreds of MB) instead
+#   of a whole year array. Part C still loads a full raster per year (needed
+#   for scattered polygon indexing across the whole extent) — if that OOMs
+#   too, it would need the same per-fire windowed-read treatment. If OOM
+#   kills persist after all this, ask GRIT admin for a higher memory cap.
 #
 # PART B CHECKPOINTING (new vs. 03)
 #   03's coarsening step holds all 26 coarsened years in memory and writes
@@ -114,6 +120,7 @@ try:
     import rasterio
     import rasterio.features
     from rasterio.transform import from_origin as _rio_from_origin
+    from rasterio.windows import Window
     USE_RASTERIO = True
 except ImportError:
     from matplotlib.path import Path as MplPath
@@ -155,38 +162,18 @@ WEST_LAT = (31.3, 49.0)
 # -- Coarsening factor: 11 x 0.000889 deg ~= 0.0098 deg ~= 1.1 km -----------
 COARSEN = 11
 
+# -- Row-strip size for Part A's read/write loop: bounds peak memory to one
+#    strip (~200 MB at this size) instead of a whole ~2 GB year array. Even
+#    the plain raw download (no coarsening math at all) was OOM-killed
+#    against GRIT's 4 GiB cap, so Part A needs this too, not just Part B.
+STRIP_ROWS = 2000
+
 # -- MTBS filter --------------------------------------------------------------
 MTBS_START = 2000
 MTBS_END   = 2025    # match Ctrees temporal range
 
 OUT_TIFS_DIR.mkdir(parents=True, exist_ok=True)
 SCRATCH_DIR.mkdir(parents=True, exist_ok=True)
-
-
-def coarsen_block(arr2d, factor):
-    """
-    Block-average a 2D numpy array by `factor` in each dimension.
-
-    Processes one row-strip (`factor` rows at a time) rather than reshaping
-    the whole truncated array at once. West's dimensions aren't exact
-    multiples of `factor` (25650 cols / 11 truncates to 25641), so the
-    naive `arr2d[:ny_c*factor, :nx_c*factor].reshape(...)` is non-contiguous
-    and numpy silently copies the *entire* ~2 GB truncated array to satisfy
-    the reshape — briefly doubling peak memory on top of the raw array
-    already in memory. That combination was almost certainly what OOM-killed
-    the original run on GRIT's 4 GiB cap, not the arraylake connection.
-    Row-strip processing bounds any such copy to one strip's size
-    (~1 MB here) instead of the whole array.
-    """
-    ny, nx = arr2d.shape
-    ny_c, nx_c = ny // factor, nx // factor
-    nx_trim = nx_c * factor
-
-    out = np.empty((ny_c, nx_c), dtype=arr2d.dtype)
-    for i in range(ny_c):
-        strip = arr2d[i * factor:(i + 1) * factor, :nx_trim]
-        out[i] = strip.reshape(factor, nx_c, factor).mean(axis=(0, 2))
-    return out
 
 
 def tif_path_for_year(yr):
@@ -200,9 +187,40 @@ def read_year_raster(yr):
     The TIFF already has fill values converted to NaN and the int16->Mg ha^-1
     scale factor applied (done once, in Part A, before writing) — so this is
     a plain local raster read, no arraylake connection and no re-masking.
+    Used by Part C, which needs the full array in memory anyway for
+    scattered polygon indexing across the whole West extent.
     """
     with rasterio.open(tif_path_for_year(yr)) as src:
         return src.read(1).astype("float32")
+
+
+def coarsen_year_from_tif(yr, factor):
+    """
+    Build one year's coarsened (~1 km) raster directly from Part A's local
+    GeoTIFF, reading and averaging `factor` rows at a time via a rasterio
+    window — never materializes the full ~2 GB year array at all.
+
+    An earlier version loaded the whole raster into memory first
+    (`read_year_raster`) and then block-averaged it with a numpy reshape.
+    West's dimensions aren't exact multiples of `factor` (25650 cols / 11
+    truncates to 25641), so that reshape was non-contiguous and numpy
+    silently copied the entire truncated array to satisfy it — briefly
+    doubling peak memory on top of the array already in memory, which is
+    what OOM-killed runs against GRIT's 4 GiB cap. Reading window-by-window
+    from disk sidesteps the whole-array reshape problem rather than just
+    shrinking it.
+    """
+    with rasterio.open(tif_path_for_year(yr)) as src:
+        nx_c = src.width // factor
+        ny_c = src.height // factor
+        nx_trim = nx_c * factor
+
+        out = np.empty((ny_c, nx_c), dtype="float32")
+        for i in range(ny_c):
+            window = Window(0, i * factor, nx_trim, factor)
+            strip = src.read(1, window=window)   # (factor, nx_trim)
+            out[i] = strip.reshape(factor, nx_c, factor).mean(axis=(0, 2))
+    return out
 
 
 def precompute_mask(geom, x_arr, y_arr, res):
@@ -308,21 +326,23 @@ else:
     print(f"\nPart A: Downloading {len(tifs_needed)} native-resolution (~100 m) raw GeoTIFFs"
           f" -> {OUT_TIFS_DIR.name}/")
 
+    n_rows_total = y_end - y_start
+    n_cols_total = x_end - x_start
+
     for t_idx, yr in enumerate(years):
         tif_path = tif_path_for_year(yr)
         if tif_path.exists():
             print(f"  {t_idx + 1}/{n_years} years — {yr} already downloaded, skipping", flush=True)
             continue
 
-        raw = agb_zarr[t_idx, y_start:y_end, x_start:x_end].astype("float32")
-        raw[raw == FILL_VALUE] = np.nan
-        raw /= SCALE_FACTOR   # -> Mg ha^-1
-
+        # Written row-strip by row-strip (STRIP_ROWS at a time) rather than
+        # building the whole ~2 GB year array in memory first — see
+        # STRIP_ROWS' comment above for why even this plain download needs it.
         with rasterio.open(
             tif_path, "w",
             driver     = "GTiff",
-            height     = raw.shape[0],
-            width      = raw.shape[1],
+            height     = n_rows_total,
+            width      = n_cols_total,
             count      = 1,
             dtype      = "float32",
             crs        = "EPSG:4326",
@@ -333,9 +353,16 @@ else:
             blockysize = 512,
             nodata     = float("nan"),
         ) as dst:
-            dst.write(raw, 1)
+            for row_off in range(0, n_rows_total, STRIP_ROWS):
+                row_end = min(row_off + STRIP_ROWS, n_rows_total)
+                strip = agb_zarr[t_idx,
+                                 y_start + row_off:y_start + row_end,
+                                 x_start:x_end].astype("float32")
+                strip[strip == FILL_VALUE] = np.nan
+                strip /= SCALE_FACTOR   # -> Mg ha^-1
+                dst.write(strip, 1, window=Window(0, row_off, n_cols_total, row_end - row_off))
+                del strip
 
-        del raw
         size_mb = tif_path.stat().st_size / 1e6
         print(f"  {t_idx + 1}/{n_years} years downloaded ({yr}) — {size_mb:.1f} MB", flush=True)
 
@@ -360,9 +387,7 @@ else:
             print(f"  {t_idx + 1}/{n_years} years — {yr} already checkpointed, skipping", flush=True)
             continue
 
-        raw = read_year_raster(yr)
-        coarsened = coarsen_block(raw, COARSEN)
-        del raw
+        coarsened = coarsen_year_from_tif(yr, COARSEN)
 
         np.save(scratch_path, coarsened)
         print(f"  {t_idx + 1}/{n_years} years processed ({yr}) — checkpointed", flush=True)
