@@ -74,6 +74,22 @@ existing `here()`/`PROJ_ROOT`-relative paths — no code changes needed — and 
 `data/raw/`, `data/processed/`, `data/final/` are already gitignored. If `~/BACI-wildfire/data`
 is ever missing, re-create the symlink rather than downloading a second copy of the data.
 
+GRIT's Python setup for ctrees downloads (there's no `requirements.txt` in the repo yet, so this
+isn't overriding an established convention — a venv is just the safe default to avoid polluting
+whatever global/shared Python environment other collaborators use on GRIT):
+
+```bash
+cd ~/BACI-wildfire
+python3 -m venv .venv
+source .venv/bin/activate
+pip install arraylake zarr xarray netCDF4 geopandas rasterio
+pip freeze > requirements-ctrees.txt   # commit so the env is reproducible for the next person
+arraylake auth login
+```
+
+Re-run `source ~/BACI-wildfire/.venv/bin/activate` in any new shell/tmux pane before running a
+ctrees script — a fresh pane starts outside the venv.
+
 ---
 
 ## Part 2: eMapR Biomass
@@ -282,9 +298,20 @@ state.
 
 **This is a multi-hour job** (4x the reads, ~6.4x the fire polygons vs.
 CA). Before starting:
-- Disable sleep (`powercfg /change standby-timeout-ac 0`, §1).
+- On a laptop: disable sleep (`powercfg /change standby-timeout-ac 0`, §1) — closing the lid
+  interrupts the run.
+- On GRIT (or any web-based terminal): a dropped browser connection kills a plain foreground
+  process, so wrap the run in `tmux` instead:
+  ```bash
+  tmux new -s ctrees_west
+  cd ~/BACI-wildfire && source .venv/bin/activate   # if using the GRIT venv from §1
+  python scripts/python/04_download_ctrees_west.py
+  ```
+  Detach with `Ctrl-b` then `d`; reattach later from any terminal on GRIT with
+  `tmux attach -t ctrees_west`.
 - Run from a real terminal, not a notebook.
-- Expect Part C's 26 compressed GeoTIFFs to total ~8–20 GB on disk.
+- Expect Part C's 26 compressed GeoTIFFs to total ~8–20 GB on disk — check free space first
+  (`df -h ~`).
 
 Part A checkpoints each coarsened year to
 `data/processed/ctrees/_west_1km_scratch/` as it completes and only

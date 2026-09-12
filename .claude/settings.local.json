@@ -113,7 +113,15 @@
       "Bash(tasklist)",
       "Bash(PowerShell -Command \"Get-PSDrive C | Select-Object Used,Free\")",
       "PowerShell(& \"C:\\\\Users\\\\shaht\\\\anaconda3\\\\python.exe\" -m py_compile \"C:\\\\Users\\\\shaht\\\\Documents\\\\Projects\\\\BACI_local\\\\BACI\\\\scripts\\\\python\\\\04_download_ctrees_west.py\"; echo \"exit: $LASTEXITCODE\")",
-      "PowerShell(powercfg *)"
+      "PowerShell(powercfg *)",
+      "PowerShell(& \"C:\\\\Program Files\\\\R\\\\R-4.5.2\\\\bin\\\\Rscript.exe\" *)",
+      "Skill(update-config)",
+      "Bash(node -e \"JSON.parse\\(require\\('fs'\\).readFileSync\\('C:/Users/shaht/Documents/Projects/BACI_local/BACI/.claude/settings.local.json','utf8'\\)\\); console.log\\('valid JSON'\\)\")",
+      "PowerShell(wmic process where \"name='Rscript.exe'\" get ProcessId,CommandLine,CreationDate 2>&1)",
+      "Bash(git push *)",
+      "Bash(cd C:\\\\Users\\\\shaht\\\\Documents\\\\Projects\\\\BACI_local\\\\BACI *)",
+      "Bash(tasklist *)",
+      "Bash(PowerShell -NoProfile -Command \"Get-PSDrive C | Select-Object Used,Free\")"
     ]
   }
 }
