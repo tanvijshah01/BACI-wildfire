@@ -261,19 +261,22 @@ Pulls the CA bounding box (`lon -124.5 to -114.1`, `lat 32.5 to 42.0`) and write
 
 | Part | Output | Purpose |
 |---|---|---|
-| A | `data/processed/ctrees/ctrees_biomass_ca_1km.nc` | Coarsened (~1 km) CA raster, 26 years, for R mapping |
-| B | `data/processed/ctrees/biomass_fire_polygons_ctrees.csv` | Long panel: `event_id` × `year` × mean AGB within each MTBS CA fire polygon |
-| C | `data/processed/ctrees/ctrees_YYYY_ca_100m.tif` | One native-resolution (~100 m) GeoTIFF per year, for comparison against eMapR |
+| A | `data/processed/ctrees/ctrees_YYYY_ca_100m.tif` | One native-resolution (~100 m) GeoTIFF per year, for comparison against eMapR |
+| B | `data/processed/ctrees/ctrees_biomass_ca_1km.nc` | Coarsened (~1 km) CA raster, 26 years, for R mapping |
+| C | `data/processed/ctrees/biomass_fire_polygons_ctrees.csv` | Long panel: `event_id` × `year` × mean AGB within each MTBS CA fire polygon |
 
 Skip-safe per part — delete a specific output file to force re-extraction
-of just that part. Part B rasterizes each fire polygon's mask once
+of just that part. Part C rasterizes each fire polygon's mask once
 (`rasterio.features.rasterize()`) and reuses it across all 26 years —
 10–50x faster than a shapely point-in-polygon approach. Sanity checks
 (percent-valid-pixel counts) run automatically at the end.
 
 **This CA output is the validated baseline** (`biomass_within_fires.qmd`
 §7) — don't modify it; it's what the West-wide pipeline below is
-cross-checked against.
+cross-checked against. **Note:** the part *letters* were standardized to
+match §3.3's script (A = raw TIFF, B = 1km NetCDF, C = fire CSV), but this
+script's execution order is untouched — it still runs B → C → A (coarsen,
+then extract, then raw-TIFF-export last), not A → B → C.
 
 ### 3.3 Download the full 11-state Western subset
 
@@ -283,31 +286,33 @@ python scripts/python/04_download_ctrees_west.py
 
 Same as §3.2 but over the union bbox of all 11 Western study states
 (`lon -124.8 to -102.0`, `lat 31.3 to 49.0`, ~4.1x the CA pixel area,
-~6,800 fires). **Unlike §3.2's script, this one runs Part C first**, then
-Part A, then Part B — see below.
+~6,800 fires). Part letters match §3.2's script by output type (A = raw
+TIFF, B = 1km NetCDF, C = fire CSV) — but unlike §3.2, this script actually
+*runs* in that A → B → C order (raw download first); see below for why.
 
 | Part | Output | Purpose |
 |---|---|---|
-| C | `data/processed/ctrees/ctrees_YYYY_west_100m.tif` | Raw download: one native-resolution (~100 m) GeoTIFF per year, straight from arraylake, West-bbox extent |
-| A | `data/processed/ctrees/ctrees_biomass_west_1km.nc` | Coarsened (~1 km) West raster, 26 years, for R mapping — built by reading Part C's local TIFFs back, not arraylake |
-| B | `data/processed/ctrees/biomass_fire_polygons_ctrees_west.csv` | Long panel: `event_id` × `year` × mean AGB within each Western fire polygon — also reads Part C's local TIFFs |
+| A | `data/processed/ctrees/ctrees_YYYY_west_100m.tif` | Raw download: one native-resolution (~100 m) GeoTIFF per year, straight from arraylake, West-bbox extent — runs first |
+| B | `data/processed/ctrees/ctrees_biomass_west_1km.nc` | Coarsened (~1 km) West raster, 26 years, for R mapping — built by reading Part A's local TIFFs back, not arraylake |
+| C | `data/processed/ctrees/biomass_fire_polygons_ctrees_west.csv` | Long panel: `event_id` × `year` × mean AGB within each Western fire polygon — also reads Part A's local TIFFs |
 
-**Why Part C runs first here (unlike §3.2):** a West-scale run on GRIT was
-killed (OOM) during Part A against a 4 GiB per-session memory cap — Part A's
-in-memory coarsening on top of a live arraylake/icechunk read pushed peak
-memory over the limit even though the raw per-year array itself is only
-~2 GB. Downloading the raw GeoTIFFs first, then having Part A/B read those
-plain local files back, keeps arraylake's connection overhead out of the
-coarsening/extraction steps. This also means "raw ctrees data" now really is
-on disk as its own step before any processing happens — see the "On raw
-ctrees data" note above. (§3.2's CA script is untouched and still does
-A → B → C in one pass; it's validated at CA scale and not worth touching.)
+**Why the raw download runs first here (unlike §3.2):** a West-scale run on
+GRIT was killed (OOM) during the coarsening step against a 4 GiB per-session
+memory cap — in-memory coarsening on top of a live arraylake/icechunk read
+pushed peak memory over the limit even though the raw per-year array itself
+is only ~2 GB. Downloading the raw GeoTIFFs first, then having Parts B/C
+read those plain local files back, keeps arraylake's connection overhead out
+of the coarsening/extraction steps. This also means "raw ctrees data" now
+really is on disk as its own step before any processing happens — see the
+"On raw ctrees data" note above. (§3.2's CA script is untouched and still
+runs B → C → A, coarsen/extract before raw-TIFF-export; it's validated at
+CA scale and not worth touching.)
 
-Because Part A/B now read the GeoTIFFs Part C writes, **rasterio is a hard
+Because Parts B/C now read the GeoTIFFs Part A writes, **rasterio is a hard
 requirement** for this script (no fallback) — install it if `pip install
 arraylake zarr xarray netCDF4 geopandas rasterio` (Part 1) was skipped.
 
-Part C's per-year West TIFs are meant to be **shared across all 11
+Part A's per-year West TIFs are meant to be **shared across all 11
 states** — each state's extraction (script `08`, Part 4 below) crops its
 own slice from the same file rather than needing a separate download per
 state.

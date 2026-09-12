@@ -3,26 +3,32 @@
 # Download Ctrees aboveground biomass data for California from the
 # ucsb-emlab/BACI-wildfires arraylake zarr store.
 #
+# NOTE ON PART LETTERS vs. 04_download_ctrees_west.py: standardized to match
+# 04's mapping by output type (A = raw 100m TIFF, B = coarsened 1km NetCDF,
+# C = fire-polygon CSV). This script still *runs* B -> C -> A in that order
+# (unchanged — it's the validated CA baseline, not touched functionally);
+# only 04 reordered execution to put its raw download (A) first.
+#
 # SCRIPT OUTLINE
 # 1.  Setup — connect to arraylake, define parameters
 # 2.  Open zarr store and resolve CA bounding-box indices
-# 3.  Part A — Coarsened CA raster (for R mapping)
+# 3.  Part B — Coarsened CA raster (for R mapping)
 #       Load CA data year-by-year, coarsen to ~1 km, save as NetCDF
-# 4.  Part B — Fire polygon extraction (for R event-study / DiD)
+# 4.  Part C — Fire polygon extraction (for R event-study / DiD)
 #       Precompute rasterized polygon masks once; then extract mean AGB
 #       per fire × year using pure numpy indexing (no shapely per year).
-# 5.  Part C — Native-resolution (~100 m) annual GeoTIFFs (for R comparison)
+# 5.  Part A — Native-resolution (~100 m) annual GeoTIFFs (for R comparison)
 #       Write one GeoTIFF per year at native 100 m resolution; used by
 #       04_data_summary.qmd and biomass_within_fires.qmd to compare
 #       ctrees and eMapR at the same ~100 m resolution.
 # 6.  Sanity checks on all outputs
 #
 # OUTPUTS
+#   data/processed/ctrees/ctrees_YYYY_ca_100m.tif — native 100 m annual GeoTIFFs
 #   output/ctrees_biomass_ca_1km.nc    — coarsened CA raster, 26 years
 #   output/biomass_fire_polygons_ctrees.csv — long panel: event_id × year × agb
-#   data/processed/ctrees/ctrees_YYYY_ca_100m.tif — native 100 m annual GeoTIFFs
 #
-# EXTRACTION METHOD (Part B)
+# EXTRACTION METHOD (Part C)
 #   Two approaches were evaluated:
 #
 #   Approach 1 — Shapely point-in-polygon with grid thinning (abandoned):
@@ -223,11 +229,11 @@ print(f"  Lon range: {x_ca.min():.3f} - {x_ca.max():.3f}")
 print(f"  Extraction backend: {'rasterio.features' if USE_RASTERIO else 'matplotlib.path (fallback)'}")
 
 
-# --- 3. PART A — COARSENED CA RASTER -----------------------------------------
+# --- 3. PART B — COARSENED CA RASTER -----------------------------------------
 if OUT_NC.exists():
-    print(f"\nPart A: {OUT_NC.name} already exists — skipping.")
+    print(f"\nPart B: {OUT_NC.name} already exists — skipping.")
 else:
-    print(f"\nPart A: Building coarsened (~1 km) CA raster -> {OUT_NC.name}")
+    print(f"\nPart B: Building coarsened (~1 km) CA raster -> {OUT_NC.name}")
     coarsened_layers = []
 
     for t_idx, (yr, ts) in enumerate(zip(years, times)):
@@ -268,11 +274,11 @@ else:
     print(f"  Saved: {OUT_NC}  ({OUT_NC.stat().st_size / 1e6:.1f} MB)")
 
 
-# --- 4. PART B — FIRE POLYGON EXTRACTION -------------------------------------
+# --- 4. PART C — FIRE POLYGON EXTRACTION -------------------------------------
 if OUT_CSV.exists():
-    print(f"\nPart B: {OUT_CSV.name} already exists — skipping.")
+    print(f"\nPart C: {OUT_CSV.name} already exists — skipping.")
 else:
-    print(f"\nPart B: Extracting AGB within MTBS CA fire polygons -> {OUT_CSV.name}")
+    print(f"\nPart C: Extracting AGB within MTBS CA fire polygons -> {OUT_CSV.name}")
     assert MTBS_PATH.exists(), f"MTBS shapefile not found: {MTBS_PATH}"
 
     # -- Load and filter MTBS California wildfires ----------------------------
@@ -344,26 +350,26 @@ else:
             print(f"    {e}")
 
 
-# --- 5. PART C — NATIVE-RESOLUTION (~100 m) ANNUAL GeoTIFFs -----------------
+# --- 5. PART A — NATIVE-RESOLUTION (~100 m) ANNUAL GeoTIFFs -----------------
 # Writes one GeoTIFF per zarr year at the native ~100 m pixel grid.
 # Used by 04_data_summary.qmd and biomass_within_fires.qmd to compare
 # ctrees and eMapR at the same ~100 m resolution (eMapR side is 3× aggregated
 # from 30 m → ~90 m; both sides labeled "~100 m" by convention).
 #
-# Requires rasterio (USE_RASTERIO=True). If rasterio is not installed, Part C
+# Requires rasterio (USE_RASTERIO=True). If rasterio is not installed, Part A
 # is skipped — install it with: pip install rasterio
 
 if not USE_RASTERIO:
-    print("\nPart C: rasterio not available — skipping 100 m GeoTIFF export.")
+    print("\nPart A: rasterio not available — skipping 100 m GeoTIFF export.")
     print("  Install rasterio (pip install rasterio) and re-run to generate")
     print("  ctrees_YYYY_ca_100m.tif files.")
 else:
     tifs_needed = [yr for yr in years
                    if not (OUT_TIFS_DIR / f"ctrees_{yr}_ca_100m.tif").exists()]
     if not tifs_needed:
-        print(f"\nPart C: All {len(years)} 100 m TIFs already exist — skipping.")
+        print(f"\nPart A: All {len(years)} 100 m TIFs already exist — skipping.")
     else:
-        print(f"\nPart C: Writing {len(tifs_needed)} native-resolution (~100 m) GeoTIFFs"
+        print(f"\nPart A: Writing {len(tifs_needed)} native-resolution (~100 m) GeoTIFFs"
               f" -> {OUT_TIFS_DIR.name}/")
 
         # Pixel spacing in degrees (~0.000889); all years share the same grid
@@ -412,6 +418,15 @@ else:
 print("\nSanity checks...")
 
 # Part A
+if USE_RASTERIO:
+    tif_count = len(list(OUT_TIFS_DIR.glob("ctrees_*_ca_100m.tif")))
+    print(f"  100 m TIFs: {tif_count}/{n_years} year(s) in {OUT_TIFS_DIR.name}/")
+    if tif_count < n_years:
+        print(f"  WARNING: Only {tif_count} of {n_years} 100 m TIFs present")
+else:
+    print("  100 m TIFs: skipped (rasterio not installed)")
+
+# Part B
 ds_check = xr.open_dataset(OUT_NC)
 assert "agb" in ds_check, "NetCDF missing 'agb' variable"
 assert len(ds_check.time) == n_years, f"Expected {n_years} time steps"
@@ -422,7 +437,7 @@ print(f"  NetCDF: {len(ds_check.time)} years, "
       f"{pct_valid:.1f}% valid")
 assert pct_valid > 10, "Less than 10% valid pixels — check CA bbox or fill masking"
 
-# Part B
+# Part C
 df_check = pd.read_csv(OUT_CSV)
 assert {"event_id", "fire_year", "year", "agb_mean_mgha"}.issubset(df_check.columns)
 pct_valid_csv = 100 * df_check["agb_mean_mgha"].notna().mean()
@@ -430,14 +445,5 @@ print(f"  CSV: {df_check['event_id'].nunique()} fires x {df_check['year'].nuniqu
       f"= {len(df_check):,} records, {pct_valid_csv:.1f}% with valid AGB")
 if pct_valid_csv < 50:
     print("  WARNING: <50% valid — check polygon alignment with Ctrees grid")
-
-# Part C
-if USE_RASTERIO:
-    tif_count = len(list(OUT_TIFS_DIR.glob("ctrees_*_ca_100m.tif")))
-    print(f"  100 m TIFs: {tif_count}/{n_years} year(s) in {OUT_TIFS_DIR.name}/")
-    if tif_count < n_years:
-        print(f"  WARNING: Only {tif_count} of {n_years} 100 m TIFs present")
-else:
-    print("  100 m TIFs: skipped (rasterio not installed)")
 
 print("\nDone. Outputs ready for analysis/")

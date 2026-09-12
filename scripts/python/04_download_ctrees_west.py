@@ -11,7 +11,14 @@
 # output tier alongside them, mirroring how 00_crop_emapr_to_west.R produces
 # a "_west_" tier alongside the retired CA-only eMapR crop.
 #
-# Part C's per-year GeoTIFFs (ctrees_YYYY_west_100m.tif) are meant to be
+# NOTE ON PART LETTERS vs. 03_download_ctrees_ca.py: this script's parts run
+# in alphabetical/execution order (A = raw download, B = coarsened NetCDF,
+# C = fire-polygon CSV) — 03's A/B/C instead match output type regardless of
+# order (A = 1km NetCDF, B = fire CSV, C = raw TIFF) and still run A -> B -> C
+# in that original order. The letter for a given output differs between the
+# two scripts; DATA_DOWNLOAD_GUIDE.md documents each script's own mapping.
+#
+# Part A's per-year GeoTIFFs (ctrees_YYYY_west_100m.tif) are meant to be
 # shared across all 11 states — scripts/r/07 and 08 will eventually loop
 # STATE_FIPS over WESTERN_STATES and crop this same West-wide TIF per state
 # per year, rather than needing one ctrees TIF per state.
@@ -19,19 +26,19 @@
 # SCRIPT OUTLINE
 # 1.  Setup — connect to arraylake, define parameters
 # 2.  Open zarr store and resolve West bounding-box indices
-# 3.  Part C — Native-resolution (~100 m) annual GeoTIFFs (raw download)
+# 3.  Part A — Native-resolution (~100 m) annual GeoTIFFs (raw download)
 #       Runs FIRST: write one GeoTIFF per year at native 100 m resolution,
 #       West-bbox extent, straight from arraylake. This is the retained
 #       "raw" copy (see DATA_DOWNLOAD_GUIDE.md Part 3) and the only step in
 #       this script that talks to arraylake for actual pixel data — running
-#       it first means Part A/B below process a plain local raster instead
+#       it first means Part B/C below process a plain local raster instead
 #       of a live remote read, isolating arraylake/icechunk overhead from
 #       the heavier in-memory coarsening math.
-# 4.  Part A — Coarsened West raster (for R mapping)
-#       Reads each year's array back from Part C's local GeoTIFF (not from
+# 4.  Part B — Coarsened West raster (for R mapping)
+#       Reads each year's array back from Part A's local GeoTIFF (not from
 #       arraylake again), coarsens to ~1 km, checkpoints each year's array
 #       to scratch (resume-safe), then assembles into one NetCDF.
-# 5.  Part B — Fire polygon extraction (for R event-study / DiD)
+# 5.  Part C — Fire polygon extraction (for R event-study / DiD)
 #       Precompute rasterized polygon masks once; then extract mean AGB
 #       per fire x year using local GeoTIFF reads + numpy indexing (no
 #       shapely per year, no arraylake reads).
@@ -45,7 +52,7 @@
 # RESOURCE NOTES (vs. 03_download_ctrees_ca.py)
 #   West bbox is ~4.1x the CA bbox by area (~511M px/year vs ~125M px/year at
 #   ~100 m). Per-year raw read is ~2 GB (float32). Do NOT accumulate multiple
-#   years of the raw (uncoarsened) array at once. Part C's 26 compressed
+#   years of the raw (uncoarsened) array at once. Part A's 26 compressed
 #   GeoTIFFs total on the order of 8-20 GB on disk. Runtime is dominated by
 #   ~26 network reads at 4x the size, plus mask precompute over ~6.8k fires
 #   (vs. 1.1k for CA) — budget for a multi-hour run. Disable sleep before
@@ -54,24 +61,24 @@
 #   terminal, not a notebook — Part A/B/C all checkpoint per-year/per-fire.
 #
 #   GRIT note: a run against a 4 GiB per-session memory cap was killed (OOM)
-#   during Part A when Part A/B still read directly from arraylake — the
-#   live zarr/icechunk read+decompress path adds overhead on top of the
-#   ~2 GB raw array, on top of Part A's coarsen_block() reshape/mean scratch
-#   arrays. Having Part A/B read back from Part C's local GeoTIFF instead
+#   during the coarsening step when it still read directly from arraylake —
+#   the live zarr/icechunk read+decompress path adds overhead on top of the
+#   ~2 GB raw array, on top of the coarsen_block() reshape/mean scratch
+#   arrays. Having Part B/C read back from Part A's local GeoTIFF instead
 #   (this version) removes the arraylake/icechunk overhead from that step,
 #   though the ~2 GB per-year array itself is unavoidable regardless of
 #   source — if OOM kills persist, ask GRIT admin for a higher memory cap.
 #
-# PART A CHECKPOINTING (new vs. 03)
-#   03's Part A holds all 26 coarsened years in memory and writes the NetCDF
-#   once at the end — a fine tradeoff at CA scale, but risky at West scale
-#   given a multi-hour runtime (the eMapR West crop was already interrupted
-#   twice by laptop sleep at a similar wall-clock scale). Each coarsened year
-#   is now saved to a scratch .npy immediately after computing it and skipped
-#   on re-run if already present; the final NetCDF assembly step only runs
-#   once all years are checkpointed.
+# PART B CHECKPOINTING (new vs. 03)
+#   03's coarsening step holds all 26 coarsened years in memory and writes
+#   the NetCDF once at the end — a fine tradeoff at CA scale, but risky at
+#   West scale given a multi-hour runtime (the eMapR West crop was already
+#   interrupted twice by laptop sleep at a similar wall-clock scale). Each
+#   coarsened year is now saved to a scratch .npy immediately after computing
+#   it and skipped on re-run if already present; the final NetCDF assembly
+#   step only runs once all years are checkpointed.
 #
-# EXTRACTION METHOD (Part B) — unchanged from 03; see that script for the
+# EXTRACTION METHOD (Part C) — unchanged from 03; see that script for the
 # shapely-vs-rasterio evaluation notes.
 #
 # DATASET NOTES (from 02_explore_ctrees_zarr.py)
@@ -108,12 +115,12 @@ except ImportError:
     from matplotlib.path import Path as MplPath
     USE_RASTERIO = False
 
-# Part C's raw GeoTIFFs are now a hard dependency for Part A/B (they read the
+# Part A's raw GeoTIFFs are now a hard dependency for Part B/C (they read the
 # raw array back from disk instead of arraylake) — rasterio is required to
 # both write and read those TIFFs, so there's no fallback path here anymore.
 if not USE_RASTERIO:
     print("ERROR: rasterio is required (it now backs the raw-GeoTIFF download\n"
-          "that Part A/B read from). Install it with: pip install rasterio")
+          "that Part B/C read from). Install it with: pip install rasterio")
     sys.exit(1)
 
 PROJ_ROOT     = Path(__file__).resolve().parent.parent.parent
@@ -122,7 +129,7 @@ OUT_NC        = OUT_TIFS_DIR / "ctrees_biomass_west_1km.nc"
 OUT_CSV       = OUT_TIFS_DIR / "biomass_fire_polygons_ctrees_west.csv"
 MTBS_PATH     = PROJ_ROOT / "data" / "raw" / "mtbs" / "mtbs_perimeter_data" / "mtbs_perims_DD.shp"
 
-# Scratch dir for Part A per-year checkpoints (deleted after successful NetCDF assembly)
+# Scratch dir for Part B per-year checkpoints (deleted after successful NetCDF assembly)
 SCRATCH_DIR   = OUT_TIFS_DIR / "_west_1km_scratch"
 
 # -- Ctrees zarr parameters (from exploration script) -------------------------
@@ -166,10 +173,10 @@ def tif_path_for_year(yr):
 
 def read_year_raster(yr):
     """
-    Read one year's raw West-bbox array back from Part C's local GeoTIFF.
+    Read one year's raw West-bbox array back from Part A's local GeoTIFF.
 
     The TIFF already has fill values converted to NaN and the int16->Mg ha^-1
-    scale factor applied (done once, in Part C, before writing) — so this is
+    scale factor applied (done once, in Part A, before writing) — so this is
     a plain local raster read, no arraylake connection and no re-masking.
     """
     with rasterio.open(tif_path_for_year(yr)) as src:
@@ -260,7 +267,7 @@ print(f"  Lat range: {y_west.min():.3f} - {y_west.max():.3f}")
 print(f"  Lon range: {x_west.min():.3f} - {x_west.max():.3f}")
 
 
-# --- 3. PART C — DOWNLOAD NATIVE-RESOLUTION (~100 m) RAW GeoTIFFs ------------
+# --- 3. PART A — DOWNLOAD NATIVE-RESOLUTION (~100 m) RAW GeoTIFFs ------------
 # Runs first: this is the only section that reads pixel data from arraylake.
 # Writes one GeoTIFF per zarr year at the native ~100 m pixel grid, full West
 # bbox. Meant to be shared across all 11 states once scripts/r/07 and 08 loop
@@ -274,9 +281,9 @@ transform_c = _rio_from_origin(west_c, north_c, RES, RES)
 
 tifs_needed = [yr for yr in years if not tif_path_for_year(yr).exists()]
 if not tifs_needed:
-    print(f"\nPart C: All {len(years)} raw 100 m TIFs already exist — skipping.")
+    print(f"\nPart A: All {len(years)} raw 100 m TIFs already exist — skipping.")
 else:
-    print(f"\nPart C: Downloading {len(tifs_needed)} native-resolution (~100 m) raw GeoTIFFs"
+    print(f"\nPart A: Downloading {len(tifs_needed)} native-resolution (~100 m) raw GeoTIFFs"
           f" -> {OUT_TIFS_DIR.name}/")
 
     for t_idx, yr in enumerate(years):
@@ -314,16 +321,16 @@ else:
     print(f"  Done. {n_done}/{len(years)} raw 100 m TIFs present in {OUT_TIFS_DIR.name}/")
 
 assert all(tif_path_for_year(yr).exists() for yr in years), (
-    "Part C did not produce a raw TIFF for every year — Part A/B below "
+    "Part A did not produce a raw TIFF for every year — Part B/C below "
     "require all years present locally before they can proceed."
 )
 
 
-# --- 4. PART A — COARSENED WEST RASTER (reads Part C's local TIFFs) ---------
+# --- 4. PART B — COARSENED WEST RASTER (reads Part A's local TIFFs) ---------
 if OUT_NC.exists():
-    print(f"\nPart A: {OUT_NC.name} already exists — skipping.")
+    print(f"\nPart B: {OUT_NC.name} already exists — skipping.")
 else:
-    print(f"\nPart A: Building coarsened (~1 km) West raster -> {OUT_NC.name}")
+    print(f"\nPart B: Building coarsened (~1 km) West raster -> {OUT_NC.name}")
 
     for t_idx, yr in enumerate(years):
         scratch_path = SCRATCH_DIR / f"coarsened_{yr}.npy"
@@ -378,11 +385,11 @@ else:
         pass   # leave it if anything unexpected remains
 
 
-# --- 5. PART B — FIRE POLYGON EXTRACTION (reads Part C's local TIFFs) -------
+# --- 5. PART C — FIRE POLYGON EXTRACTION (reads Part A's local TIFFs) -------
 if OUT_CSV.exists():
-    print(f"\nPart B: {OUT_CSV.name} already exists — skipping.")
+    print(f"\nPart C: {OUT_CSV.name} already exists — skipping.")
 else:
-    print(f"\nPart B: Extracting AGB within MTBS West fire polygons -> {OUT_CSV.name}")
+    print(f"\nPart C: Extracting AGB within MTBS West fire polygons -> {OUT_CSV.name}")
     assert MTBS_PATH.exists(), f"MTBS shapefile not found: {MTBS_PATH}"
 
     # -- Load and filter MTBS Western US wildfires -----------------------------
@@ -413,8 +420,8 @@ else:
     print(f"  {n_with_mask}/{len(mtbs_west)} fire polygons overlap the West raster grid", flush=True)
 
     # -- Extract year by year using precomputed masks --------------------------
-    # Checkpointed per year (mirrors Part A) — two prior runs of this script
-    # were killed unexpectedly after several hours, once mid-Part-B, losing
+    # Checkpointed per year (mirrors Part B) — two prior runs of this script
+    # were killed unexpectedly after several hours, once mid-extraction, losing
     # all in-memory progress since the original version only wrote the CSV
     # once at the end. Each year's records now land in SCRATCH_DIR_B
     # immediately and are skipped on re-run if already present.
@@ -478,13 +485,13 @@ else:
 # --- 6. SANITY CHECKS --------------------------------------------------------
 print("\nSanity checks...")
 
-# Part C
+# Part A
 tif_count = len(list(OUT_TIFS_DIR.glob("ctrees_*_west_100m.tif")))
 print(f"  Raw 100 m TIFs: {tif_count}/{n_years} year(s) in {OUT_TIFS_DIR.name}/")
 if tif_count < n_years:
     print(f"  WARNING: Only {tif_count} of {n_years} raw 100 m TIFs present")
 
-# Part A
+# Part B
 ds_check = xr.open_dataset(OUT_NC)
 assert "agb" in ds_check, "NetCDF missing 'agb' variable"
 assert len(ds_check.time) == n_years, f"Expected {n_years} time steps"
@@ -495,7 +502,7 @@ print(f"  NetCDF: {len(ds_check.time)} years, "
       f"{pct_valid:.1f}% valid")
 assert pct_valid > 10, "Less than 10% valid pixels — check West bbox or fill masking"
 
-# Part B
+# Part C
 df_check = pd.read_csv(OUT_CSV)
 assert {"event_id", "state", "fire_year", "year", "agb_mean_mgha"}.issubset(df_check.columns)
 pct_valid_csv = 100 * df_check["agb_mean_mgha"].notna().mean()
