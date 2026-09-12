@@ -61,13 +61,17 @@
 #   terminal, not a notebook — Part A/B/C all checkpoint per-year/per-fire.
 #
 #   GRIT note: a run against a 4 GiB per-session memory cap was killed (OOM)
-#   during the coarsening step when it still read directly from arraylake —
-#   the live zarr/icechunk read+decompress path adds overhead on top of the
-#   ~2 GB raw array, on top of the coarsen_block() reshape/mean scratch
-#   arrays. Having Part B/C read back from Part A's local GeoTIFF instead
-#   (this version) removes the arraylake/icechunk overhead from that step,
-#   though the ~2 GB per-year array itself is unavoidable regardless of
-#   source — if OOM kills persist, ask GRIT admin for a higher memory cap.
+#   during the coarsening step. Root cause: West's dimensions aren't exact
+#   multiples of COARSEN (25650 cols / 11 truncates to 25641), so
+#   coarsen_block()'s reshape() was non-contiguous and numpy silently copied
+#   the entire ~2 GB truncated array to satisfy it — briefly ~4 GB (raw +
+#   copy) plus library overhead, over the cap. Fixed by having coarsen_block
+#   process one row-strip at a time (bounds any such copy to ~1 MB instead
+#   of the whole array) — see its docstring. Having Part B/C read back from
+#   Part A's local GeoTIFF instead of a live arraylake read (this version)
+#   is a smaller, secondary win (removes icechunk decompress overhead from
+#   that step) but was not the main fix. If OOM kills persist after both
+#   fixes, ask GRIT admin for a higher memory cap.
 #
 # PART B CHECKPOINTING (new vs. 03)
 #   03's coarsening step holds all 26 coarsened years in memory and writes
@@ -160,11 +164,29 @@ SCRATCH_DIR.mkdir(parents=True, exist_ok=True)
 
 
 def coarsen_block(arr2d, factor):
-    """Block-average a 2D numpy array by `factor` in each dimension."""
+    """
+    Block-average a 2D numpy array by `factor` in each dimension.
+
+    Processes one row-strip (`factor` rows at a time) rather than reshaping
+    the whole truncated array at once. West's dimensions aren't exact
+    multiples of `factor` (25650 cols / 11 truncates to 25641), so the
+    naive `arr2d[:ny_c*factor, :nx_c*factor].reshape(...)` is non-contiguous
+    and numpy silently copies the *entire* ~2 GB truncated array to satisfy
+    the reshape — briefly doubling peak memory on top of the raw array
+    already in memory. That combination was almost certainly what OOM-killed
+    the original run on GRIT's 4 GiB cap, not the arraylake connection.
+    Row-strip processing bounds any such copy to one strip's size
+    (~1 MB here) instead of the whole array.
+    """
     ny, nx = arr2d.shape
     ny_c, nx_c = ny // factor, nx // factor
-    arr2d = arr2d[: ny_c * factor, : nx_c * factor]
-    return arr2d.reshape(ny_c, factor, nx_c, factor).mean(axis=(1, 3))
+    nx_trim = nx_c * factor
+
+    out = np.empty((ny_c, nx_c), dtype=arr2d.dtype)
+    for i in range(ny_c):
+        strip = arr2d[i * factor:(i + 1) * factor, :nx_trim]
+        out[i] = strip.reshape(factor, nx_c, factor).mean(axis=(0, 2))
+    return out
 
 
 def tif_path_for_year(yr):

@@ -298,15 +298,21 @@ TIFF, B = 1km NetCDF, C = fire CSV) — but unlike §3.2, this script actually
 
 **Why the raw download runs first here (unlike §3.2):** a West-scale run on
 GRIT was killed (OOM) during the coarsening step against a 4 GiB per-session
-memory cap — in-memory coarsening on top of a live arraylake/icechunk read
-pushed peak memory over the limit even though the raw per-year array itself
-is only ~2 GB. Downloading the raw GeoTIFFs first, then having Parts B/C
-read those plain local files back, keeps arraylake's connection overhead out
-of the coarsening/extraction steps. This also means "raw ctrees data" now
-really is on disk as its own step before any processing happens — see the
-"On raw ctrees data" note above. (§3.2's CA script is untouched and still
-runs B → C → A, coarsen/extract before raw-TIFF-export; it's validated at
-CA scale and not worth touching.)
+memory cap. The actual root cause: West's grid isn't an exact multiple of
+the coarsening factor (25650 cols / 11 truncates to 25641), so the naive
+`reshape()` in `coarsen_block()` was non-contiguous and numpy silently
+copied the entire ~2 GB truncated array to satisfy it — briefly ~4 GB (raw
+array + copy) plus library overhead, over the cap. This is fixed by having
+`coarsen_block()` process one row-strip at a time instead of reshaping the
+whole array (see the function's docstring) — that's the main fix. Separately,
+downloading the raw GeoTIFFs first and having Parts B/C read those plain
+local files back removes some smaller arraylake/icechunk overhead from the
+coarsening/extraction steps, and means "raw ctrees data" is now on disk as
+its own step before any processing happens — see the "On raw ctrees data"
+note above. (§3.2's CA script is untouched and still runs B → C → A,
+coarsen/extract before raw-TIFF-export, using the original whole-array
+reshape — CA's grid is ~4x smaller, so the same truncation-copy never got
+close to a 4 GiB cap; it's validated at CA scale and not worth touching.)
 
 Because Parts B/C now read the GeoTIFFs Part A writes, **rasterio is a hard
 requirement** for this script (no fallback) — install it if `pip install
