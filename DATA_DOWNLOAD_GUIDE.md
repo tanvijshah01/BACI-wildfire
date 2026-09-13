@@ -303,29 +303,42 @@ happens — see the "On raw ctrees data" note above. (§3.2's CA script is
 untouched and still runs B → C → A, coarsen/extract before raw-TIFF-export;
 it's validated at CA scale and not worth touching.)
 
-**Memory on GRIT — two rounds of OOM kills, two different root causes:**
-1. A run was first killed during the coarsening step against a 4 GiB
-   per-session memory cap. Root cause: West's grid isn't an exact multiple
-   of the coarsening factor (25650 cols / 11 truncates to 25641), so a
-   whole-array `reshape()` for coarsening was non-contiguous and numpy
-   silently copied the entire ~2 GB truncated array to satisfy it — briefly
-   ~4 GB (array + copy) plus library overhead, over the cap.
-2. After reordering Part A first, **a second run was killed during Part A's
-   plain raw download** — no coarsening math involved at all. Turns out
-   just holding one ~2 GB float32 year array (from an int16→float32 cast
-   plus a same-shape boolean fill-mask), alongside several hundred MB–1 GB
-   of geopandas/rasterio/arraylake/xarray import overhead, was enough to
-   exceed the cap on its own.
+**Memory on GRIT — three rounds of OOM kills, three different root causes.**
+GRIT's interactive sessions run as Slurm jobs with a cgroup memory limit
+(confirmed via `/proc/self/cgroup` → a slurmstepd job/step/task cgroup with
+nonzero `oom_kill` counts in its `memory.events`). An earlier "4 GiB
+`ulimit -m`" reading turned out to be a red herring — `RLIMIT_RSS` isn't
+actually enforced by modern Linux, and summing this user's other processes'
+RSS exceeded 4 GB without anything being killed, which a simple aggregate
+4 GB cap couldn't explain. The exact `memory.max` for the job was never
+pinned down, but three OOM kills at three different steps confirmed the
+pattern regardless of the exact number:
+1. **Coarsening.** West's grid isn't an exact multiple of the coarsening
+   factor (25650 cols / 11 truncates to 25641), so a whole-array
+   `reshape()` was non-contiguous and numpy silently copied the entire
+   ~2 GB truncated array to satisfy it.
+2. **Part A's plain raw download** (after reordering Part A first) — no
+   coarsening math involved at all. Just holding one ~2 GB float32 year
+   array (int16→float32 cast + a same-shape boolean fill-mask), plus
+   several hundred MB–1 GB of geopandas/rasterio/arraylake/xarray import
+   overhead, was enough on its own.
+3. **Part B's final NetCDF assembly** — after fixing (1), the per-year
+   coarsening succeeded for all 26 years, but assembling them held up to
+   three ~439 MB copies simultaneously (a list of all 26 cached arrays,
+   `np.stack()`'s result, and a redundant `.astype()` copy of that result).
 
-Both are now fixed the same way: neither Part A (raw download, via
-`STRIP_ROWS`) nor Part B (coarsening, via `coarsen_year_from_tif()`) ever
-materializes a full year array anymore — both read/write in small row-strips
-via rasterio windows, so peak memory per step is tens–hundreds of MB instead
-of ~2–4 GB. Part C still loads a full raster per year (it needs scattered
-access across the whole extent for polygon masks) — if that OOMs too, it
-would need the same per-fire windowed-read treatment. (§3.2's CA script uses
-none of this — CA's grid is ~4x smaller, so neither failure mode got
-anywhere near a 4 GiB cap there.)
+All three are now fixed the same way — never materialize a full array:
+Part A writes in row-strips (`STRIP_ROWS`), Part B's coarsening reads and
+averages via `factor`-row TIFF windows (`coarsen_year_from_tif()`), and
+Part B's final NetCDF write happens one year at a time directly into the
+file (plain `netCDF4`, not xarray's `Dataset`/`to_netcdf`, which needs the
+whole array up front). Part C still loads a full raster per year (it needs
+scattered access across the whole extent for polygon masks) — if that OOMs
+too, it would need the same per-fire windowed-read treatment. (§3.2's CA
+script uses none of this — CA's grid is ~4x smaller, so none of these
+failure modes got anywhere near the cap there.) If OOM kills persist after
+all this, the remaining option is asking GRIT's Slurm admin for a larger
+memory allocation for the job.
 
 Because Parts B/C now read the GeoTIFFs Part A writes, **rasterio is a hard
 requirement** for this script (no fallback) — install it if `pip install

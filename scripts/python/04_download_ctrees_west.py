@@ -60,24 +60,37 @@
 #   download guidance in DATA_DOWNLOAD_GUIDE.md) and run from a real
 #   terminal, not a notebook — Part A/B/C all checkpoint per-year/per-fire.
 #
-#   GRIT note: multiple runs were killed (OOM) against a 4 GiB per-session
-#   memory cap — first during the coarsening step, then even during Part A's
-#   plain raw download (no coarsening math at all). Root cause both times was
-#   materializing a full ~2 GB year array: (1) West's dimensions aren't exact
-#   multiples of COARSEN (25650 cols / 11 truncates to 25641), so a whole-
-#   array reshape for coarsening was non-contiguous and numpy silently
-#   copied the entire truncated array to satisfy it; (2) even without any
-#   coarsening, holding one ~2 GB float32 year array (from an int16->float32
-#   cast plus a same-shape boolean fill-mask) alongside library import
-#   overhead (geopandas/rasterio/arraylake/xarray, easily several hundred
-#   MB-1 GB) was enough to exceed the cap on its own. Both Part A (raw
-#   download) and Part B (coarsening) now read/write in row-strips
-#   (STRIP_ROWS for A, `factor`-row windows in coarsen_year_from_tif for B)
-#   so no step ever holds more than one strip (~tens-hundreds of MB) instead
-#   of a whole year array. Part C still loads a full raster per year (needed
-#   for scattered polygon indexing across the whole extent) — if that OOMs
-#   too, it would need the same per-fire windowed-read treatment. If OOM
-#   kills persist after all this, ask GRIT admin for a higher memory cap.
+#   GRIT note: multiple runs were killed (OOM). GRIT's interactive sessions
+#   run as Slurm jobs with a cgroup memory limit (confirmed via
+#   /proc/self/cgroup -> a slurmstepd job/step/task cgroup with nonzero
+#   oom_kill counts in its memory.events; the exact memory.max wasn't pinned
+#   down, and an earlier "4 GiB ulimit -m" reading turned out to be a red
+#   herring — RLIMIT_RSS isn't actually enforced by modern Linux, and a
+#   `ps`-based sum of this user's other processes exceeded 4 GB without
+#   anything being killed, contradicting a simple aggregate 4 GB cap).
+#   Three separate OOM kills were traced to three different steps all
+#   materializing a full ~2 GB (or ~439 MB) array unnecessarily:
+#     1. Coarsening: West's dimensions aren't exact multiples of COARSEN
+#        (25650 cols / 11 truncates to 25641), so a whole-array reshape was
+#        non-contiguous and numpy silently copied the entire array.
+#     2. Part A's plain raw download (no coarsening at all): just holding
+#        one ~2 GB float32 year array (int16->float32 cast + a same-shape
+#        boolean fill-mask), plus library import overhead, was enough on
+#        its own.
+#     3. Part B's final NetCDF assembly: loading all 26 cached years into a
+#        list, np.stack()-ing them, then calling .astype() on the result
+#        held up to three ~439 MB copies (list + stack + astype copy)
+#        simultaneously.
+#   Fixed by never materializing a full array at any step: Part A writes in
+#   row-strips (STRIP_ROWS), Part B's coarsening reads+averages via
+#   `factor`-row TIFF windows (coarsen_year_from_tif), and Part B's NetCDF
+#   assembly writes one year directly into the file at a time (plain
+#   netCDF4, not xarray's Dataset/to_netcdf). Part C still loads a full
+#   raster per year (needed for scattered polygon indexing across the whole
+#   extent) — if that OOMs too, it would need the same per-fire
+#   windowed-read treatment. If OOM kills persist after all this, the
+#   remaining option is asking GRIT's Slurm admin for a larger memory
+#   allocation for this job.
 #
 # PART B CHECKPOINTING (new vs. 03)
 #   03's coarsening step holds all 26 coarsened years in memory and writes
@@ -111,7 +124,7 @@ import numpy as np
 import pandas as pd
 import geopandas as gpd
 import xarray as xr
-import netCDF4          # required by xarray for NetCDF write
+import netCDF4          # writes Part B's NetCDF directly (see Part B) and backs xarray's reader
 import shapely
 from pathlib import Path
 
@@ -392,35 +405,49 @@ else:
         np.save(scratch_path, coarsened)
         print(f"  {t_idx + 1}/{n_years} years processed ({yr}) — checkpointed", flush=True)
 
-    # All years checkpointed — assemble into one NetCDF
-    coarsened_layers = [np.load(SCRATCH_DIR / f"coarsened_{yr}.npy") for yr in years]
-
-    ny_c, nx_c = coarsened_layers[0].shape
+    # All years checkpointed — assemble into one NetCDF, written one year at a
+    # time directly into the file (netCDF4, not xarray's Dataset/to_netcdf).
+    # An earlier version loaded all 26 cached arrays into a list, np.stack()'d
+    # them into one combined array, then called .astype() on the result before
+    # writing — up to three ~439 MB copies held simultaneously (list + stack +
+    # astype copy), which OOM-killed this step even though every per-year
+    # array was already safely cached. Writing incrementally bounds peak
+    # memory to roughly one year's array (~17 MB) instead.
+    ny_c, nx_c = np.load(SCRATCH_DIR / f"coarsened_{years[0]}.npy").shape
     x_c = x_west[: nx_c * COARSEN].reshape(nx_c, COARSEN).mean(axis=1)
     y_c = y_west[: ny_c * COARSEN].reshape(ny_c, COARSEN).mean(axis=1)
 
-    agb_stack = np.stack(coarsened_layers, axis=0)   # (26, ny_c, nx_c)
+    with netCDF4.Dataset(OUT_NC, "w", format="NETCDF4") as ncf:
+        ncf.title = "Ctrees aboveground biomass — Western US ~1 km"
+        ncf.source = "ucsb-emlab/BACI-wildfires (arraylake)"
+        ncf.scale_note = "Coarsened to ~1 km by block-averaging native 100 m pixels"
+        ncf.crs = "EPSG:4326 (WGS84)"
 
-    ds_out = xr.Dataset(
-        {"agb": (["time", "y", "x"], agb_stack.astype("float32"))},
-        coords={
-            "time": times.values,
-            "y":    ("y", y_c),
-            "x":    ("x", x_c),
-        },
-        attrs={
-            "title":        "Ctrees aboveground biomass — Western US ~1 km",
-            "source":       "ucsb-emlab/BACI-wildfires (arraylake)",
-            "units":        "Mg ha-1",
-            "scale_note":   "Coarsened to ~1 km by block-averaging native 100 m pixels",
-            "crs":          "EPSG:4326 (WGS84)",
-        }
-    )
-    ds_out["agb"].attrs.update({"units": "Mg ha-1", "long_name": "Aboveground Biomass",
-                                "_FillValue": -9999.0})
+        ncf.createDimension("time", n_years)
+        ncf.createDimension("y", ny_c)
+        ncf.createDimension("x", nx_c)
 
-    encoding = {"agb": {"dtype": "float32", "zlib": True, "complevel": 4}}
-    ds_out.to_netcdf(OUT_NC, encoding=encoding)
+        time_var = ncf.createVariable("time", "f8", ("time",))
+        time_var.units = "days since 1970-01-01"
+        time_var.calendar = "standard"
+        time_var[:] = netCDF4.date2num(times.to_pydatetime(), units=time_var.units,
+                                        calendar=time_var.calendar)
+
+        y_var = ncf.createVariable("y", "f8", ("y",))
+        y_var[:] = y_c
+        x_var = ncf.createVariable("x", "f8", ("x",))
+        x_var[:] = x_c
+
+        agb_var = ncf.createVariable("agb", "f4", ("time", "y", "x"),
+                                      zlib=True, complevel=4, fill_value=-9999.0)
+        agb_var.units = "Mg ha-1"
+        agb_var.long_name = "Aboveground Biomass"
+
+        for i, yr in enumerate(years):
+            year_arr = np.load(SCRATCH_DIR / f"coarsened_{yr}.npy")
+            agb_var[i, :, :] = year_arr
+            del year_arr
+
     print(f"  Saved: {OUT_NC}  ({OUT_NC.stat().st_size / 1e6:.1f} MB)")
 
     # Clean up scratch checkpoints now that the NetCDF is safely written
