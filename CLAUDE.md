@@ -264,26 +264,36 @@ and open questions are tracked in `NOTES.md` → Design decisions & open questio
 
 ## Current Status
 
-*Last updated 2026-09-20. Reflects the GRIT archive. Detailed history is in `NOTES.md`.*
+*Last updated 2026-09-20 (evening). Reflects the GRIT archive. Detailed history is in `NOTES.md`.*
 
 ### Done
 - [x] MTBS fire perimeters downloaded
-- [x] Per-state NLCD 2004 forest masks (`05`) — CA and WY built
-- [x] `07`/`08` rewritten for multi-state West reading shared West-wide rasters; validated on CA + WY
-      (ctrees matches the retired CA baseline exactly, r = 1.000; eMapR re-validation pending)
+- [x] `07`/`08` rewritten for multi-state West reading shared West-wide rasters; ctrees matches the
+      retired CA baseline exactly on fire selection (r = 1.000 in the Aug validation harness; eMapR
+      re-validation pending)
 - [x] Validation harness (`validate_west_pipeline.R` + `west_pipeline_sanity_check.qmd`)
 - [x] West-wide eMapR crop script (`00_crop_emapr_to_west.R`) and raw-file validity checker
       (`check_raw_emapr_files.R`)
-- [x] `04_download_ctrees_west.py` hardened against GRIT OOM kills; Part A raw TIFs 26/26 present on GRIT
+- [x] `04_download_ctrees_west.py` fully re-run on GRIT: 26/26 raw TIFs, valid `.nc`, 177,242-record fire
+      CSV — **but see the corrupt-years item below before trusting 2000/2001 specifically**
+- [x] `06`/`07`/`08`'s MTBS-loading OOM fixed (OGR SQL read-time filter) and verified on GRIT (304 CA
+      fires, exact match to the validated baseline)
+- [x] GRIT's actual memory cap identified: 4 GiB, enforced via cgroup v2 (not a laptop-era red herring —
+      see `NOTES.md` "Technical gotchas")
 
 ### Incomplete — next actions
-- [ ] **ctrees West on GRIT:** delete the corrupt `ctrees_biomass_west_1km.nc`, pull latest, relaunch
-      `04_download_ctrees_west.py` under `tmux` (Part C has never run at West scale), then cross-validate
-      the West CSV's CA rows against the `03` baseline (expect r ≈ 1.000)
+- [ ] **`ctrees_2000_west_100m.tif` / `ctrees_2001_west_100m.tif` are confirmed 100% NaN** — Part A's
+      validity check is now fixed (commit `4686a2c`) but not yet exercised against these two files; delete
+      them plus the downstream `.nc`/CSV and re-run `04` (exact commands in `NOTES.md`'s 2026-09-20 entry)
+- [ ] **`05`'s `FedData::get_nlcd()` call OOMs on GRIT** downloading NLCD 2004 for CA — root cause
+      suspected (see `NOTES.md`) but not fixed; forest masks for CA/WY are NOT currently confirmed present
+      on GRIT despite earlier laptop-era status saying so — verify directly before assuming built
+- [ ] **Cross-validate ctrees West CSV's CA rows against the `03` baseline** — `03_download_ctrees_ca.py`
+      itself is separately dying with no traceback on GRIT (plausibly the same cgroup cap, not confirmed)
 - [ ] **Raw eMapR archive:** 19/34 years confirmed complete on GRIT (2026-09-08); fetch the rest
       (`DATA_DOWNLOAD_GUIDE.md` §2.2), validate, then run `00_crop_emapr_to_west.R`
 - [ ] **Widen `STATES_TO_RUN`** in `06`–`08` (and `05`) beyond CA/WY once West rasters exist for the needed
-      years
+      years — blocked on the two items above first
 - [ ] **Root-cause the residual eMapR bias vs. ctrees** and re-check the border-fire count gap on real
       multi-state output (`biomass_within_fires.qmd` §7; `NOTES.md`)
 - [ ] **Resolve MTBS Initial vs. Extended assessment bias** (`mtbs_assessment_comparison.qmd`)

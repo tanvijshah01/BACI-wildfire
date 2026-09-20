@@ -47,13 +47,33 @@ This is why `07`/`08` extract per polygon instead of masking a whole state up fr
 random compressed disk I/O, not code structure — don't "optimize" this into a whole-raster operation
 (re-derived and confirmed several times).
 
-### Never materialize a full array (Python, GRIT memory cap)
-GRIT sessions run under a Slurm cgroup memory limit. `04_download_ctrees_west.py` was OOM-killed three
-times, each from holding a full ~2 GB year array (or several ~439 MB copies) in memory. The pattern that
-fixed all three: stream — row-strip writes, windowed reads, one-year-at-a-time NetCDF writes with plain
-`netCDF4`. See the 2026-09-20 log entry for the incident chronology and `DATA_DOWNLOAD_GUIDE.md` §3.3 for
-what to do if it recurs. (An earlier "4 GiB `ulimit -m`" diagnosis was a red herring — `RLIMIT_RSS` isn't
-enforced on modern Linux.)
+### GRIT's real memory cap: 4 GiB, enforced via cgroup v2 — not a red herring after all
+GRIT interactive/Jupyter sessions run as Slurm jobs. **Confirmed by walking the actual cgroup hierarchy**
+(`cat /proc/self/cgroup`, then `memory.max`/`memory.current`/`memory.events` up each ancestor under
+`/sys/fs/cgroup/`): the job level and `step_batch/user` level both cap at exactly **4,294,967,296 bytes =
+4 GiB**, with `oom_kill` counts confirming real, repeated kills. **This corrects earlier project lore** — a
+previous "4 GiB `ulimit -m`" reading was dismissed as a red herring because `RLIMIT_RSS` isn't enforced by
+modern Linux, which is true on its own terms, but the number itself was right all along; nobody had checked
+the cgroup enforcement mechanism until 2026-09-20. Baseline usage sits around **~1.7 GiB even at rest**
+(Positron/JupyterLab server + R kernel overhead within the same job), leaving roughly **2.3 GiB of real
+headroom** for anything you run — a number worth remembering before assuming a script "should" fit.
+
+This cap has independently killed three unrelated things: `04_download_ctrees_west.py` (three separate OOM
+kills, see the 2026-09-20 log entry — fixed by never materializing a full ~2 GB array: row-strip writes,
+windowed reads, one-year-at-a-time NetCDF writes with plain `netCDF4`), R's `sf::st_read()` loading the
+full national MTBS shapefile in `06`/`07`/`08` (fixed by filtering at read time via an OGR SQL query, see
+below), and `FedData::get_nlcd()` inside `05` (not yet fixed — see 2026-09-20 log). If something dies with
+a bare `Killed` and no traceback, suspect this cap first; walk the cgroup hierarchy the same way rather than
+guessing, since the leaf cgroup's own `memory.max` can read `max` (unlimited) while an ancestor enforces the
+real limit — checking only the leaf will wrongly clear the cap as a cause.
+
+### Vector loads need the same "don't materialize the whole thing" treatment as rasters
+Not just `terra`/rasters (above) — `sf::st_read()` on the full national MTBS shapefile (~30k fires, complex
+polygon geometry) hit the GRIT cgroup cap on its own in `06`/`07`/`08`, before any R-side `dplyr::filter()`
+ran. Fixed by pushing the attribute filters every one of those scripts already applies unconditionally
+(`incid_type = 'Wildfire'`, plus `burnbndac >= 1000` for `07`/`08` only — `06` has no acreage filter) into
+an OGR SQL `query=` argument on `st_read()`, so GDAL filters rows before geometries are ever materialized in
+R. Verified on GRIT: fire count matches the already-validated baseline exactly (304 CA fires, 2005–2010).
 
 ### Cache validators must key on fire-set identity, not just years
 In the (retired) CA-only pipeline, changing which fires are included (a border-fire filter fix) did not
@@ -102,6 +122,12 @@ extend the validator to include fire-set identity.
 - **Residual eMapR-vs-ctrees bias** (`biomass_within_fires.qmd` §7) — root cause not yet found.
 - **Border-fire eMapR/ctrees count gap** — see 2026-08-30 entry; re-check once real multi-state `07` output exists.
 - **MTBS Initial vs. Extended assessment bias** — `mtbs_assessment_comparison.qmd`.
+- **`ctrees_2000_west_100m.tif` / `ctrees_2001_west_100m.tif` are confirmed 100% NaN** — see 2026-09-20 entry
+  for exact remediation steps; blocks trusting any West ctrees output for those two years until rebuilt.
+- **`05`'s `FedData::get_nlcd()` call OOMs on GRIT** — investigated but not fixed; see 2026-09-20 entry.
+- **ctrees West CSV's CA rows never cross-validated against the `03` baseline** — `03_download_ctrees_ca.py`
+  itself has been separately dying with no traceback on GRIT (see 2026-09-20 entry); root cause not
+  confirmed (plausibly the same cgroup cap, not confirmed the way the MTBS/NLCD cases were).
 
 ---
 
@@ -141,9 +167,50 @@ live: 26/26 Part A TIFs present, `.nc` header-only, no `_west_fireagb_scratch/` 
 - `log_peak_memory()` helper (`/proc/self/status` → `VmHWM`) after each part, so a future OOM is diagnosable
   from the log.
 
-**Status:** code fixes committed; not yet re-run on GRIT. Next: delete the corrupt `.nc`, pull, relaunch under
-`tmux` (command block in `DATA_DOWNLOAD_GUIDE.md` §3.3), and cross-validate the West CSV's CA rows against
-the validated `03_download_ctrees_ca.py` baseline (expect correlation ≈ 1.000).
+**Relaunch succeeded** (later the same day). All 26 raw TIFs present, `ctrees_biomass_west_1km.nc` rebuilt
+(319.1 MB, real data this time), `biomass_fire_polygons_ctrees_west.csv` produced: 6,817 fires × 26 years =
+177,242 records (matches the 2026-08-12 Part B projection exactly), 92.3% valid AGB overall, fires-per-state
+counts sum to 6,817 exactly.
+
+**But: `ctrees_2000_west_100m.tif` and `ctrees_2001_west_100m.tif` are confirmed 100% corrupt (all-NaN).**
+Found via a per-year breakdown of the Part C CSV (the aggregate 92.3%-valid number hid this completely —
+two fully-bad years dilute to a small dent across 26): every one of 6,817 fires shows exactly 0.0% valid
+AGB for 2000 and 2001, and 100% for every other year. Matches those two years' anomalously small file size
+(~190 MB vs. ~730 MB for every other year — an all-NaN raster compresses far better under LZW). These files
+predate this session (dated Sept 11–12) and were never caught because **Part A's skip check was
+existence-only** — the one place `netcdf_is_valid()`'s pattern was never applied. Fixed (commit `4686a2c`):
+`raw_tif_is_valid()` samples 5 small scattered windows (not the whole ~2 GB array) and is now wired into
+both Part A's upfront skip decision and its per-year in-loop check.
+**Not yet applied against the actual corrupt files** — remediation, next time this script runs on GRIT:
+```bash
+rm data/processed/ctrees/ctrees_2000_west_100m.tif data/processed/ctrees/ctrees_2001_west_100m.tif
+rm data/processed/ctrees/ctrees_biomass_west_1km.nc                    # rebuild — it aggregated the bad years
+rm data/processed/ctrees/biomass_fire_polygons_ctrees_west.csv         # same
+python scripts/python/04_download_ctrees_west.py   # under tmux, per DATA_DOWNLOAD_GUIDE.md §3.3
+```
+
+**CA cross-validation still blocked, not resolved.** `03_download_ctrees_ca.py` was relaunched (also under
+`tmux`, this time) to produce the baseline for the West-CSV cross-check above — died with a bare `Killed`
+and no traceback right after "Precomputing 1064 polygon masks..." (before any per-year zarr read), on a
+job whose `tmux` server and Slurm allocation both stayed alive (ruling out a dropped connection or job
+walltime). Plausibly the same cgroup cap below, but not confirmed the way the MTBS/NLCD cases were — the
+memory diagnosis moved on to the R pipeline instead. Revisit before trusting any `03`-vs-`04` comparison.
+
+**R pipeline (`05`–`08`) exercised for the first time in this session — found the same cgroup cap twice
+more.** Confirmed the actual limit for the first time (see "GRIT's real memory cap" in Technical gotchas
+above): a hard 4 GiB cap, ~1.7 GiB baseline, ~2.3 GiB real headroom. Two more things hit it:
+- `08` (and identically `06`/`07`) loading the full national MTBS shapefile via plain `sf::st_read()` —
+  fixed by pushing attribute filters into an OGR SQL query (see Technical gotchas); verified on GRIT
+  (304 CA fires, exact match to the validated baseline).
+- `05`'s `FedData::get_nlcd()` call, downloading NLCD 2004 for CA — investigated `FedData`'s actual source
+  (`R/NLCD_FUNCTIONS.R` on GitHub): the WCS path it uses is genuinely CA-bbox-scoped server-side, not a
+  CONUS pull, so the download itself isn't the likely culprit. Suspect instead the `terra::as.factor()` +
+  `terra::coltab()` step right after the download, which converts the raster to a categorical
+  representation with a full NLCD color table attached before writing it back out — `05` never needs any
+  of that (it immediately reclassifies to a plain 0/1 mask via `terra::classify()`), so a fix would bypass
+  `FedData::get_nlcd()` and do the same WCS request directly, skipping the factor/color-table conversion
+  entirely. **Not yet implemented** — this is speculative diagnosis from reading the source, not a
+  confirmed root cause; needs testing on GRIT (no R available on the laptop) before trusting it.
 
 ---
 
