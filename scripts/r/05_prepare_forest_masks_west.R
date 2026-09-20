@@ -39,10 +39,12 @@
 library(terra)
 library(sf)
 library(here)
-library(FedData)
 library(tigris)
 library(glue)
 library(dplyr)
+# FedData is no longer loaded — fetch_nlcd_landcover() below replaces its
+# get_nlcd() call directly via httr/xml2 (both already FedData dependencies,
+# so already installed) to skip a memory-heavy step; see that function.
 
 sf_use_s2(FALSE)
 options(tigris_use_cache = TRUE)
@@ -56,7 +58,6 @@ STATES_TO_RUN <- c("CA", "WY")
 MASK_DIR   <- here("data", "processed", "forest_mask")
 CTREES_DIR <- here("data", "processed", "ctrees")
 dir.create(MASK_DIR, recursive = TRUE, showWarnings = FALSE)
-dir.create(file.path(MASK_DIR, "nlcd_raw"), recursive = TRUE, showWarnings = FALSE)
 
 FOREST_CLASSES <- c(41L, 42L, 43L)   # Deciduous, Evergreen, Mixed Forest
 rcl <- matrix(c(FOREST_CLASSES, rep(1L, length(FOREST_CLASSES))), ncol = 2)
@@ -70,6 +71,61 @@ rcl <- matrix(c(FOREST_CLASSES, rep(1L, length(FOREST_CLASSES))), ncol = 2)
 # 20554 / EPSG:5070 header, 100% of cells NA.
 raster_is_valid <- function(path) {
   terra::global(terra::rast(path), "notNA")[[1]] > 0
+}
+
+# ── NLCD fetch, bypassing FedData::get_nlcd()'s factor/color-table step ──────
+# FedData::get_nlcd() already crops server-side via MRLC's WCS endpoint (not a
+# CONUS download — confirmed by reading FedData's own source,
+# R/NLCD_FUNCTIONS.R on ropensci/FedData's GitHub), so the network fetch
+# itself isn't what OOM-killed this step on GRIT (see NOTES.md's 2026-09-20
+# entry). The step right after IS the suspect: for dataset == "Land_Cover",
+# get_nlcd() converts the result to a categorical factor raster and attaches
+# a full NLCD color table (terra::as.factor() + terra::coltab()) before
+# writing it back out. We never use any of that — the very next thing this
+# script does is reclassify raw class codes into a 0/1 mask via
+# terra::classify() below, which reads identical underlying values whether or
+# not a factor/color table is attached. So there's no behavior difference in
+# skipping it, only a (hopefully) smaller peak memory footprint.
+# Replicates get_nlcd()'s WCS request exactly (same URL pattern, same
+# bbox-subset logic, same AEA projection for the subset coordinates) but
+# returns the plain numeric raster straight from the WCS response instead.
+fetch_nlcd_landcover <- function(template_sf, year = 2004, landmass = "L48") {
+  coverage <- glue("NLCD_{year}_Land_Cover_{landmass}")
+  source   <- glue("https://www.mrlc.gov/geoserver/mrlc_download/{coverage}/wcs")
+
+  describe <- httr::GET(source, query = list(
+    service = "WCS", version = "2.0.1",
+    request = "DescribeCoverage", coverageid = coverage
+  ))
+  if (httr::status_code(describe) != 200L) {
+    stop("No WCS coverage at ", source, " for NLCD ", year, " Land_Cover ", landmass)
+  }
+
+  xml_content <- describe |> httr::content(encoding = "UTF-8") |> xml2::as_list()
+  envelope    <- xml_content$CoverageDescriptions$CoverageDescription$boundedBy$Envelope
+  axis_labels <- envelope |> attr("axisLabels") |> strsplit(" ") |> unlist()
+
+  # Same AEA projection FedData's WCS path uses, so the bbox subset lines up
+  # with the service's own coordinate axes — template_sf can be any CRS.
+  bbox <- template_sf |>
+    sf::st_transform(
+      "+proj=aea +lat_0=23 +lon_0=-96 +lat_1=29.5 +lat_2=45.5 +x_0=0 +y_0=0 +datum=WGS84 +units=m +no_defs"
+    ) |>
+    sf::st_bbox()
+
+  tmp <- tempfile(fileext = ".tif")
+  httr::GET(
+    source,
+    query = list(
+      service    = "WCS", version = "2.0.1", request = "GetCoverage",
+      coverageid = coverage,
+      subset     = glue("{axis_labels[1]}({bbox['xmin']},{bbox['xmax']})"),
+      subset     = glue("{axis_labels[2]}({bbox['ymin']},{bbox['ymax']})")
+    ),
+    httr::write_disk(tmp, overwrite = TRUE)
+  )
+
+  terra::rast(tmp)   # plain numeric raster, file-backed — no as.factor()/coltab()
 }
 
 cat("States to build:", paste(STATES_TO_RUN, collapse = ", "), "\n\n")
@@ -114,13 +170,10 @@ for (st in STATES_TO_RUN) {
     cat(glue("[{st}] Downloading NLCD 2004...\n"))
     dl_t0 <- proc.time()["elapsed"]
 
-    nlcd_raw <- FedData::get_nlcd(
-      template       = state_5070,
-      label          = st,
-      year           = 2004,
-      dataset        = "landcover",
-      extraction.dir = file.path(MASK_DIR, "nlcd_raw")
-    )
+    # fetch_nlcd_landcover() (defined above), not FedData::get_nlcd() directly
+    # — see that function's comment for why: get_nlcd()'s post-download
+    # as.factor()/coltab() step OOM-killed this on GRIT (NOTES.md 2026-09-20).
+    nlcd_raw <- fetch_nlcd_landcover(state_5070, year = 2004)
 
     dl_elapsed <- round(proc.time()["elapsed"] - dl_t0)
     cat(glue("  Downloaded in {dl_elapsed}s | ",
