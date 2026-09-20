@@ -275,16 +275,15 @@ and open questions are tracked in `NOTES.md` → Design decisions & open questio
 - [x] West-wide eMapR crop script (`00_crop_emapr_to_west.R`) and raw-file validity checker
       (`check_raw_emapr_files.R`)
 - [x] `04_download_ctrees_west.py` fully re-run on GRIT: 26/26 raw TIFs, valid `.nc`, 177,242-record fire
-      CSV — **but see the corrupt-years item below before trusting 2000/2001 specifically**
+      CSV, all 26 years including 2000/2001 confirmed 100% valid after the rebuild below
 - [x] `06`/`07`/`08`'s MTBS-loading OOM fixed (OGR SQL read-time filter) and verified on GRIT (304 CA
       fires, exact match to the validated baseline)
 - [x] GRIT's actual memory cap identified: 4 GiB, enforced via cgroup v2 (not a laptop-era red herring —
       see `NOTES.md` "Technical gotchas")
+- [x] `ctrees_2000_west_100m.tif` / `ctrees_2001_west_100m.tif` rebuilt on GRIT and confirmed 100% valid
+      (were 100% NaN — see `NOTES.md` 2026-09-20 entry for root cause)
 
 ### Incomplete — next actions
-- [ ] **`ctrees_2000_west_100m.tif` / `ctrees_2001_west_100m.tif` are confirmed 100% NaN** — Part A's
-      validity check is now fixed (commit `4686a2c`) but not yet exercised against these two files; delete
-      them plus the downstream `.nc`/CSV and re-run `04` (exact commands in `NOTES.md`'s 2026-09-20 entry)
 - [ ] **`05`'s `FedData::get_nlcd()` call OOMs on GRIT** downloading NLCD 2004 for CA — root cause
       suspected (see `NOTES.md`) but not fixed; forest masks for CA/WY are NOT currently confirmed present
       on GRIT despite earlier laptop-era status saying so — verify directly before assuming built

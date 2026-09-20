@@ -122,8 +122,6 @@ extend the validator to include fire-set identity.
 - **Residual eMapR-vs-ctrees bias** (`biomass_within_fires.qmd` §7) — root cause not yet found.
 - **Border-fire eMapR/ctrees count gap** — see 2026-08-30 entry; re-check once real multi-state `07` output exists.
 - **MTBS Initial vs. Extended assessment bias** — `mtbs_assessment_comparison.qmd`.
-- **`ctrees_2000_west_100m.tif` / `ctrees_2001_west_100m.tif` are confirmed 100% NaN** — see 2026-09-20 entry
-  for exact remediation steps; blocks trusting any West ctrees output for those two years until rebuilt.
 - **`05`'s `FedData::get_nlcd()` call OOMs on GRIT** — investigated but not fixed; see 2026-09-20 entry.
 - **ctrees West CSV's CA rows never cross-validated against the `03` baseline** — `03_download_ctrees_ca.py`
   itself has been separately dying with no traceback on GRIT (see 2026-09-20 entry); root cause not
@@ -181,13 +179,13 @@ predate this session (dated Sept 11–12) and were never caught because **Part A
 existence-only** — the one place `netcdf_is_valid()`'s pattern was never applied. Fixed (commit `4686a2c`):
 `raw_tif_is_valid()` samples 5 small scattered windows (not the whole ~2 GB array) and is now wired into
 both Part A's upfront skip decision and its per-year in-loop check.
-**Not yet applied against the actual corrupt files** — remediation, next time this script runs on GRIT:
-```bash
-rm data/processed/ctrees/ctrees_2000_west_100m.tif data/processed/ctrees/ctrees_2001_west_100m.tif
-rm data/processed/ctrees/ctrees_biomass_west_1km.nc                    # rebuild — it aggregated the bad years
-rm data/processed/ctrees/biomass_fire_polygons_ctrees_west.csv         # same
-python scripts/python/04_download_ctrees_west.py   # under tmux, per DATA_DOWNLOAD_GUIDE.md §3.3
-```
+**Rebuilt and confirmed fixed, same day.** Deleted the two corrupt TIFs plus the downstream `.nc`/CSV
+(both had aggregated the bad years) and re-ran `04_download_ctrees_west.py` under `tmux`. Part A only
+had to re-fetch the 2 bad years (the other 24 passed the new validity check instantly); Part B/C redid
+all 26 years, since both delete their per-year scratch checkpoints after a successful run and there was
+no partial-progress shortcut left once the final outputs were deleted. Re-checked the same per-year
+breakdown as before: 2000 and 2001 now show 100.0% valid AGB across all 6,817 fires, matching every
+other year. Closed.
 
 **CA cross-validation still blocked, not resolved.** `03_download_ctrees_ca.py` was relaunched (also under
 `tmux`, this time) to produce the baseline for the West-CSV cross-check above — died with a bare `Killed`
