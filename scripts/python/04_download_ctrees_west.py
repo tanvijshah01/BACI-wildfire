@@ -39,9 +39,9 @@
 #       arraylake again), coarsens to ~1 km, checkpoints each year's array
 #       to scratch (resume-safe), then assembles into one NetCDF.
 # 5.  Part C — Fire polygon extraction (for R event-study / DiD)
-#       Precompute rasterized polygon masks once; then extract mean AGB
-#       per fire x year using local GeoTIFF reads + numpy indexing (no
-#       shapely per year, no arraylake reads).
+#       Precompute compact per-fire window/mask descriptors once; then
+#       extract mean AGB per fire x year using a per-fire rasterio Window
+#       read (no full-array load, no shapely per year, no arraylake reads).
 # 6.  Sanity checks on all outputs
 #
 # OUTPUTS
@@ -85,12 +85,14 @@
 #   row-strips (STRIP_ROWS), Part B's coarsening reads+averages via
 #   `factor`-row TIFF windows (coarsen_year_from_tif), and Part B's NetCDF
 #   assembly writes one year directly into the file at a time (plain
-#   netCDF4, not xarray's Dataset/to_netcdf). Part C still loads a full
-#   raster per year (needed for scattered polygon indexing across the whole
-#   extent) — if that OOMs too, it would need the same per-fire
-#   windowed-read treatment. If OOM kills persist after all this, the
-#   remaining option is asking GRIT's Slurm admin for a larger memory
-#   allocation for this job.
+#   netCDF4, not xarray's Dataset/to_netcdf). Part C now reads a per-fire
+#   rasterio Window per year instead of the whole raster too — the same
+#   crop-per-polygon pattern the R extraction scripts (07/08) already use,
+#   since a whole-raster read/mask is the slow/OOM-prone approach at this
+#   pixel count (see NOTES.md's terra-large-raster lesson, which applies
+#   equally here). If OOM kills persist after all this, the remaining
+#   option is asking GRIT's Slurm admin for a larger memory allocation for
+#   this job.
 #
 # PART B CHECKPOINTING (new vs. 03)
 #   03's coarsening step holds all 26 coarsened years in memory and writes
@@ -101,8 +103,11 @@
 #   it and skipped on re-run if already present; the final NetCDF assembly
 #   step only runs once all years are checkpointed.
 #
-# EXTRACTION METHOD (Part C) — unchanged from 03; see that script for the
-# shapely-vs-rasterio evaluation notes.
+# EXTRACTION METHOD (Part C) — rasterize-once-reuse-per-year logic matches
+# 03 (see that script for the shapely-vs-rasterio evaluation notes), but
+# unlike 03, Part C here reads a per-fire rasterio Window per year instead
+# of the whole raster — West's ~2 GB year arrays are too large to hold
+# whole the way CA's ~125M-cell rasters in 03 can.
 #
 # DATASET NOTES (from 02_explore_ctrees_zarr.py)
 #   - Group:        aboveground_biomass/
@@ -193,18 +198,38 @@ def tif_path_for_year(yr):
     return OUT_TIFS_DIR / f"ctrees_{yr}_west_100m.tif"
 
 
-def read_year_raster(yr):
+def netcdf_is_valid(path, expected_years):
     """
-    Read one year's raw West-bbox array back from Part A's local GeoTIFF.
+    Confirm a Part B NetCDF actually has real content instead of just
+    existing — mirrors raster_is_valid() in 05_prepare_forest_masks_west.R /
+    00_crop_emapr_to_west.R. A run killed mid-write (e.g. a dropped
+    connection outside tmux, which has already happened once on GRIT) can
+    leave a file that opens cleanly but has no real data; a plain
+    `if OUT_NC.exists(): skip` would silently trust it.
+    """
+    try:
+        with netCDF4.Dataset(path, "r") as ds:
+            return "agb" in ds.variables and len(ds.dimensions["time"]) == expected_years
+    except Exception:
+        return False
 
-    The TIFF already has fill values converted to NaN and the int16->Mg ha^-1
-    scale factor applied (done once, in Part A, before writing) — so this is
-    a plain local raster read, no arraylake connection and no re-masking.
-    Used by Part C, which needs the full array in memory anyway for
-    scattered polygon indexing across the whole West extent.
+
+def log_peak_memory(label):
     """
-    with rasterio.open(tif_path_for_year(yr)) as src:
-        return src.read(1).astype("float32")
+    Print peak RSS (VmHWM) so far, so a future OOM kill is diagnosable from
+    the log alone instead of another blind multi-hour debugging round
+    (three were needed before this script's Part A/B fixes — see the GRIT
+    note above). No-op on non-Linux (e.g. this repo's Windows laptop),
+    since /proc doesn't exist there.
+    """
+    try:
+        with open("/proc/self/status") as f:
+            for line in f:
+                if line.startswith("VmHWM:"):
+                    print(f"  [mem] {label}: peak RSS = {line.split(':', 1)[1].strip()}", flush=True)
+                    return
+    except OSError:
+        pass   # not on Linux / no /proc — silently skip
 
 
 def coarsen_year_from_tif(yr, factor):
@@ -238,14 +263,24 @@ def coarsen_year_from_tif(yr, factor):
 
 def precompute_mask(geom, x_arr, y_arr, res):
     """
-    Rasterize a polygon onto the West pixel grid; return (yi, xi, mask_2d).
+    Rasterize a polygon onto the West pixel grid; return a compact window
+    descriptor instead of full index arrays, so ~6,800 of these can be held
+    in memory at once without pinning a full mask + polygon geometry per
+    fire (the same "never touch the whole grid" reasoning as NOTES.md's
+    terra-large-raster lesson).
 
     Uses rasterio.features.rasterize() for fast C-level scanline rasterization
     (O(pixels), no sampling approximation). Handles MultiPolygon by unioning
     sub-polygon masks. Returns None when the polygon does not overlap the grid.
 
-    Called once per fire before the year loop; the returned mask is reused
-    across all 26 years using numpy array indexing (no shapely per year).
+    Returns (row_off, col_off, height, width, packed_mask) — packed_mask is
+    the boolean mask bit-packed via np.packbits (8x smaller than a plain
+    bool array); unpack with
+    np.unpackbits(packed_mask, count=height*width).reshape(height, width).astype(bool).
+
+    Called once per fire before the year loop; the returned window/mask is
+    reused across all 26 years via a per-fire rasterio Window read (Part C)
+    instead of indexing a full in-memory array.
 
     Parameters
     ----------
@@ -281,7 +316,12 @@ def precompute_mask(geom, x_arr, y_arr, res):
     if not mask.any():
         return None
 
-    return yi, xi, mask
+    # xi/yi are contiguous index ranges (x_arr/y_arr are uniform grids and
+    # the where() condition selects one bbox), so their [0] element is the
+    # window's row/col origin and their length is the window's extent —
+    # this is what lets Part C read a rasterio Window instead of indexing
+    # yi/xi directly against a full in-memory array.
+    return int(yi[0]), int(xi[0]), height, width, np.packbits(mask.ravel())
 
 
 # --- 2. CONNECT TO ARRAYLAKE & RESOLVE WEST INDICES --------------------------
@@ -382,6 +422,8 @@ else:
     n_done = len(list(OUT_TIFS_DIR.glob("ctrees_*_west_100m.tif")))
     print(f"  Done. {n_done}/{len(years)} raw 100 m TIFs present in {OUT_TIFS_DIR.name}/")
 
+log_peak_memory("Part A (raw download)")
+
 assert all(tif_path_for_year(yr).exists() for yr in years), (
     "Part A did not produce a raw TIFF for every year — Part B/C below "
     "require all years present locally before they can proceed."
@@ -389,6 +431,14 @@ assert all(tif_path_for_year(yr).exists() for yr in years), (
 
 
 # --- 4. PART B — COARSENED WEST RASTER (reads Part A's local TIFFs) ---------
+if OUT_NC.exists() and not netcdf_is_valid(OUT_NC, n_years):
+    # Caught a real case of this on GRIT: a run launched outside tmux was
+    # killed mid-write by a dropped connection, leaving a 7 KB NetCDF that
+    # opens (header-only) but has no real data — see the GRIT note above.
+    print(f"\nPart B: {OUT_NC.name} exists but failed the validity check "
+          f"(likely truncated by an interrupted run) — deleting and rebuilding.")
+    OUT_NC.unlink()
+
 if OUT_NC.exists():
     print(f"\nPart B: {OUT_NC.name} already exists — skipping.")
 else:
@@ -458,6 +508,8 @@ else:
     except OSError:
         pass   # leave it if anything unexpected remains
 
+log_peak_memory("Part B (coarsened NetCDF)")
+
 
 # --- 5. PART C — FIRE POLYGON EXTRACTION (reads Part A's local TIFFs) -------
 if OUT_CSV.exists():
@@ -483,15 +535,36 @@ else:
 
     # -- Precompute polygon masks (once per fire, reused across 26 years) -----
     # This is the key optimisation: rasterize each polygon onto the West pixel
-    # grid a single time, storing (row_indices, col_indices, boolean_mask).
-    # The year loop then uses only numpy indexing — no shapely or rasterio work.
+    # grid a single time, storing a compact (window origin, window extent,
+    # packed boolean mask) descriptor per fire — not the full row_indices/
+    # col_indices/mask arrays this originally held, and not the fire's whole
+    # pandas row (its polygon geometry isn't needed again once rasterized).
+    # The year loop then reads only that fire's rasterio Window — no shapely,
+    # no full-array indexing, no per-fire pandas row held in memory.
     print(f"  Precomputing {len(mtbs_west)} polygon masks...", flush=True)
     fire_masks = []
     for _, fire in mtbs_west.iterrows():
-        fire_masks.append((fire, precompute_mask(fire.geometry, x_west, y_west, RES)))
+        mask_result = precompute_mask(fire.geometry, x_west, y_west, RES)
+        meta = {
+            "event_id":  fire["event_id"],
+            "state":     fire["event_id"][:2],
+            "fire_year": fire["fire_year"],
+        }
+        fire_masks.append((meta, mask_result))
 
     n_with_mask = sum(1 for _, m in fire_masks if m is not None)
     print(f"  {n_with_mask}/{len(mtbs_west)} fire polygons overlap the West raster grid", flush=True)
+
+    # Sort by window row-offset so each year's per-fire reads below move
+    # monotonically down the GeoTIFF instead of seeking randomly. Fires with
+    # no overlap (mask_result is None) are never read, so their sort
+    # position doesn't matter — sort them last. Uses len(y_west) rather than
+    # Part A's n_rows_total, which is only assigned inside Part A's "some
+    # years still missing" branch — on a resumed run (Part A fully done,
+    # the common case) that name would otherwise be undefined here.
+    fire_masks.sort(key=lambda fm: fm[1][0] if fm[1] is not None else len(y_west))
+
+    log_peak_memory("Part C mask precompute")
 
     # -- Extract year by year using precomputed masks --------------------------
     # Checkpointed per year (mirrors Part B) — two prior runs of this script
@@ -509,30 +582,43 @@ else:
             print(f"  {t_idx + 1}/{n_years} years — {yr} already checkpointed, skipping", flush=True)
             continue
 
-        # One local raster read per year (the only I/O in this loop)
-        raw = read_year_raster(yr)
-
+        # Per-fire rasterio Window reads instead of one whole-year array —
+        # each read pulls only the compressed tiles covering that fire's
+        # own bbox (TIFFs are tiled at 512x512, see Part A), bounding peak
+        # memory to a single fire's extent instead of the ~2 GB full West
+        # raster that used to be loaded once per year via read_year_raster().
         year_records = []
-        for fire, mask_result in fire_masks:
-            if mask_result is None:
-                mean_agb = np.nan
-            else:
-                yi, xi, mask = mask_result
-                vals = raw[np.ix_(yi, xi)][mask]
-                if vals.size > 0 and not np.all(np.isnan(vals)):
-                    mean_agb = float(np.nanmean(vals))
-                else:
+        with rasterio.open(tif_path_for_year(yr)) as src:
+            for meta, mask_result in fire_masks:
+                if mask_result is None:
                     mean_agb = np.nan
+                else:
+                    yi0, xi0, h, w, packed = mask_result
+                    try:
+                        window = Window(xi0, yi0, w, h)
+                        block  = src.read(1, window=window)
+                        mask   = np.unpackbits(packed, count=h * w).reshape(h, w).astype(bool)
+                        vals   = block[mask]
+                        if vals.size > 0 and not np.all(np.isnan(vals)):
+                            mean_agb = float(np.nanmean(vals))
+                        else:
+                            mean_agb = np.nan
+                    except Exception as e:
+                        # One bad polygon/window shouldn't kill a multi-hour
+                        # run — log it and record NaN for this fire-year,
+                        # mirroring the tryCatch() guard in the R scripts
+                        # (07/08) around per-polygon extraction.
+                        errors.append((meta["event_id"], yr, repr(e)))
+                        mean_agb = np.nan
 
-            year_records.append({
-                "event_id":      fire["event_id"],
-                "state":         fire["event_id"][:2],
-                "fire_year":     fire["fire_year"],
-                "year":          yr,
-                "agb_mean_mgha": round(mean_agb, 2) if not np.isnan(mean_agb) else np.nan,
-            })
+                year_records.append({
+                    "event_id":      meta["event_id"],
+                    "state":         meta["state"],
+                    "fire_year":     meta["fire_year"],
+                    "year":          yr,
+                    "agb_mean_mgha": round(mean_agb, 2) if not np.isnan(mean_agb) else np.nan,
+                })
 
-        del raw
         pd.DataFrame(year_records).to_csv(scratch_path, index=False)
         print(f"  {t_idx + 1}/{n_years} years processed ({yr}) — checkpointed", flush=True)
 
@@ -555,6 +641,8 @@ else:
         for e in errors[:3]:
             print(f"    {e}")
 
+    log_peak_memory("Part C (fire extraction)")
+
 
 # --- 6. SANITY CHECKS --------------------------------------------------------
 print("\nSanity checks...")
@@ -566,15 +654,24 @@ if tif_count < n_years:
     print(f"  WARNING: Only {tif_count} of {n_years} raw 100 m TIFs present")
 
 # Part B
-ds_check = xr.open_dataset(OUT_NC)
-assert "agb" in ds_check, "NetCDF missing 'agb' variable"
-assert len(ds_check.time) == n_years, f"Expected {n_years} time steps"
-agb_vals = ds_check["agb"].values
-pct_valid = 100 * np.sum(~np.isnan(agb_vals)) / agb_vals.size
-print(f"  NetCDF: {len(ds_check.time)} years, "
-      f"{ds_check.dims['y']} x {ds_check.dims['x']} pixels, "
-      f"{pct_valid:.1f}% valid")
-assert pct_valid > 10, "Less than 10% valid pixels — check West bbox or fill masking"
+with xr.open_dataset(OUT_NC) as ds_check:
+    assert "agb" in ds_check, "NetCDF missing 'agb' variable"
+    assert len(ds_check.time) == n_years, f"Expected {n_years} time steps"
+    # Checked one year at a time instead of ds_check["agb"].values, which
+    # would load the whole ~439 MB array at once — the same OOM class fixed
+    # in Part B's own NetCDF assembly (see GRIT note above, fix #3). This
+    # check runs on every invocation (even fully-skipped ones), so it needs
+    # to stay small regardless of whether the rest of the script does.
+    n_valid_px, n_total_px = 0, 0
+    for i in range(len(ds_check.time)):
+        yr_arr = ds_check["agb"].isel(time=i).values
+        n_valid_px += int(np.sum(~np.isnan(yr_arr)))
+        n_total_px += yr_arr.size
+    pct_valid = 100 * n_valid_px / n_total_px
+    print(f"  NetCDF: {len(ds_check.time)} years, "
+          f"{ds_check.dims['y']} x {ds_check.dims['x']} pixels, "
+          f"{pct_valid:.1f}% valid")
+    assert pct_valid > 10, "Less than 10% valid pixels — check West bbox or fill masking"
 
 # Part C
 df_check = pd.read_csv(OUT_CSV)

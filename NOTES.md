@@ -4,6 +4,82 @@ Working notes on decisions, findings, and open questions. Add entries in reverse
 
 ---
 
+## 2026-09-20 — GRIT migration: layout confirmed, ctrees West download hardened
+
+Consolidates what actually happened on GRIT since the 2026-08-30 handoff below (that
+section predates the GRIT work and was never updated for it — the GRIT-specific
+detail lives in `DATA_DOWNLOAD_GUIDE.md` and commit messages instead).
+
+**GRIT layout, as actually set up:** code at `~/BACI-wildfire`; data lives in a
+separate shared repo `~/BACI-review`, joined by `ln -s ~/BACI-review/data
+~/BACI-wildfire/data` — every script's `here()`/`PROJ_ROOT`-relative path works
+unchanged. Python env is a venv at `~/BACI-wildfire/.venv` (`pip install arraylake
+zarr xarray netCDF4 geopandas rasterio`), not a conda env — this supersedes the
+laptop's `anaconda3` base env guidance for GRIT specifically. See
+`DATA_DOWNLOAD_GUIDE.md` §1 for full setup.
+
+**Raw eMapR validity checker added** (`scripts/r/check_raw_emapr_files.R`): checks
+file size against an exact expected byte count (not just `file.exists()`) plus a
+small centered pixel-block read, so a truncated/corrupt raw composite can't be
+silently trusted. 19/34 years confirmed complete on GRIT as of 2026-09-08.
+
+**`04_download_ctrees_west.py` — three real OOM kills, three real fixes** (commits
+`bcbc41b`, `8ad9dfe`, `4eeb88f`), each from materializing a full array on GRIT's
+Slurm cgroup memory cap (exact `memory.max` never pinned down; an earlier "4 GiB
+`ulimit -m`" reading was a confirmed red herring — `RLIMIT_RSS` isn't enforced by
+modern Linux):
+1. Coarsening's whole-array `reshape()` silently copied the full ~2 GB array
+   because West's dimensions aren't an exact multiple of the coarsen factor.
+2. Part A's plain raw download held one ~2 GB float32 year array on its own.
+3. Part B's NetCDF assembly held up to three ~439 MB copies at once
+   (list + `np.stack()` + `.astype()`).
+
+All three fixed by never materializing a full array: row-strip writes (Part A),
+per-window coarsening reads (Part B), and a direct year-by-year `netCDF4` write
+(Part B assembly) instead of xarray's `Dataset`/`to_netcdf`. The script was also
+reordered to run raw-download-first (A → B → C) so B/C read plain local GeoTIFFs
+instead of re-querying arraylake, and `rasterio` became a hard requirement (the
+matplotlib-fallback path was removed).
+
+**Then: the `file.exists()` ≠ valid gotcha hit GRIT for real.** A relaunch after
+the fixes above was started as a bare foreground command, not under `tmux` as
+`DATA_DOWNLOAD_GUIDE.md` instructs — a dropped connection killed it mid-Part-B-write
+and left a 7 KB corrupted `.nc` file. Diagnosed live (26/26 Part A TIFs present, the
+`.nc` header-only with no data, no `_west_fireagb_scratch/` dir so Part C never even
+started, no `tmux` session, `memory.events` showing no OOM). The 2026-08-30 handoff
+below explicitly flagged this laptop-specific gotcha as "unknown whether it still
+applies on GRIT" — it does; treat any corrupt-looking output the same way here as
+on the laptop (see "Recurring technical gotcha" in that section).
+
+**Fixes applied in response, before relaunching:**
+- `netcdf_is_valid()` added, mirroring `raster_is_valid()` — Part B now deletes and
+  rebuilds a corrupt/truncated `.nc` instead of trusting `OUT_NC.exists()` alone.
+- Part C hardened pre-emptively (it had never actually run at West scale, and both
+  the script header and the guide already flagged it as the next likely OOM since
+  it still loaded a full ~2 GB year array per year): switched to a per-fire
+  `rasterio.Window` read, matching the crop-per-polygon pattern already used by the
+  R extraction scripts (`07`/`08`) and documented below as the only approach that
+  works on rasters this size. The ~6,800-fire mask cache was also shrunk (drop the
+  full pandas row/geometry per fire, bit-pack each mask with `np.packbits`), and the
+  previously-dead `errors` list is now actually populated via a per-fire
+  `try/except`.
+- The end-of-script sanity check had the exact same bug Part B's own assembly did
+  (`ds_check["agb"].values` loading the whole ~439 MB NetCDF) — fixed to accumulate
+  per-year instead, since this check runs on every invocation including fully-
+  skipped ones.
+- Added a `log_peak_memory()` helper (`/proc/self/status` → `VmHWM`) after each
+  part, so a future OOM is diagnosable from the log directly instead of needing
+  another live-diagnosis round like this one.
+
+**Status as of this entry:** code fixes committed; not yet re-run on GRIT. Next
+step is on GRIT, not here — delete the corrupt `.nc`, pull, relaunch under `tmux`
+with output piped to `04_download_ctrees_west_log.txt`, and cross-validate the
+West CSV's CA rows against the validated `03_download_ctrees_ca.py` baseline
+(expect correlation ≈ 1.000, matching the ctrees side of the 2026-08-30 `05`–`08`
+validation). See `DATA_DOWNLOAD_GUIDE.md` §3.3 for the full command block.
+
+---
+
 ## CLAUDE CODE MEMORY NOTES — Handoff for Positron Assistant (2026-08-30)
 
 **What this section is:** Claude Code (the AI assistant previously used on this project, running

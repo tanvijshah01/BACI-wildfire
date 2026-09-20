@@ -43,7 +43,7 @@ Do these once per machine before downloading anything.
 |---|---|---|
 | `rclone` | eMapR raw downloads (Nextcloud + FTP) | Installed at `C:\Users\shaht\bin\rclone.exe` (not on PATH — call with the full path, or add the folder to PATH yourself) |
 | `arraylake` Python client | ctrees downloads | `arraylake auth login` (opens a browser prompt; scripts fail with a connection error until this is done) |
-| Python packages | ctrees downloads | `arraylake`, `zarr`, `xarray`, `netCDF4`, `geopandas`; `rasterio` optional but recommended (falls back to a slower rasterizer if missing) |
+| Python packages | ctrees downloads | `arraylake`, `zarr`, `xarray`, `netCDF4`, `geopandas`; `rasterio` is optional (slower matplotlib-path fallback) for `03_download_ctrees_ca.py` but a **hard requirement** for `04_download_ctrees_west.py` — it backs the raw-GeoTIFF write/read path Parts A–C all depend on there, and the script exits immediately if it's missing |
 
 **rclone remotes** — check these exist before using rclone (`rclone listremotes`):
 
@@ -372,11 +372,17 @@ CA). Before starting:
 - Expect Part C's 26 compressed GeoTIFFs to total ~8–20 GB on disk — check free space first
   (`df -h ~`).
 
-Part A checkpoints each coarsened year to
+Part B (not Part A — coarsening runs after the raw download in this script's
+A → B → C order) checkpoints each coarsened year to
 `data/processed/ctrees/_west_1km_scratch/` as it completes and only
 assembles the final NetCDF once all 26 years are present — safe to resume
-if interrupted. The CA-only outputs from §3.2 are left untouched by this
-script.
+if interrupted. Part C similarly checkpoints per year to
+`data/processed/ctrees/_west_fireagb_scratch/`. On resume, Part B also
+re-validates any existing `ctrees_biomass_west_1km.nc` before trusting it
+(not just checking that the file exists) — a run killed outside `tmux` by a
+dropped connection can leave a file that opens but has no real data; a
+corrupt file like that is deleted and rebuilt automatically. The CA-only
+outputs from §3.2 are left untouched by this script.
 
 ---
 
