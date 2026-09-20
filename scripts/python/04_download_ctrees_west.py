@@ -198,6 +198,41 @@ def tif_path_for_year(yr):
     return OUT_TIFS_DIR / f"ctrees_{yr}_west_100m.tif"
 
 
+def raw_tif_is_valid(path, sample_size=200):
+    """
+    Confirm a Part A raw TIF has real data, not just exists — mirrors
+    raster_is_valid() in the R scripts and netcdf_is_valid() below, closing
+    a gap those two didn't cover. This is not hypothetical: on GRIT,
+    ctrees_2000_west_100m.tif and ctrees_2001_west_100m.tif both existed
+    with a plausible-looking (if smaller) file size and opened fine, but
+    were confirmed 100% NaN — every one of 6,817 fires showed 0.0% valid
+    AGB for exactly those two years in the Part C output — while Part A's
+    own skip check only ever tested `.exists()`. See NOTES.md's
+    `file.exists()` != valid entry; this is a real instance of it, not a
+    preventive guess.
+
+    Samples a few small windows scattered across the raster instead of
+    reading the whole ~2 GB array — cheap, and enough to catch a FULLY
+    corrupt/all-NaN file (same limitation as raster_is_valid(): a partially
+    truncated file with some real data could still slip through). A single
+    fixed window isn't used because it could legitimately land on an
+    all-NaN region (ocean, non-conifer desert, etc.) even in a good year,
+    given the West extent is only ~82% valid on average.
+    """
+    try:
+        with rasterio.open(path) as src:
+            h, w = src.height, src.width
+            for f_y, f_x in [(0.25, 0.25), (0.25, 0.75), (0.75, 0.25), (0.75, 0.75), (0.5, 0.5)]:
+                row0 = min(int(h * f_y), h - sample_size)
+                col0 = min(int(w * f_x), w - sample_size)
+                block = src.read(1, window=Window(col0, row0, sample_size, sample_size))
+                if np.any(~np.isnan(block)):
+                    return True
+        return False
+    except Exception:
+        return False
+
+
 def netcdf_is_valid(path, expected_years):
     """
     Confirm a Part B NetCDF actually has real content instead of just
@@ -372,9 +407,12 @@ west_c  = float(x_west[0]) - RES / 2
 north_c = float(y_west[0]) + RES / 2
 transform_c = _rio_from_origin(west_c, north_c, RES, RES)
 
-tifs_needed = [yr for yr in years if not tif_path_for_year(yr).exists()]
+tifs_needed = [
+    yr for yr in years
+    if not (tif_path_for_year(yr).exists() and raw_tif_is_valid(tif_path_for_year(yr)))
+]
 if not tifs_needed:
-    print(f"\nPart A: All {len(years)} raw 100 m TIFs already exist — skipping.")
+    print(f"\nPart A: All {len(years)} raw 100 m TIFs already exist and pass validity checks — skipping.")
 else:
     print(f"\nPart A: Downloading {len(tifs_needed)} native-resolution (~100 m) raw GeoTIFFs"
           f" -> {OUT_TIFS_DIR.name}/")
@@ -385,8 +423,12 @@ else:
     for t_idx, yr in enumerate(years):
         tif_path = tif_path_for_year(yr)
         if tif_path.exists():
-            print(f"  {t_idx + 1}/{n_years} years — {yr} already downloaded, skipping", flush=True)
-            continue
+            if raw_tif_is_valid(tif_path):
+                print(f"  {t_idx + 1}/{n_years} years — {yr} already downloaded, skipping", flush=True)
+                continue
+            print(f"  {t_idx + 1}/{n_years} years — {yr} exists but failed the validity check "
+                  f"(all-NaN sample) — deleting and re-downloading", flush=True)
+            tif_path.unlink()
 
         # Written row-strip by row-strip (STRIP_ROWS at a time) rather than
         # building the whole ~2 GB year array in memory first — see
