@@ -56,8 +56,17 @@ MASK_DIR    <- here("data", "processed", "forest_mask")
 OUT_CSV     <- here("data", "processed", "forest_mask", "pct_forest_by_fire_west.csv")
 
 # ── 2. Load and filter MTBS to match analysis/mtbs_assessment_comparison.qmd §3 ─
+# Filtered AT READ TIME via an OGR SQL query — see 08_extract_ctrees_within_
+# fires_new.R's identical block for why (loading the full ~30k-fire national
+# shapefile then subsetting in R hit GRIT's cgroup memory cap directly). No
+# burnbndac threshold here (unlike 07/08) — this script's own filter chain
+# below doesn't apply one, only incid_type + a year range, so only
+# incid_type is safe to push down without changing behavior.
 cat("Loading MTBS...\n")
-mtbs_raw <- sf::st_read(MTBS_PATH, quiet = TRUE)
+mtbs_raw <- sf::st_read(
+  MTBS_PATH, quiet = TRUE,
+  query = "SELECT * FROM mtbs_perims_DD WHERE incid_type = 'Wildfire'"
+)
 
 n_invalid <- sum(!sf::st_is_valid(mtbs_raw))
 if (n_invalid > 0) mtbs_raw <- sf::st_make_valid(mtbs_raw)

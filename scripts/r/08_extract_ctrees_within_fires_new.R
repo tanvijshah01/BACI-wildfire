@@ -90,8 +90,20 @@ cat("States to run: ", paste(STATES_TO_RUN, collapse = ", "), "\n")
 cat("Output cache:  ", basename(OUT_CSV), "\n\n")
 
 # ── 2. Load MTBS study fires — event_id-prefix dedup (mirrors 06/07) ─────────
+# Filtered AT READ TIME via an OGR SQL query, not loaded whole then subset in
+# R: the full national mtbs_perims_DD.shp is ~30k fires with complex polygon
+# geometry, and materializing all of it (plus st_make_valid() on the whole
+# set) was enough to hit GRIT's cgroup memory cap on its own — confirmed via
+# a real "Killed" (SIGKILL, oom_kill counter nonzero) right at this step, on
+# a fresh session, with no other work running. incid_type/burnbndac are
+# pushed into the WHERE clause since every row here needs both regardless of
+# year/state; the same two filters are kept below as a cheap, harmless
+# double-check rather than trusted blindly. See NOTES.md's memory-cap entry.
 cat("Loading MTBS...\n")
-mtbs_raw <- sf::st_read(MTBS_PATH, quiet = TRUE)
+mtbs_raw <- sf::st_read(
+  MTBS_PATH, quiet = TRUE,
+  query = "SELECT * FROM mtbs_perims_DD WHERE incid_type = 'Wildfire' AND burnbndac >= 1000"
+)
 
 invalid <- sum(!sf::st_is_valid(mtbs_raw))
 if (invalid > 0) mtbs_raw <- sf::st_make_valid(mtbs_raw)

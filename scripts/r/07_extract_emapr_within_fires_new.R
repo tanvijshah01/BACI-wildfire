@@ -84,8 +84,14 @@ cat("States to run: ", paste(STATES_TO_RUN, collapse = ", "), "\n")
 cat("Output cache:  ", basename(EMAPR_FIRE_CSV), "\n\n")
 
 # ── 2. Load MTBS study fires — event_id-prefix dedup (mirrors 06) ────────────
+# Filtered AT READ TIME via an OGR SQL query — see 08_extract_ctrees_within_
+# fires_new.R's identical block for why (loading the full ~30k-fire national
+# shapefile then subsetting in R hit GRIT's cgroup memory cap directly).
 cat("Loading MTBS...\n")
-mtbs_raw <- sf::st_read(MTBS_PATH, quiet = TRUE)
+mtbs_raw <- sf::st_read(
+  MTBS_PATH, quiet = TRUE,
+  query = "SELECT * FROM mtbs_perims_DD WHERE incid_type = 'Wildfire' AND burnbndac >= 1000"
+)
 
 invalid <- sum(!sf::st_is_valid(mtbs_raw))
 if (invalid > 0) mtbs_raw <- sf::st_make_valid(mtbs_raw)
