@@ -42,7 +42,7 @@ data. No Google Earth Engine extraction is required; all data are local.
 # 3.  Biomass within fires — ctrees (load CSV, distributions, trend by year)
 # 4.  Biomass within fires — eMapR (extract from ~100 m TIFs, cache to CSV)
 # 5.  Dataset comparison — distributions, scatter, summary table
-# 6.  Before / after fire event study (EDA_PLAN §4.2)
+# 6.  Before / after fire event study (the original EDA event-study design)
 #     6.3 Diagnostic — individual fire trajectories (dual-axis, dataset comparison)
 # 7.  Design notes — data limitations and implications
 # =============================================================================
@@ -1033,7 +1033,7 @@ for (yr in fire_perimeter_years) {
 
 ## 6. Before / After Fire Event Study
 
-This section adapts EDA_PLAN §4.2 to use actual AGB (Mg/ha) from both datasets,
+This section adapts the original EDA event-study design (retired EDA_PLAN §4.2) to use actual AGB (Mg/ha) from both datasets,
 indexed to each fire's ignition year (`rel_year = 0`).
 
 ```{r event-study-data}

@@ -4,16 +4,17 @@ This guide walks a new user through getting both biomass datasets from their
 original source to analysis-ready CSVs. There are three stages, always in
 this order:
 
-1. **Download** the raw data (eMapR via FTP/Nextcloud, ctrees via the
+1. **Download** the raw data (eMapR via anonymous FTP, ctrees via the
    arraylake zarr store).
 2. **Crop** it to the 11-state Western study region (eMapR only — ctrees is
    pulled pre-cropped).
 3. **Extract** biomass within forested MTBS fire-perimeter pixels (scripts
    `05`–`08`), which is what feeds the `analysis/*.qmd` documents.
 
-See `CLAUDE.md` for the full directory structure, pipeline diagram, and
-current project status. If you just want the command to run right now, jump
-to **Part 5: End-to-End Checklist**.
+This guide is the *process reference* (how to run things). See `CLAUDE.md`
+for the directory structure and current project status, and `NOTES.md` for
+the reasoning behind decisions and known gotchas. If you just want the
+command to run right now, jump to **Part 5: End-to-End Checklist**.
 
 **The two datasets don't work the same way — this trips people up, so read
 this table before anything else:**
@@ -21,9 +22,9 @@ this table before anything else:**
 | | eMapR | ctrees |
 |---|---|---|
 | **Raw state** | A real, discrete file per year: the full CONUS `composite_YYYY_median.tif` (~27.7 GB BigTIFF), served over plain FTP. This is genuinely "the raw file" — an unmodified copy of the source. | **No discrete raw file exists.** The source is a live, cloud-hosted array (`arraylake`/zarr) — not something distributed as a downloadable file at all. |
-| **How it's accessed (the "query")** | A literal file copy: `rclone`/FTP pull of one named path, byte-for-byte, same every time. | A live index/slice query into the remote array via the `arraylake` Python client — request a bounding box + year range, get back whatever pixels are inside it. Nothing is "downloaded" in the traditional sense until a script chooses to save what it read. |
-| **Then manipulated by...** | Crop+mask to the 11-state West region (`00_crop_emapr_to_west.R`, Part 2.3), then per-fire extraction + forest-masking (`07`, Part 4). | The download scripts (`03`/`04`, Part 3) *are* the extraction step — in one pass they save native-resolution regional GeoTIFFs (the closest thing to "raw" that gets kept locally, see Part 3) alongside already-aggregated NetCDF/CSV outputs. Forest-masked fire extraction (`08`, Part 4) then reads those saved GeoTIFFs. |
-| **Raw data retention** | **Kept permanently as of 2026-08-30** (PI request) — every downloaded `composite_YYYY_median.tif` stays in `data/raw/emapr_biomass/`, not deleted after cropping. See the storage-size callout in Part 2. | N/A — there's nothing to "keep" beyond what's already described above; the native-resolution GeoTIFFs from Part 3 are the retained artifact. |
+| **How it's accessed (the "query")** | A literal file copy: FTP pull of one named path, byte-for-byte, same every time. | A live index/slice query into the remote array via the `arraylake` Python client — request a bounding box + year range, get back whatever pixels are inside it. Nothing is "downloaded" in the traditional sense until a script chooses to save what it read. |
+| **Then manipulated by...** | Crop+mask to the 11-state West region (`00_crop_emapr_to_west.R`, §2.3), then per-fire extraction + forest-masking (`07`, Part 4). | The download scripts (`03`/`04`, Part 3) *are* the extraction step — in one pass they save native-resolution regional GeoTIFFs (the closest thing to "raw" that gets kept, see Part 3) alongside already-aggregated NetCDF/CSV outputs. Forest-masked fire extraction (`08`, Part 4) then reads those saved GeoTIFFs. |
+| **Raw data retention** | **Kept permanently** (PI request, 2026-08-30) — every downloaded `composite_YYYY_median.tif` stays in `data/raw/emapr_biomass/`, not deleted after cropping. See the storage callout in Part 2. | N/A — the native-resolution GeoTIFFs from Part 3 are the retained artifact. |
 | **Analysis-ready output** | `biomass_fire_polygons_emapr_west_<years>_100m_forested.csv` | `biomass_fire_polygons_ctrees_west_forested.csv` |
 
 **Contents**
@@ -37,58 +38,87 @@ this table before anything else:**
 
 ## Part 1: One-Time Setup
 
-Do these once per machine before downloading anything.
+Do these once per machine before downloading anything. **GRIT is the primary
+environment** (the raw eMapR archive is ~1 TB and does not fit on a laptop);
+laptop-only notes are labelled as such.
 
-| Tool | Needed for | Setup |
-|---|---|---|
-| `rclone` | eMapR raw downloads (Nextcloud + FTP) | Installed at `C:\Users\shaht\bin\rclone.exe` (not on PATH — call with the full path, or add the folder to PATH yourself) |
-| `arraylake` Python client | ctrees downloads | `arraylake auth login` (opens a browser prompt; scripts fail with a connection error until this is done) |
-| Python packages | ctrees downloads | `arraylake`, `zarr`, `xarray`, `netCDF4`, `geopandas`; `rasterio` is optional (slower matplotlib-path fallback) for `03_download_ctrees_ca.py` but a **hard requirement** for `04_download_ctrees_west.py` — it backs the raw-GeoTIFF write/read path Parts A–C all depend on there, and the script exits immediately if it's missing |
+### 1.1 GRIT layout
 
-**rclone remotes** — check these exist before using rclone (`rclone listremotes`):
+The code repo (`~/BACI-wildfire`, this repo) and the actual data live in two
+separate places — raw/processed data lives in `~/BACI-review`, a separate
+project-storage repo also shared with other collaborators. `~/BACI-wildfire`
+has no `data/` directory of its own; instead `data` there is a symlink:
 
-```powershell
-# Anonymous eMapR FTP remote (read-only, no credentials needed)
-& "C:\Users\shaht\bin\rclone.exe" config create emapr-ftp ftp host=islay.ceoas.oregonstate.edu user=anonymous pass=
-
-# Nextcloud remote — needs a WebDAV URL + Nextcloud app password
-# (Nextcloud -> Settings -> Security -> "Create new app password")
-& "C:\Users\shaht\bin\rclone.exe" config create nextcloud webdav url=<WEBDAV_URL> vendor=nextcloud user=<USER> pass=<APP_PASSWORD>
+```bash
+ln -s ~/BACI-review/data ~/BACI-wildfire/data
 ```
 
-(`rclone config create` accepts a plaintext `pass=` and obscures it in the stored config — no separate `rclone obscure` step needed.)
+This works transparently with every script's existing `here()`/`PROJ_ROOT`-relative
+paths — no code changes needed — and is safe because `data/raw/`,
+`data/processed/`, `data/final/` are gitignored. If `~/BACI-wildfire/data` is
+ever missing, re-create the symlink rather than downloading a second copy.
 
-**Prevent sleep during any multi-hour download** — closing the laptop lid interrupts transfers and can corrupt output files mid-write:
+### 1.2 GRIT Python environment (ctrees downloads)
 
-```powershell
-powercfg /change standby-timeout-ac 0   # disable sleep, before starting
-powercfg /change standby-timeout-ac 30  # re-enable, after it finishes
-```
-
-**On GRIT specifically:** the code repo (`~/BACI-wildfire`, matches this repo) and the actual
-data live in two separate places — raw/processed data lives in `~/BACI-review`, a separate
-project-storage repo also shared with other collaborators. `~/BACI-wildfire` has no `data/`
-directory of its own; instead `data` there is a symlink to `~/BACI-review/data`
-(`ln -s ~/BACI-review/data ~/BACI-wildfire/data`). This works transparently with every script's
-existing `here()`/`PROJ_ROOT`-relative paths — no code changes needed — and is safe because
-`data/raw/`, `data/processed/`, `data/final/` are already gitignored. If `~/BACI-wildfire/data`
-is ever missing, re-create the symlink rather than downloading a second copy of the data.
-
-GRIT's Python setup for ctrees downloads (there's no `requirements.txt` in the repo yet, so this
-isn't overriding an established convention — a venv is just the safe default to avoid polluting
-whatever global/shared Python environment other collaborators use on GRIT):
+A venv (not conda) — the safe default that avoids polluting whatever
+global/shared Python environment other collaborators use on GRIT:
 
 ```bash
 cd ~/BACI-wildfire
 python3 -m venv .venv
 source .venv/bin/activate
 pip install arraylake zarr xarray netCDF4 geopandas rasterio
-pip freeze > requirements-ctrees.txt   # commit so the env is reproducible for the next person
-arraylake auth login
+arraylake auth login        # opens a browser prompt; scripts fail with a connection error until done
 ```
 
-Re-run `source ~/BACI-wildfire/.venv/bin/activate` in any new shell/tmux pane before running a
-ctrees script — a fresh pane starts outside the venv.
+Re-run `source ~/BACI-wildfire/.venv/bin/activate` in any new shell/tmux pane
+before running a ctrees script — a fresh pane starts outside the venv. (No
+`requirements*.txt` is committed yet; `pip freeze > requirements-ctrees.txt`
+would make the env reproducible for the next person.)
+
+`rasterio` is optional (a slower matplotlib-path fallback) for
+`03_download_ctrees_ca.py` but a **hard requirement** for
+`04_download_ctrees_west.py` — it backs the raw-GeoTIFF write/read path Parts
+A–C depend on, and the script exits immediately if it's missing.
+
+### 1.3 Long-running jobs on GRIT: use `tmux`
+
+A dropped browser/SSH connection kills a plain foreground process, and can
+leave corrupt half-written outputs (see `NOTES.md` → "`file.exists()` ≠ valid").
+Start any multi-hour job inside `tmux`:
+
+```bash
+tmux new -s <name>          # start
+# Ctrl-b then d             # detach
+tmux attach -t <name>       # reattach from any terminal on GRIT
+```
+
+### 1.4 `rclone` (eMapR anonymous FTP pull)
+
+`rclone` is only used to pull raw eMapR composites from the public FTP
+server. Check it exists (`rclone listremotes`) and create the read-only
+anonymous remote if not:
+
+```bash
+rclone config create emapr-ftp ftp host=islay.ceoas.oregonstate.edu user=anonymous pass=
+```
+
+On the laptop `rclone` is installed at `C:\Users\shaht\bin\rclone.exe` (not on
+PATH — call it with the full path). On GRIT, confirm it's available
+(`rclone version`) or use the `curl` fallback in §2.4.
+
+### 1.5 Laptop only: prevent sleep during long jobs
+
+Closing the lid interrupts transfers and can corrupt output files mid-write:
+
+```powershell
+powercfg /change standby-timeout-ac 0   # disable sleep, before starting
+powercfg /change standby-timeout-ac 30  # re-enable, after it finishes
+# lid-close can trigger Modern Standby even with the idle timeout off; also set:
+powercfg -attributes SUB_BUTTONS LIDACTION -ATTRIB_HIDE
+powercfg /setacvalueindex SCHEME_CURRENT SUB_BUTTONS LIDACTION 0   # 0 = Do nothing
+powercfg /setactive SCHEME_CURRENT
+```
 
 ---
 
@@ -103,114 +133,89 @@ ctrees script — a fresh pane starts outside the venv.
 | **Local raw destination** | `data/raw/emapr_biomass/composite_YYYY_median.tif` |
 
 Raw composites are too large to work with directly (loading one in Quarto
-causes multi-minute stalls), so they always get cropped down before use —
-see §2.3. What happens to the raw file *after* cropping has changed:
+causes multi-minute stalls), so they always get cropped before use — see §2.3.
 
-> **Policy as of 2026-08-30: raw files are kept, not deleted.** The PI wants
-> the raw archive on hand. Earlier guidance here said to delete each raw
-> file after cropping to avoid disk-space failures — **that delete step is
-> no longer used.** The tradeoff is real and unavoidable: the **full 34-year
-> archive is ~950 GB–1 TB**. That will not fit on a laptop (this is exactly
-> what caused the repeated disk-space failures that motivated the old
-> delete-after-crop pattern in the first place) — it needs a location with
-> real headroom, e.g. GRIT. Confirm available storage/quota there before
-> assuming "keep everything" is free to do.
+> **Retention policy: raw files are kept, never deleted after cropping.** The
+> PI wants the raw archive on hand. The **full 34-year archive is ~950 GB–1 TB**,
+> which will not fit on a laptop (that's what caused the repeated disk-space
+> failures under the earlier delete-after-crop pattern) — it needs GRIT-scale
+> storage. Confirm available quota before assuming "keep everything" is free.
 
 ### 2.1 Storage tiers
 
 | Tier | Where it lives | Contents | Size |
 |---|---|---|---|
-| Raw (kept permanently) | `data/raw/emapr_biomass/` — also archived to Nextcloud `BACI/raw/emapr_biomass/` where possible, as a second copy, not instead of the local one | full CONUS `composite_YYYY_median.tif` | ~30 GB/yr, ~1 TB for the full 1990–2023 archive |
-| Processed (West-cropped) | `data/processed/emapr_biomass_west/`, also mirrored to Nextcloud `BACI/processed/emapr_biomass_west/` | `composite_YYYY_west.tif` | ~1 GB/yr |
+| Raw (kept permanently) | `data/raw/emapr_biomass/` | full CONUS `composite_YYYY_median.tif` | ~30 GB/yr, ~1 TB for 1990–2023 |
+| Processed (West-cropped) | `data/processed/emapr_biomass_west/` | `composite_YYYY_west.tif` | ~1 GB/yr |
 | Analysis-ready | local / git | fire-polygon extraction CSVs (Part 4) | KB–MB |
 
-### 2.2 Downloading a year (recommended: rclone)
+### 2.2 Getting a raw year
 
-Pick the branch that matches where the year currently lives. **Always use
-`rclone`, not the manual `curl.exe --ftp-pasv` loop** — that loop is a
-retired fallback kept in §2.4 only for machines without rclone available.
+**Use `rclone` (§1.4), not the manual `curl.exe` loop** — that loop is a
+fallback kept in §2.4 only for machines without rclone.
 
-**A — Year's raw file is already local** (`data/raw/emapr_biomass/`): skip straight to §2.3 (crop).
-
-**B — Year is archived on Nextcloud but not local:** pull it down and crop it. The raw file **stays** in `data/raw/emapr_biomass/` afterward (see the retention policy above) — this no longer deletes it:
-
-```powershell
-& "C:\Users\shaht\bin\rclone.exe" copy nextcloud:BACI/raw/emapr_biomass/composite_<yr>_median.tif data/raw/emapr_biomass/ --progress
-Rscript scripts/r/00_crop_emapr_to_west.R
+```bash
+# pull one year straight from the eMapR FTP into the raw tier
+rclone copy emapr-ftp:STEM_CONUS_BIOMASS/biomassfiaald-v1990-2023-1/composite_<yr>_median.tif data/raw/emapr_biomass/ --progress
 ```
 
-Optionally also push the small cropped result up to Nextcloud as a second copy of the processed tier:
+(On the laptop, replace `rclone` with `& "C:\Users\shaht\bin\rclone.exe"`.)
+If a year already exists on another machine, copying it over (`scp`/FileZilla)
+is faster than re-pulling ~28 GB. Run this inside `tmux` on GRIT.
 
-```powershell
-& "C:\Users\shaht\bin\rclone.exe" copy data/processed/emapr_biomass_west/composite_<yr>_west.tif nextcloud:BACI/processed/emapr_biomass_west/
+**Then validate before trusting it.** An interrupted transfer leaves a file
+that looks present but is truncated (one real case: a year that held only
+67.6% of its pixels while its header still claimed full dimensions):
+
+```bash
+Rscript scripts/r/check_raw_emapr_files.R
 ```
 
-**C — Year isn't on Nextcloud or local yet (first-ever fetch):** pull it straight from FTP to local, then follow branch B's crop step. Also archive a copy to Nextcloud while you're at it, since you have the file local anyway:
-
-```powershell
-& "C:\Users\shaht\bin\rclone.exe" copy emapr-ftp:STEM_CONUS_BIOMASS/biomassfiaald-v1990-2023-1/composite_<yr>_median.tif data/raw/emapr_biomass/ --progress
-& "C:\Users\shaht\bin\rclone.exe" copy data/raw/emapr_biomass/composite_<yr>_median.tif nextcloud:BACI/raw/emapr_biomass/ --progress
-Rscript scripts/r/00_crop_emapr_to_west.R
-```
-
-**Archiving years you already have locally** to Nextcloud, as a second copy (this never deletes the local one — see the retention policy above):
-
-```powershell
-& "C:\Users\shaht\bin\rclone.exe" copy data/raw/emapr_biomass/ nextcloud:BACI/raw/emapr_biomass/ --progress
-```
+This checks, per year 1990–2023: file exists, size within tolerance of the
+known-exact byte count (every complete year is the same size), header opens,
+and a small centered pixel block has real values. Console output only; it
+never reads the whole file. Delete and re-fetch any year that fails. (As of
+2026-09-08, 19/34 years were confirmed complete on GRIT; `CLAUDE.md` tracks
+current status.)
 
 ### 2.3 Crop to the study region (required before use in Quarto)
 
-Cropping/masking must happen before eMapR data is used anywhere — this is
-what turns a ~28 GB CONUS file into a usable ~1 GB regional file.
+Cropping/masking turns a ~28 GB CONUS file into a usable ~1 GB regional file.
 
-```r
+```bash
 Rscript scripts/r/00_crop_emapr_to_west.R
 ```
 
 - Input: `data/raw/emapr_biomass/composite_YYYY_median.tif`
 - Output: `data/processed/emapr_biomass_west/composite_YYYY_west.tif` (~1 GB, masked to the union of all 11 Western study states)
-- **Skip-safe**: only processes years whose raw file is present locally and whose cropped output doesn't already exist. Years missing from `data/raw/emapr_biomass/` are reported as skipped, not errored — fetch them first (§2.2), then re-run.
+- **Skip-safe**: only processes years whose raw file is present and whose cropped output doesn't already exist. Years missing from `data/raw/emapr_biomass/` are reported as skipped, not errored — fetch them first (§2.2), then re-run.
+- The skip check is existence + validity (`raster_is_valid()`), so a corrupt cropped file is rebuilt automatically.
 
 `scripts/r/00_crop_emapr_to_ca.R` is the retired CA-only predecessor
 (outputs to `data/processed/emapr_biomass_ca/`) — it still works but is not
-needed for any new work; the West-wide script above supersedes it.
+needed for new work.
 
-### 2.4 Legacy fallback: direct FTP to the laptop (no rclone)
+### 2.4 Fallback: direct FTP with `curl.exe` (no rclone)
 
-Only use this if rclone truly isn't available. It downloads straight to
-`data/raw/emapr_biomass/` with no Nextcloud step — functionally fine now
-that raw files are kept either way (§2 retention policy), just skips the
-automatic second copy on Nextcloud that §2.2 gives you. Prefer §2.2 when
-rclone is available, mainly for that archival copy.
-
-**Windows `ftp.exe` does not support passive mode** and will fail with
-`Connection closed by remote host`. Use `curl.exe` instead (built into
-Windows 10/11) — not plain `curl` in PowerShell, which is aliased to
-`Invoke-WebRequest` and will fail silently in a different way.
+Only if rclone truly isn't available. **Windows `ftp.exe` does not support
+passive mode** and fails with `Connection closed by remote host`; use
+`curl.exe` (built into Windows 10/11), not plain `curl` in PowerShell (which
+is aliased to `Invoke-WebRequest` and fails differently).
 
 ```powershell
 # from a PowerShell prompt opened in data/raw/emapr_biomass/
+# one year:
+curl.exe --ftp-pasv --user "anonymous:" -O ftp://islay.ceoas.oregonstate.edu/STEM_CONUS_BIOMASS/biomassfiaald-v1990-2023-1/composite_2002_median.tif
+# a range (change the loop start to resume):
 for ($yr = 1990; $yr -le 2023; $yr++) {
-    $url = "ftp://islay.ceoas.oregonstate.edu/STEM_CONUS_BIOMASS/biomassfiaald-v1990-2023-1/composite_${yr}_median.tif"
-    Write-Host "Downloading $yr..."
-    curl.exe --ftp-pasv --user "anonymous:" -O $url
+    curl.exe --ftp-pasv --user "anonymous:" -O "ftp://islay.ceoas.oregonstate.edu/STEM_CONUS_BIOMASS/biomassfiaald-v1990-2023-1/composite_${yr}_median.tif"
 }
 ```
 
-To resume from a specific year, change the loop start (e.g. `$yr = 1992`).
-Monitor progress from a second window:
-
-```powershell
-while ($true) {
-    $files = Get-ChildItem . -Filter "*.tif"
-    $tmp   = Get-ChildItem . -Filter "*.tmp"
-    $totalGB = [math]::Round(($files + $tmp | Measure-Object Length -Sum).Sum / 1GB, 2)
-    Write-Host "$(Get-Date -Format 'HH:mm:ss')  $($files.Count) tif complete | downloading: $($tmp.Name) | total on disk: $totalGB GB"
-    ($files + $tmp) | ForEach-Object { $_.Refresh() }
-    Start-Sleep 15
-}
-```
+On Mac/Linux the standard `ftp` client supports passive mode
+(`ftp islay.ceoas.oregonstate.edu`, user `anonymous`, password = your email,
+`cd STEM_CONUS_BIOMASS/biomassfiaald-v1990-2023-1/`, `mget composite_<yr>_median.tif`).
+Don't `mget *` — that's the full ~1 TB series.
 
 ---
 
@@ -225,21 +230,19 @@ while ($true) {
 | **Scale / fill** | divide `int16` values by 10 for Mg ha⁻¹; fill value `-9999` |
 | **CRS / resolution** | WGS84 / EPSG:4326, ~0.000889° ≈ 100 m |
 
-Unlike eMapR, there's nothing to crop afterward — each script below pulls
-data already limited to its target bounding box.
+Unlike eMapR, there's nothing to crop afterward — each script pulls data
+already limited to its target bounding box.
 
 **On "raw" ctrees data:** there is no equivalent of eMapR's downloadable
-CONUS file — the zarr array above *is* the raw/source dataset, and it lives
-entirely on arraylake's infrastructure. A script "downloading" ctrees really
-means: connect, ask for a bounding box + year slice, and choose what to save
-from what comes back. Of the three outputs below, **Part C (the native ~100m
-GeoTIFFs) is the closest thing to a retained raw copy** — full pixel
-resolution, just spatially clipped to the study region, no aggregation.
-Parts A and B are both already-aggregated derivatives (spatially coarsened
-to ~1km, and collapsed to one fire×year mean, respectively) — keep that
-distinction in mind if anyone asks "do we have the raw ctrees data on hand":
-yes, in the form of Part C's regional GeoTIFFs, not as a literal copy of
-arraylake's own storage.
+CONUS file — the zarr array *is* the raw dataset and lives on arraylake's
+infrastructure. A script "downloading" ctrees means: connect, request a
+bounding box + year slice, and choose what to save. Of the three outputs
+below, **Part A (the native ~100 m GeoTIFFs) is the closest thing to a
+retained raw copy** — full pixel resolution, just spatially clipped to the
+study region, no aggregation. The 1 km NetCDF and fire-polygon CSV are
+already-aggregated derivatives. So if anyone asks "do we have the raw ctrees
+data": yes, as the regional GeoTIFFs, not as a literal copy of arraylake's
+storage.
 
 ### 3.1 Explore the store (optional — run first if the schema is unfamiliar)
 
@@ -247,9 +250,8 @@ arraylake's own storage.
 python scripts/python/02_explore_ctrees_zarr.py
 ```
 
-Connects to the repo, walks all groups/arrays, and prints coordinate
-ranges, variable attributes, and a CA-subset size estimate. Console output
-only — writes no files.
+Connects to the repo, walks all groups/arrays, and prints coordinate ranges,
+variable attributes, and a CA-subset size estimate. Console output only.
 
 ### 3.2 Download the California subset (validated baseline)
 
@@ -257,7 +259,7 @@ only — writes no files.
 python scripts/python/03_download_ctrees_ca.py
 ```
 
-Pulls the CA bounding box (`lon -124.5 to -114.1`, `lat 32.5 to 42.0`) and writes three outputs:
+Pulls the CA bounding box (`lon -124.5 to -114.1`, `lat 32.5 to 42.0`):
 
 | Part | Output | Purpose |
 |---|---|---|
@@ -265,18 +267,15 @@ Pulls the CA bounding box (`lon -124.5 to -114.1`, `lat 32.5 to 42.0`) and write
 | B | `data/processed/ctrees/ctrees_biomass_ca_1km.nc` | Coarsened (~1 km) CA raster, 26 years, for R mapping |
 | C | `data/processed/ctrees/biomass_fire_polygons_ctrees.csv` | Long panel: `event_id` × `year` × mean AGB within each MTBS CA fire polygon |
 
-Skip-safe per part — delete a specific output file to force re-extraction
-of just that part. Part C rasterizes each fire polygon's mask once
-(`rasterio.features.rasterize()`) and reuses it across all 26 years —
-10–50x faster than a shapely point-in-polygon approach. Sanity checks
-(percent-valid-pixel counts) run automatically at the end.
+Skip-safe per part — delete a specific output to force re-extraction of just
+that part. Part C rasterizes each fire polygon's mask once and reuses it
+across all 26 years (see `NOTES.md` 2026-05-13). Sanity checks run
+automatically at the end.
 
-**This CA output is the validated baseline** (`biomass_within_fires.qmd`
-§7) — don't modify it; it's what the West-wide pipeline below is
-cross-checked against. **Note:** the part *letters* were standardized to
-match §3.3's script (A = raw TIFF, B = 1km NetCDF, C = fire CSV), but this
-script's execution order is untouched — it still runs B → C → A (coarsen,
-then extract, then raw-TIFF-export last), not A → B → C.
+**This CA output is the validated baseline** (`biomass_within_fires.qmd` §7) —
+don't modify it; the West-wide pipeline below is cross-checked against it.
+Part letters match §3.3 (A = raw TIFF, B = 1 km NetCDF, C = fire CSV), but
+this script's execution order is untouched: B → C → A.
 
 ### 3.3 Download the full 11-state Western subset
 
@@ -284,115 +283,66 @@ then extract, then raw-TIFF-export last), not A → B → C.
 python scripts/python/04_download_ctrees_west.py
 ```
 
-Same as §3.2 but over the union bbox of all 11 Western study states
-(`lon -124.8 to -102.0`, `lat 31.3 to 49.0`, ~4.1x the CA pixel area,
-~6,800 fires). Part letters match §3.2's script by output type (A = raw
-TIFF, B = 1km NetCDF, C = fire CSV) — but unlike §3.2, this script actually
-*runs* in that A → B → C order (raw download first); see below for why.
+Same as §3.2 over the union bbox of all 11 Western study states
+(`lon -124.8 to -102.0`, `lat 31.3 to 49.0`, ~4.1x the CA pixel area, ~6,800
+fires). Unlike §3.2, this script runs in A → B → C order:
 
 | Part | Output | Purpose |
 |---|---|---|
-| A | `data/processed/ctrees/ctrees_YYYY_west_100m.tif` | Raw download: one native-resolution (~100 m) GeoTIFF per year, straight from arraylake, West-bbox extent — runs first |
-| B | `data/processed/ctrees/ctrees_biomass_west_1km.nc` | Coarsened (~1 km) West raster, 26 years, for R mapping — built by reading Part A's local TIFFs back, not arraylake |
+| A | `data/processed/ctrees/ctrees_YYYY_west_100m.tif` | Raw download: one native-resolution (~100 m) GeoTIFF per year, straight from arraylake — runs first |
+| B | `data/processed/ctrees/ctrees_biomass_west_1km.nc` | Coarsened (~1 km) West raster, 26 years, for R mapping — built from Part A's local TIFFs |
 | C | `data/processed/ctrees/biomass_fire_polygons_ctrees_west.csv` | Long panel: `event_id` × `year` × mean AGB within each Western fire polygon — also reads Part A's local TIFFs |
 
-**Why the raw download runs first here (unlike §3.2):** downloading the raw
-GeoTIFFs first, then having Parts B/C read those plain local files back,
-means "raw ctrees data" is on disk as its own step before any processing
-happens — see the "On raw ctrees data" note above. (§3.2's CA script is
-untouched and still runs B → C → A, coarsen/extract before raw-TIFF-export;
-it's validated at CA scale and not worth touching.)
+Raw first means "raw ctrees data" is on disk as its own step before any
+processing, and B/C read plain local files instead of re-querying arraylake.
+Because B/C read Part A's TIFFs, **rasterio is a hard requirement**. Part A's
+per-year TIFs are **shared across all 11 states** — each state's extraction
+(`08`, Part 4) crops its own slice from the same file.
 
-**Memory on GRIT — three rounds of OOM kills, three different root causes.**
-GRIT's interactive sessions run as Slurm jobs with a cgroup memory limit
-(confirmed via `/proc/self/cgroup` → a slurmstepd job/step/task cgroup with
-nonzero `oom_kill` counts in its `memory.events`). An earlier "4 GiB
-`ulimit -m`" reading turned out to be a red herring — `RLIMIT_RSS` isn't
-actually enforced by modern Linux, and summing this user's other processes'
-RSS exceeded 4 GB without anything being killed, which a simple aggregate
-4 GB cap couldn't explain. The exact `memory.max` for the job was never
-pinned down, but three OOM kills at three different steps confirmed the
-pattern regardless of the exact number:
-1. **Coarsening.** West's grid isn't an exact multiple of the coarsening
-   factor (25650 cols / 11 truncates to 25641), so a whole-array
-   `reshape()` was non-contiguous and numpy silently copied the entire
-   ~2 GB truncated array to satisfy it.
-2. **Part A's plain raw download** (after reordering Part A first) — no
-   coarsening math involved at all. Just holding one ~2 GB float32 year
-   array (int16→float32 cast + a same-shape boolean fill-mask), plus
-   several hundred MB–1 GB of geopandas/rasterio/arraylake/xarray import
-   overhead, was enough on its own.
-3. **Part B's final NetCDF assembly** — after fixing (1), the per-year
-   coarsening succeeded for all 26 years, but assembling them held up to
-   three ~439 MB copies simultaneously (a list of all 26 cached arrays,
-   `np.stack()`'s result, and a redundant `.astype()` copy of that result).
+**Run it in `tmux`** (§1.3), from a real terminal, not a notebook. It's a
+multi-hour job (~4x the reads, ~6.4x the fire polygons vs. CA); expect the 26
+compressed GeoTIFFs to total ~8–20 GB, so check free space first (`df -h ~`).
+On a laptop, disable sleep instead (§1.5).
 
-All three are now fixed the same way — never materialize a full array:
-Part A writes in row-strips (`STRIP_ROWS`), Part B's coarsening reads and
-averages via `factor`-row TIFF windows (`coarsen_year_from_tif()`), and
-Part B's final NetCDF write happens one year at a time directly into the
-file (plain `netCDF4`, not xarray's `Dataset`/`to_netcdf`, which needs the
-whole array up front). Part C still loads a full raster per year (it needs
-scattered access across the whole extent for polygon masks) — if that OOMs
-too, it would need the same per-fire windowed-read treatment. (§3.2's CA
-script uses none of this — CA's grid is ~4x smaller, so none of these
-failure modes got anywhere near the cap there.) If OOM kills persist after
-all this, the remaining option is asking GRIT's Slurm admin for a larger
-memory allocation for the job.
+```bash
+tmux new -s ctrees_west
+cd ~/BACI-wildfire && source .venv/bin/activate
+python scripts/python/04_download_ctrees_west.py 2>&1 | tee -a data/processed/ctrees/04_download_ctrees_west_log.txt
+```
 
-Because Parts B/C now read the GeoTIFFs Part A writes, **rasterio is a hard
-requirement** for this script (no fallback) — install it if `pip install
-arraylake zarr xarray netCDF4 geopandas rasterio` (Part 1) was skipped.
+**Resuming / validity.** Part B checkpoints each coarsened year to
+`data/processed/ctrees/_west_1km_scratch/` and only assembles the NetCDF once
+all 26 years exist; Part C checkpoints per year to `_west_fireagb_scratch/`.
+On resume, Part B re-validates any existing `ctrees_biomass_west_1km.nc`
+(`netcdf_is_valid()`) and deletes/rebuilds a corrupt one. Part A's TIFs are
+still existence-checked only — after any interrupted run, compare the
+last-written year's file size to the others (~730 MB) and delete it if it's
+short. The CA outputs from §3.2 are never touched by this script.
 
-Part A's per-year West TIFs are meant to be **shared across all 11
-states** — each state's extraction (script `08`, Part 4 below) crops its
-own slice from the same file rather than needing a separate download per
-state.
+**Memory on GRIT.** Interactive sessions run as Slurm jobs with a cgroup
+memory cap, and this script was OOM-killed three times before being
+restructured to *never materialize a full ~2 GB year array*: Part A writes in
+row-strips (`STRIP_ROWS`), Part B coarsens from `factor`-row TIFF windows
+(`coarsen_year_from_tif()`) and writes the NetCDF one year at a time with
+plain `netCDF4`, and Part C reads per-fire `rasterio.Window`s with bit-packed
+mask caching. The script logs peak memory (`VmHWM`) after each part — check
+`04_download_ctrees_west_log.txt` first if a run dies. If OOM kills persist,
+inspect the cap (`cat /sys/fs/cgroup/memory.max`) and ask whoever administers
+GRIT for a larger allocation. Incident history: `NOTES.md` 2026-09-20.
 
-**If you still hit an OOM kill** even with this reordering (the ~2 GB
-per-year raw read is unavoidable regardless of source), the memory cap
-itself is the constraint — check it with `ulimit -a` (look at `max memory
-size`) and `cat /sys/fs/cgroup/memory.max`, and ask whoever administers
-GRIT/JupyterHub for a higher limit or a larger server profile.
-
-**This is a multi-hour job** (4x the reads, ~6.4x the fire polygons vs.
-CA). Before starting:
-- On a laptop: disable sleep (`powercfg /change standby-timeout-ac 0`, §1) — closing the lid
-  interrupts the run.
-- On GRIT (or any web-based terminal): a dropped browser connection kills a plain foreground
-  process, so wrap the run in `tmux` instead:
-  ```bash
-  tmux new -s ctrees_west
-  cd ~/BACI-wildfire && source .venv/bin/activate   # if using the GRIT venv from §1
-  python scripts/python/04_download_ctrees_west.py
-  ```
-  Detach with `Ctrl-b` then `d`; reattach later from any terminal on GRIT with
-  `tmux attach -t ctrees_west`.
-- Run from a real terminal, not a notebook.
-- Expect Part C's 26 compressed GeoTIFFs to total ~8–20 GB on disk — check free space first
-  (`df -h ~`).
-
-Part B (not Part A — coarsening runs after the raw download in this script's
-A → B → C order) checkpoints each coarsened year to
-`data/processed/ctrees/_west_1km_scratch/` as it completes and only
-assembles the final NetCDF once all 26 years are present — safe to resume
-if interrupted. Part C similarly checkpoints per year to
-`data/processed/ctrees/_west_fireagb_scratch/`. On resume, Part B also
-re-validates any existing `ctrees_biomass_west_1km.nc` before trusting it
-(not just checking that the file exists) — a run killed outside `tmux` by a
-dropped connection can leave a file that opens but has no real data; a
-corrupt file like that is deleted and rebuilt automatically. The CA-only
-outputs from §3.2 are left untouched by this script.
+**After the first successful full run**, cross-validate: the West CSV's CA
+rows should match the `03_download_ctrees_ca.py` baseline (expect correlation
+≈ 1.000, as the ctrees side of the `05`–`08` validation did).
 
 ---
 
 ## Part 4: Forest Mask + Fire-Extraction Pipeline (scripts 05–08)
 
-Once eMapR is cropped (§2.3) and ctrees is downloaded (§3.2/3.3) for a
-state, four R scripts turn those rasters into the CSVs the `analysis/*.qmd`
-documents actually read — building a forest mask, then extracting biomass
-within fire perimeters. Run them in order, from the project root, **outside
-Quarto** (see the note below on why).
+Once eMapR is cropped (§2.3) and ctrees is downloaded (§3.3) for a state, four
+R scripts turn those rasters into the CSVs the `analysis/*.qmd` documents
+read — building a forest mask, then extracting biomass within fire
+perimeters. Run them in order, from the project root, **outside Quarto**
+(Quarto buffers chunk output, which makes terra's C++ threading look frozen).
 
 ```r
 # 1 — per-state NLCD 2004 forest masks (0/1), three resolutions
@@ -408,7 +358,7 @@ Rscript scripts/r/07_extract_emapr_within_fires_new.R
 Rscript scripts/r/08_extract_ctrees_within_fires_new.R
 ```
 
-| Script | Downloads it depends on | Output |
+| Script | Depends on | Output |
 |---|---|---|
 | `05` | NLCD 2004 (auto-downloaded via `FedData::get_nlcd()`, no login needed); a ctrees `_100m.tif` template for the ~100 m mask variant | `data/processed/forest_mask/nlcd2004_forestfrac_{30m,90m,100m}_<state>.tif` |
 | `06` | `05`'s 30 m masks | `data/processed/forest_mask/pct_forest_by_fire_west.csv` |
@@ -419,16 +369,14 @@ Rscript scripts/r/08_extract_ctrees_within_fires_new.R
 state × year) — re-running only builds what's missing. Delete the relevant
 output file/rows to force re-extraction.
 
-**Adding a new state:** each script has a `STATES_TO_RUN` list near the
-top (e.g. `STATES_TO_RUN <- c("CA", "WY")`) — add the state's two-letter
-code and re-run scripts `05`→`08` in order. `05` requires that state's
-NLCD download (automatic) and, for the ~100 m mask, a ctrees template TIF
-from §3.3. `07`/`08` require `05`'s masks to exist first for that state.
+**Adding a new state:** each script has a `STATES_TO_RUN` list near the top
+(e.g. `STATES_TO_RUN <- c("CA", "WY")`) — add the state's two-letter code and
+re-run `05`→`08` in order. `05` needs a ctrees template TIF from §3.3 for the
+~100 m mask; `07`/`08` need `05`'s masks for that state first.
 
-**Windows/Quarto note:** always run these via `Rscript` or the R console,
-never inside a Quarto chunk — Quarto buffers chunk output until the chunk
-finishes, which makes terra's C++ threading look frozen even though it's
-running.
+**Validation harness:** `Rscript scripts/r/validate_west_pipeline.R` (+
+`analysis/west_pipeline_sanity_check.qmd`) re-checks the pipeline against the
+retired CA baseline; resumable per (state, year).
 
 ---
 
@@ -437,13 +385,12 @@ running.
 Adding a brand-new state (or year) to the study, from nothing to
 analysis-ready CSVs:
 
-1. **One-time setup** (Part 1) done? `arraylake auth login`, rclone remotes configured.
-2. **eMapR:** for each study year, get the raw composite local (Part 2.2), then crop it (`Rscript scripts/r/00_crop_emapr_to_west.R`, §2.3).
+1. **One-time setup** (Part 1) done? GRIT symlink + venv, `arraylake auth login`, `emapr-ftp` remote.
+2. **eMapR:** for each study year, get the raw composite (§2.2), validate it (`Rscript scripts/r/check_raw_emapr_files.R`), then crop (`Rscript scripts/r/00_crop_emapr_to_west.R`, §2.3).
 3. **ctrees:** run `03_download_ctrees_ca.py` once ever (§3.2, baseline); run `04_download_ctrees_west.py` once ever for the West-wide TIFs (§3.3) — both are shared across all states, not re-run per state.
 4. **Forest mask + extraction:** add the new state's code to `STATES_TO_RUN` in scripts `05`, `06`, `07`, `08`, then run them in that order (Part 4).
-5. Confirm the new state's rows appear in the output CSVs listed in the Part 4 table, then point the relevant `analysis/*.qmd` at them.
+5. Confirm the new state's rows appear in the output CSVs in the Part 4 table, then point the relevant `analysis/*.qmd` at them.
 
 For current progress against this checklist (which states/years are done,
-what's still blocked), see the "Current Status" section of `CLAUDE.md`
-rather than this guide — that's a living status log, this is the
-process reference.
+what's still blocked), see "Current Status" in `CLAUDE.md` — that's the
+living status log; this is the process reference.

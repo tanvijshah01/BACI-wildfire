@@ -10,8 +10,8 @@
 #
 # Only years whose raw file is already present locally are processed — years
 # missing from data/raw/emapr_biomass/ are reported as skipped (see
-# DATA_DOWNLOAD_GUIDE.md for the rclone flow that fetches a missing year to a
-# scratch path, then this script picks it up on the next run).
+# DATA_DOWNLOAD_GUIDE.md §2.2 for fetching a missing year; this script picks it
+# up on the next run).
 #
 # Run once; subsequent calls skip files that already exist.
 # =============================================================================
@@ -111,8 +111,7 @@ missing_years <- setdiff(1990:2023, avail_years)
 if (length(missing_years) > 0) {
   cat(glue("\n[MISSING RAW INPUT] {length(missing_years)} years not found in {RAW_DIR}: ",
            "{paste(missing_years, collapse = ', ')}\n"))
-  cat("See DATA_DOWNLOAD_GUIDE.md for the rclone flow to fetch these without\n")
-  cat("permanently storing the full CONUS file locally.\n")
+  cat("See DATA_DOWNLOAD_GUIDE.md §2.2 to fetch these, then re-run this script.\n")
 }
 
 # ── 5. Summary ────────────────────────────────────────────────────────────────

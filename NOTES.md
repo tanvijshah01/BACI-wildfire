@@ -1,397 +1,290 @@
 # Project Notes — Wildfire Biomass Recovery
 
-Working notes on decisions, findings, and open questions. Add entries in reverse chronological order (newest at top).
+Decisions, findings, and durable lessons for the project. Where things live:
+
+| Section | What goes here |
+|---|---|
+| [Technical gotchas](#technical-gotchas) | Undated, durable lessons — check here before debugging |
+| [Design decisions & open questions](#design-decisions--open-questions) | Single copy of what's decided and what isn't |
+| [Dated log](#dated-log-newest-first) | What happened and why, newest first |
+| [Literature notes](#literature-notes) | Papers and methods details |
+
+Operating instructions (how to download, crop, extract, run on GRIT) live in
+`DATA_DOWNLOAD_GUIDE.md`; project orientation and current status live in `CLAUDE.md`.
 
 ---
 
-## 2026-09-20 — GRIT migration: layout confirmed, ctrees West download hardened
+## Technical gotchas
 
-Consolidates what actually happened on GRIT since the 2026-08-30 handoff below (that
-section predates the GRIT work and was never updated for it — the GRIT-specific
-detail lives in `DATA_DOWNLOAD_GUIDE.md` and commit messages instead).
+### `file.exists()` ≠ "file is valid"
+A background write killed mid-`writeRaster()` (laptop sleep, dropped connection, OOM) leaves a file
+that is **present with a correct header but corrupt or truncated content**. Any skip-safe script that
+only checks `file.exists()` silently treats it as done. This caused real damage several times: a
+100%-NA WY forest mask, a truncated ctrees `2018` GeoTIFF (15.6 MB instead of ~730 MB), disappearing
+eMapR west-crop years, and (on GRIT, 2026-09) a 7 KB header-only `ctrees_biomass_west_1km.nc`.
+Validate before trusting an existing output, and delete + rebuild if it fails:
 
-**GRIT layout, as actually set up:** code at `~/BACI-wildfire`; data lives in a
-separate shared repo `~/BACI-review`, joined by `ln -s ~/BACI-review/data
-~/BACI-wildfire/data` — every script's `here()`/`PROJ_ROOT`-relative path works
-unchanged. Python env is a venv at `~/BACI-wildfire/.venv` (`pip install arraylake
-zarr xarray netCDF4 geopandas rasterio`), not a conda env — this supersedes the
-laptop's `anaconda3` base env guidance for GRIT specifically. See
-`DATA_DOWNLOAD_GUIDE.md` §1 for full setup.
-
-**Raw eMapR validity checker added** (`scripts/r/check_raw_emapr_files.R`): checks
-file size against an exact expected byte count (not just `file.exists()`) plus a
-small centered pixel-block read, so a truncated/corrupt raw composite can't be
-silently trusted. 19/34 years confirmed complete on GRIT as of 2026-09-08.
-
-**`04_download_ctrees_west.py` — three real OOM kills, three real fixes** (commits
-`bcbc41b`, `8ad9dfe`, `4eeb88f`), each from materializing a full array on GRIT's
-Slurm cgroup memory cap (exact `memory.max` never pinned down; an earlier "4 GiB
-`ulimit -m`" reading was a confirmed red herring — `RLIMIT_RSS` isn't enforced by
-modern Linux):
-1. Coarsening's whole-array `reshape()` silently copied the full ~2 GB array
-   because West's dimensions aren't an exact multiple of the coarsen factor.
-2. Part A's plain raw download held one ~2 GB float32 year array on its own.
-3. Part B's NetCDF assembly held up to three ~439 MB copies at once
-   (list + `np.stack()` + `.astype()`).
-
-All three fixed by never materializing a full array: row-strip writes (Part A),
-per-window coarsening reads (Part B), and a direct year-by-year `netCDF4` write
-(Part B assembly) instead of xarray's `Dataset`/`to_netcdf`. The script was also
-reordered to run raw-download-first (A → B → C) so B/C read plain local GeoTIFFs
-instead of re-querying arraylake, and `rasterio` became a hard requirement (the
-matplotlib-fallback path was removed).
-
-**Then: the `file.exists()` ≠ valid gotcha hit GRIT for real.** A relaunch after
-the fixes above was started as a bare foreground command, not under `tmux` as
-`DATA_DOWNLOAD_GUIDE.md` instructs — a dropped connection killed it mid-Part-B-write
-and left a 7 KB corrupted `.nc` file. Diagnosed live (26/26 Part A TIFs present, the
-`.nc` header-only with no data, no `_west_fireagb_scratch/` dir so Part C never even
-started, no `tmux` session, `memory.events` showing no OOM). The 2026-08-30 handoff
-below explicitly flagged this laptop-specific gotcha as "unknown whether it still
-applies on GRIT" — it does; treat any corrupt-looking output the same way here as
-on the laptop (see "Recurring technical gotcha" in that section).
-
-**Fixes applied in response, before relaunching:**
-- `netcdf_is_valid()` added, mirroring `raster_is_valid()` — Part B now deletes and
-  rebuilds a corrupt/truncated `.nc` instead of trusting `OUT_NC.exists()` alone.
-- Part C hardened pre-emptively (it had never actually run at West scale, and both
-  the script header and the guide already flagged it as the next likely OOM since
-  it still loaded a full ~2 GB year array per year): switched to a per-fire
-  `rasterio.Window` read, matching the crop-per-polygon pattern already used by the
-  R extraction scripts (`07`/`08`) and documented below as the only approach that
-  works on rasters this size. The ~6,800-fire mask cache was also shrunk (drop the
-  full pandas row/geometry per fire, bit-pack each mask with `np.packbits`), and the
-  previously-dead `errors` list is now actually populated via a per-fire
-  `try/except`.
-- The end-of-script sanity check had the exact same bug Part B's own assembly did
-  (`ds_check["agb"].values` loading the whole ~439 MB NetCDF) — fixed to accumulate
-  per-year instead, since this check runs on every invocation including fully-
-  skipped ones.
-- Added a `log_peak_memory()` helper (`/proc/self/status` → `VmHWM`) after each
-  part, so a future OOM is diagnosable from the log directly instead of needing
-  another live-diagnosis round like this one.
-
-**Status as of this entry:** code fixes committed; not yet re-run on GRIT. Next
-step is on GRIT, not here — delete the corrupt `.nc`, pull, relaunch under `tmux`
-with output piped to `04_download_ctrees_west_log.txt`, and cross-validate the
-West CSV's CA rows against the validated `03_download_ctrees_ca.py` baseline
-(expect correlation ≈ 1.000, matching the ctrees side of the 2026-08-30 `05`–`08`
-validation). See `DATA_DOWNLOAD_GUIDE.md` §3.3 for the full command block.
-
----
-
-## CLAUDE CODE MEMORY NOTES — Handoff for Positron Assistant (2026-08-30)
-
-**What this section is:** Claude Code (the AI assistant previously used on this project, running
-on a local laptop) keeps a persistent memory system *outside* this git repo, tied to that specific
-machine. As the project moves to running on the GRIT server — data via Nextcloud/FileZilla, code
-and assistant work happening on GRIT itself, likely via Positron Assistant instead of Claude Code —
-that laptop-local memory doesn't travel automatically. This section consolidates everything from it
-that's still relevant, so a new assistant (or a person) picking this up on GRIT has the context
-without re-deriving it. Below is organized by how current/actionable each piece still is.
-
-### Current data-pipeline status (as of 2026-08-30, verify before trusting — see gotcha below)
-
-- **eMapR raw archive** (`data/raw/emapr_biomass/composite_YYYY_median.tif`): 20 of 34 years
-  (1990–1996, 2000–2012) were present on the laptop. Years 1997–1999 and 2013–2023 were never
-  fetched. The plan to archive these durably on Nextcloud was never completed (WebDAV credentials
-  never obtained) — see "Nextcloud architecture — superseded" below. Whatever state this is in now
-  depends entirely on what got uploaded to GRIT directly; it should not be assumed any of this
-  eMapR raw/cropped work carried over — check `data/raw/emapr_biomass/` and
-  `data/processed/emapr_biomass_west/` on GRIT directly.
-- **eMapR West-crop** (`scripts/r/00_crop_emapr_to_west.R`, → `data/processed/emapr_biomass_west/composite_YYYY_west.tif`):
-  repeatedly interrupted on the laptop by background-job kills (originally laptop lid-close sleep,
-  fixed via a `powercfg` lid-action setting; later kills had no confirmed root cause — possibly
-  session/environment teardown, not reproducible). Last confirmed local state: 1990 valid,
-  1991 freshly rebuilt and valid, 1992 present but **unconfirmed** — sized suspiciously smaller than
-  every other year and was mid-write when the job died, never verified before the conversation moved
-  on to the GRIT migration. **Do not trust any `composite_YYYY_west.tif` file's mere presence** — see
-  the corruption gotcha below.
-- **ctrees**: CA-only download (`scripts/python/03_download_ctrees_ca.py`) is fully complete
-  (26 years, 2000–2025). The West-wide version (`scripts/python/04_download_ctrees_west.py`,
-  ~4.1x CA's pixel area, ~6,800 fires) had Parts A (1km NetCDF) and B (fire-polygon CSV) fully
-  complete, and Part C (26 annual 100m GeoTIFFs) at 18/26 (years 2000–2017 done) the last time it
-  was directly checked on the laptop — this was not rechecked again before the GRIT pivot, so
-  treat it as possibly stale.
-- **`07`/`08` extraction scripts**: rewritten to support multi-state `STATES_TO_RUN` instead of
-  hardcoded `STATE_FIPS <- "CA"` (see "07/08 rewrite" below), and validated on CA+WY. Not yet run
-  end-to-end for real production `STUDY_YEARS` output, since the West eMapR crop and West ctrees
-  TIFs weren't both complete yet when work paused.
-
-### Recurring technical gotcha: `file.exists()` ≠ "file is valid"
-
-This machine (the laptop) had a repeated failure mode: a background raster-writing job gets killed
-mid-`writeRaster()` (originally laptop-sleep, later unclear causes), leaving a GeoTIFF that's
-**present on disk with a correct header but corrupt or truncated content** — either all-NA pixels,
-or a file that just stops partway through. Scripts that only checked `file.exists()` to decide
-whether to skip re-processing a year/state silently treated these as done. This caused real damage
-three times: a corrupted WY forest mask (100% NA), a truncated ctrees `2018` GeoTIFF (15.6 MB
-instead of ~730 MB), and the eMapR west-crop years 1991–1996/2000 disappearing between sessions
-(rebuilt once, corruption status of 1992 still unconfirmed as of this handoff).
-
-**Fix pattern applied** (in `05_prepare_forest_masks_west.R` and `00_crop_emapr_to_west.R`, and
-worth applying anywhere else this pattern shows up): a `raster_is_valid()` helper —
 ```r
 raster_is_valid <- function(path) {
   terra::global(terra::rast(path), "notNA")[[1]] > 0
 }
 ```
-— checked before trusting an existing output file, deleting and rebuilding if it fails. Note this
-only catches *fully* corrupt (all-NA) files, not partial truncation with some real data still
-readable — for that, compare file size against other years/states as a sanity check, or verify the
-raster opens and has the expected extent/cell count.
 
-**Whether this gotcha still applies on GRIT is unknown** — it may have been specific to the
-laptop's sleep/background-task behavior. Worth being alert for it early on rather than assuming a
-shared HPC server is immune.
+- Used in `05_prepare_forest_masks_west.R` and `00_crop_emapr_to_west.R`. It only catches *fully* corrupt
+  (all-NA) files — for partial truncation, compare file size against sibling years/states or check
+  extent/cell count.
+- Python: `netcdf_is_valid()` in `04_download_ctrees_west.py` mirrors `raster_is_valid()` for the 1 km NetCDF.
+  Part A's raw TIFs are still existence-checked only — check the last-written year's size against the
+  others (~730 MB) after any interrupted run.
+- Raw eMapR composites: `scripts/r/check_raw_emapr_files.R` checks exact expected byte count plus a small
+  centered pixel-block read.
 
-### Other durable technical lessons
+### terra on large rasters: only per-polygon crop → mask → mean works
+On ~125M-cell ctrees TIFs, every whole-raster masking approach (`mask()`, `r * fm`, `extract()` on two
+full rasters) is extremely slow or OOMs, even when the file is file-backed. Only a polygon-by-polygon
+`crop()` → `mask()` → `mean()` loop works, because each `crop()` reads only that polygon's disk blocks.
+This is why `07`/`08` extract per polygon instead of masking a whole state up front. The bottleneck is
+random compressed disk I/O, not code structure — don't "optimize" this into a whole-raster operation
+(re-derived and confirmed several times).
 
-- **terra performance on large rasters** (from ctrees CA-scale, ~125M-cell TIFs): applying a
-  forest mask via any "whole-raster" approach (`mask()`, `r * fm`, `extract()` on two full rasters)
-  is extremely slow or OOMs, even though the file itself is manageable when file-backed and
-  accessed only by cropped windows. **Only a polygon-by-polygon `crop()` → `mask()` → `mean()` loop
-  works** — each `crop()` reads only that polygon's disk blocks. This is why `07`/`08` extract
-  per-polygon rather than masking a whole state's raster up front. Don't try to "optimize" this into
-  a single whole-raster operation — the bottleneck is random compressed disk I/O, not code
-  structure, and this has been re-derived and confirmed multiple times.
-- **Cache invalidation checks year coverage, not fire-set membership**: in the (now-retired)
-  CA-only pipeline, changing which fires are included (e.g. a border-fire filter fix) did not
-  invalidate an existing extraction CSV cache, because the cache validator only checked which years
-  were present, not which `event_id`s. If a future cache-based script changes fire-selection logic,
-  check whether existing caches need manual deletion, or whether the cache key/validator should
-  include fire-set identity.
+### Never materialize a full array (Python, GRIT memory cap)
+GRIT sessions run under a Slurm cgroup memory limit. `04_download_ctrees_west.py` was OOM-killed three
+times, each from holding a full ~2 GB year array (or several ~439 MB copies) in memory. The pattern that
+fixed all three: stream — row-strip writes, windowed reads, one-year-at-a-time NetCDF writes with plain
+`netCDF4`. See the 2026-09-20 log entry for the incident chronology and `DATA_DOWNLOAD_GUIDE.md` §3.3 for
+what to do if it recurs. (An earlier "4 GiB `ulimit -m`" diagnosis was a red herring — `RLIMIT_RSS` isn't
+enforced on modern Linux.)
 
-### Open, not-yet-confirmed item
+### Cache validators must key on fire-set identity, not just years
+In the (retired) CA-only pipeline, changing which fires are included (a border-fire filter fix) did not
+invalidate an existing extraction CSV because the validator only checked which *years* were present, not
+which `event_id`s. If fire-selection logic changes in any cache-based script, delete the cache manually or
+extend the validator to include fire-set identity.
 
-**Border-fire eMapR/ctrees count gap**: in the old CA-only pipeline, ctrees matched all 272 study
-fires (2005–2010 cohort) but eMapR only matched 234 — same ~38 fires missing consistently, not
-random noise. Leading hypothesis: eMapR's old CA extraction was polygon-masked to the CA state
-boundary while ctrees' wasn't, so a border fire whose forested area sits mostly outside CA could
-lose its entire eMapR value to NA. The `07`/`08` rewrite's event_id-prefix MTBS dedup (see below)
-was built partly to address the underlying mechanism, and a validation harness run confirmed old
-vs. new fire *selection* matches exactly (0 disagreements) — but that's not the same as confirming
-the eMapR *data availability* gap itself is closed, since `07` hadn't produced real multi-state
-production output yet. Re-check the ctrees-vs-eMapR fire count gap directly once real output exists.
-
-### `07`/`08` rewrite — design decisions
-
-Rewritten from hardcoded `STATE_FIPS <- "CA"` to a `STATES_TO_RUN` vector, reading from shared
-West-wide crops instead of per-state files:
-- **eMapR (`07`)**: reads the native ~30m West-cropped TIF directly, does
-  crop-to-polygon → `aggregate(fact=3)` → mask, per fire polygon — no separate whole-West
-  downsampled precompute file (chosen deliberately to avoid an extra multi-GB/year file).
-- **ctrees (`08`)**: same extraction algorithm as before, just pointed at the shared
-  `ctrees_YYYY_west_100m.tif` (from `04_download_ctrees_west.py` Part C) instead of per-state files.
-- **MTBS dedup**: both now use event_id-prefix dedup (spatial join to West states union, then
-  `STUSPS = substr(event_id, 1, 2)` as authoritative) instead of single-state `st_filter()` +
-  `startsWith()` — this is the fix for the border-fire mechanism above.
-- **Output**: one combined CSV per script with a `STUSPS` column, resumable per (state, year), not
-  one file per state.
-- Both scripts wrap their per-polygon extraction in `tryCatch()` so one bad polygon logs a warning
-  and returns `NA` instead of crashing a multi-hour, multi-state run.
-- A validation harness (`scripts/r/validate_west_pipeline.R` +
-  `analysis/west_pipeline_sanity_check.qmd`) was built specifically to gate this rewrite before
-  trusting it at scale — resumable per (state, year), re-run with
-  `Rscript scripts/r/validate_west_pipeline.R`. This is what caught the corrupted WY mask and a
-  CRS bug (missing `st_transform(5070)`) in the harness's own comparison code — not in `07`/`08`
-  themselves, which were confirmed to already transform correctly.
-
-### Historical / superseded — context only, not current instructions
-
-- **Nextcloud storage architecture**: the original plan was raw eMapR composites (~1 TB total)
-  living durably on Nextcloud, fetched transiently via `rclone` to crop then delete locally. This
-  was **never fully set up** (WebDAV credentials were never obtained) and is now superseded by the
-  GRIT migration itself — GRIT is the new durable-storage answer, not Nextcloud-as-archive. Nextcloud
-  (or FileZilla) may still be the *upload mechanism* to get data onto GRIT, per the current plan,
-  but the "laptop ⇄ Nextcloud ⇄ crop-then-discard" architecture is not what's being built anymore.
-- **Old NBR/Landsat GEE biomass approach** (`archive/nbr_landsat_approach/`, `START_YEAR = 1984`):
-  archived — NBR is a unitless spectral index, not a biomass quantity, and calibrating it to
-  biomass would be a separate research project. Current pipeline uses eMapR and ctrees, which
-  provide pre-calibrated AGB directly. The underlying reason this came up (wanting long pre-fire
-  baselines for parallel-trends testing) is naturally satisfied by eMapR's 1990 start year without
-  needing this archived approach.
-- **`reference_python_env`**: on the laptop, ctrees Python scripts needed the anaconda3 *base* env
-  specifically (not the `wildfire` conda env, which was missing `arraylake`/`geopandas`/`rasterio`).
-  This is laptop-specific and almost certainly **does not apply on GRIT** — GRIT will have its own
-  Python/conda setup that needs to be checked independently; don't assume an env named `wildfire`
-  or `base` means anything equivalent there.
-- **Old CA-only retired pipeline** (`00_crop_emapr_to_ca.R` → `02_extract_emapr_within_fires.R` /
-  `04_extract_ctrees_within_fires.R` → `analysis/biomass_within_fires_old.qmd`): kept only as a
-  validation baseline the `05`–`08` pipeline was cross-checked against (ctrees matched exactly,
-  r = 1.000). Do not extend this retired pipeline for new work.
+### R / Quarto conventions
+- **`sf_use_s2(FALSE)`** at the top of any script that spatially joins MTBS data. MTBS perimeters have
+  self-touching edges that the s2 engine rejects; `st_make_valid()` alone doesn't satisfy s2. Planar GEOS is
+  accurate enough for coterminous-US data.
+- **`here::i_am("analysis/<file>.qmd")`** in every Quarto document in a subdirectory — Quarto renders with the
+  document's folder as working directory, so `here("data/...")` would otherwise resolve to `analysis/data/...`.
+- **`tigris`, `ggspatial`** weren't pre-installed; `01_mtbs_exploration.qmd` auto-installs them via
+  `.install_if_missing()` in its setup chunk. Add them if the R environment is ever rebuilt.
+- **Extraction scripts run from `Rscript` or the R console, never a Quarto chunk** (Quarto buffers output, so
+  terra's threading looks frozen).
 
 ---
 
-## 2026-08-12 — ctrees West-wide download in progress, paused for the night
+## Design decisions & open questions
 
-`scripts/python/04_download_ctrees_west.py` (generalizes `03_download_ctrees_ca.py` to
-the 11-state West bbox, ~4.1x CA's pixel area, ~6,800 fires) is partway through. Progress
-as of tonight:
-
-- **Part A** (coarsened 1km NetCDF): ✅ complete — `ctrees_biomass_west_1km.nc` (315 MB)
-- **Part B** (fire-polygon CSV): ✅ complete — `biomass_fire_polygons_ctrees_west.csv`
-  (177,242 records = 6,817 fires × 26 years, checks out exactly)
-- **Part C** (26 annual ~100m GeoTIFFs): **18/26 done** (2000–2017, ~730 MB each). Years
-  **2018–2025 still need to run.**
-
-**Resume command** (from project root, sleep-safe now — see below):
-```powershell
-& "C:\Users\shaht\anaconda3\python.exe" "scripts\python\04_download_ctrees_west.py" *>> "data\processed\ctrees\04_download_ctrees_west_log.txt"
-```
-Uses the `anaconda3` base env, not the `wildfire` conda env (which lacks `arraylake`/
-`geopandas`/`rasterio`). Both Parts A and B will skip instantly (already done); Part C
-resumes at 2018.
-
-**Root cause of 3 interrupted runs tonight:** the laptop's **lid-close action** was
-triggering Modern Standby regardless of the `standby-timeout-ac` idle setting (which was
-already disabled) — closing the lid kills the background process outright, same failure
-mode already documented for the eMapR west-crop. Fixed by unhiding and setting the lid
-power setting directly:
-```powershell
-powercfg -attributes SUB_BUTTONS LIDACTION -ATTRIB_HIDE
-powercfg /setacvalueindex SCHEME_CURRENT SUB_BUTTONS LIDACTION 0   # 0 = Do nothing
-powercfg /setactive SCHEME_CURRENT
-```
-Confirmed via `powercfg /query SCHEME_CURRENT SUB_BUTTONS` → `Current AC Power Setting
-Index: 0x00000000`. This should already be in place — verify it's still set before
-walking away from a future long run, since `powercfg` state doesn't survive an OS
-reinstall/reset.
-
-**One more finding from tonight, already fixed in the script:** Part B originally had no
-per-year checkpointing (only Part A did) — the second kill lost 16/26 years of Part B
-progress because it held everything in memory and wrote the CSV once at the end. Part B
-now checkpoints to `data/processed/ctrees/_west_fireagb_scratch/` per year, same pattern
-as Part A's `_west_1km_scratch/`. Part C was already safe (checks each year's TIF file
-before writing) — but note that check is existence-only, not validity: the 3rd kill left
-a **truncated `ctrees_2018_west_100m.tif`** (15.6 MB instead of ~730 MB) that had to be
-manually deleted before resuming, since Part C would have silently treated it as done. If
-a run gets killed again mid-Part-C, check the last-written year's file size against the
-others (~730 MB) before trusting it and resuming.
-
----
-
-## 2026-05-13 — Fire polygon extraction: shapely thinning replaced by rasterio rasterization
-
-Part B of `scripts/python/03_download_ctrees_ca.py` extracts mean Ctrees AGB within each MTBS CA fire polygon for every year. Two approaches were tried:
-
-**Approach 1 — Shapely point-in-polygon with grid thinning (abandoned):**
-For each fire × year combination, the script built a meshgrid of pixel centres inside the polygon's bounding box and called `shapely.within()` on each point. Large CA fires (e.g. the 2020 August Complex at ~1M acres) have bounding boxes containing millions of pixels. Even after thinning the grid to a maximum of 80,000 test points (`step = ceil(sqrt(n_bbox / 80_000))`), the 1,064-fire × 26-year loop ran at ~1 year per 5 minutes — a projected ~130-minute total runtime. The thinning also introduced a sampling approximation that under-sampled polygon boundaries.
-
-**Approach 2 — Rasterio scanline rasterization + precomputed masks (current):**
-`rasterio.features.rasterize()` burns each polygon onto a boolean grid aligned to the CA pixel coordinates using a C-level scanline algorithm — O(pixels in bounding box), no sampling, handles both Polygon and MultiPolygon. Crucially, masks are precomputed **once** for all 1,064 fires before the year loop. The 26-year extraction then uses only `raw[np.ix_(yi, xi)][mask]` — pure numpy array indexing with zero shapely/rasterio overhead per year. Falls back to `matplotlib.path.Path.contains_points()` (C extension) if rasterio is unavailable.
-
-The rasterio approach is typically 10–50x faster for large polygons and eliminates the thinning approximation.
-
----
-
-## 2026-05-12 — NBR/Landsat GEE extraction approach archived
-
-The initial biomass extraction pipeline used raw annual Landsat composites from Google Earth Engine to compute **NBR (Normalized Burn Ratio)** as a biomass proxy. This approach was archived because **NBR is a unitless spectral index (−1 to +1), not a biomass quantity**. Using it as an outcome variable means DiD treatment effects are expressed in NBR units, which lack ecological interpretability and will not satisfy reviewers at ecology/fire science journals who expect biomass (Mg/ha) or carbon (MgC/ha).
-
-Converting NBR to biomass requires an empirical calibration model — typically a Random Forest regression trained on co-located FIA field plot measurements, with climate and topographic variables added to handle spectral saturation above ~300 Mg/ha. This calibration pipeline is exactly what the eMapR lab built and published:
-
-> Kennedy, R.E., Yang, Z., Gorelick, N., Braaten, J., Cavalcante, L., Cohen, W.B., & Healey, S. (2018). Implementation of the LandTrendr algorithm on Google Earth Engine. *Remote Sensing*, 10(5), 691. https://iopscience.iop.org/article/10.1088/1748-9326/aa9d9e
-
-Replicating that calibration from scratch (FIA plot matching + spectral extraction + model training + validation) is a separate research project, not a task to embed in a causal inference paper.
-
-**Archived files** (in `archive/nbr_landsat_approach/`):
-- `01_extract_biomass_gee_nbr.py` — Landsat annual composite builder + NBR extraction via GEE
-- `test_gee_debug_nbr.py` — GEE connectivity debug script
-- `02_biomass_exploration_nbr.qmd` — EDA document for NBR time series (Plots 5 & 6)
-- `02_biomass_exploration_nbr.html` — Rendered HTML of the above
-- `biomass_timeseries_nbr.csv` — Output CSV from the pilot CA extraction
-
-**Next step:** Exploring the Ctrees biomass dataset as an alternative outcome variable that provides pre-calibrated annual aboveground biomass in Mg/ha.
-
----
-
-## 2026-04-15 — Technical Decisions: `01_exploration.qmd`
-
-### `sf_use_s2(FALSE)` — use GEOS instead of s2 for spatial operations
-MTBS fire perimeter polygons contain self-touching edges that the s2 spherical geometry engine rejects as invalid, causing `st_join()` to error. Switching to GEOS (planar geometry) resolves this. For coterminous US data the planar approximation is accurate enough and `st_make_valid()` alone is not sufficient to satisfy s2's stricter validity rules. **Apply this at the top of any R script that does spatial joins on MTBS data.**
-
-### `here::i_am("analysis/01_exploration.qmd")` — anchor project root for Quarto docs
-Quarto renders documents with the working directory set to the document's own folder (`analysis/`), so `here("data/...")` resolves to `analysis/data/...` — the wrong place. Calling `here::i_am()` with the document's path relative to the project root anchors `here()` correctly. **Every Quarto document in a subdirectory must include this call.**
-
-### Auto-install block for `tigris` and `ggspatial`
-These two packages were not pre-installed in the R environment. The QMD includes a `.install_if_missing()` helper at the top of the setup chunk so the document installs them automatically on first render. If the environment ever gets rebuilt, these two packages must be added.
-
----
-
-## Decision Log
-
-Use this section to record design decisions and their rationale once resolved.
+### Decided
 
 | Date | Decision | Choice | Rationale |
 |---|---|---|---|
-| — | Minimum fire size | — | — |
-| — | Severity inclusion | — | — |
-| — | Treatment variable (categorical vs. dNBR) | — | — |
-| — | Study region / ecoregions | — | — |
-| — | Control site strategy | — | — |
-| — | Fire complex handling | — | — |
-| — | Spatial buffer size | — | — |
+| 2026-05-12 | Biomass outcome variable | eMapR + ctrees pre-calibrated AGB (Mg/ha); NBR approach archived | NBR is a unitless spectral index; calibrating it to biomass is a separate research project (see log) |
+| 2026-08 | Forest mask | NLCD 2004, per-state, 0/1 fraction-forest (classes 41/42/43) | Replaces retired CA-only 1/NA mask; built by `05_prepare_forest_masks_west.R` |
+| 2026-08-30 | Raw eMapR retention | Keep all raw CONUS composites permanently (~1 TB) | PI request; requires GRIT-scale storage, not a laptop |
+| 2026-09 | Where data lives | GRIT is the durable store; Nextcloud plan dropped | See 2026-08-30 log entry |
+| — | Time window | As long as the data allows (eMapR 1990–2023, ctrees 2000–2025, MTBS fires 2000–2023) | Long pre-fire baselines for parallel-trends testing |
+
+### Leaning, not final
+- **Treatment variable:** RdNBR (continuous; = dNBR / √|preNBR/1000|, Miller & Thode 2007) preferred over raw
+  dNBR for cross-fire comparison — vs. categorical severity classes.
+
+### Open
+- Minimum fire size threshold?
+- Include moderate severity, or only high?
+- Which ecoregion classification (EPA Level III vs. Bailey's), and which ecoregions to include?
+- Control-site strategy (never-burned, same ecoregion — details TBD; see `data/processed/control_pixels/`)?
+- Fire complexes: treat as one large fire or exclude?
+- Spatial buffer between sites (SUTVA)?
+- Minimum pre-fire years needed for a parallel-trends test with Callaway-Sant'Anna?
+- Re-burns: how to handle sites that burn again in a different year?
+- **Residual eMapR-vs-ctrees bias** (`biomass_within_fires.qmd` §7) — root cause not yet found.
+- **Border-fire eMapR/ctrees count gap** — see 2026-08-30 entry; re-check once real multi-state `07` output exists.
+- **MTBS Initial vs. Extended assessment bias** — `mtbs_assessment_comparison.qmd`.
 
 ---
 
-## Data Quality Findings
+## Dated log (newest first)
 
-*Record any anomalies, missing fields, or unexpected values found during EDA.*
+### 2026-09-20 — GRIT migration: layout confirmed, ctrees West download hardened
 
-### MTBS Perimeters (`mtbs_perims_DD.shp`)
-- [ ] Field names confirmed
-- [ ] CRS confirmed
-- [ ] NAs / duplicates checked
-- Notes:
+**GRIT layout, as set up:** code at `~/BACI-wildfire`; data lives in a separate shared repo `~/BACI-review`,
+joined by `ln -s ~/BACI-review/data ~/BACI-wildfire/data`, so every script's `here()`/`PROJ_ROOT`-relative
+path works unchanged. Python env is a venv at `~/BACI-wildfire/.venv`, not the laptop's conda env. Setup steps:
+`DATA_DOWNLOAD_GUIDE.md` Part 1.
+
+**Raw eMapR validity checker added** (`scripts/r/check_raw_emapr_files.R`, commits `d54b32b`, `618aad1`).
+19/34 years confirmed complete on GRIT as of 2026-09-08.
+
+**`04_download_ctrees_west.py` — three OOM kills, three fixes** (commits `bcbc41b`, `8ad9dfe`, `4eeb88f`):
+1. Coarsening's whole-array `reshape()` silently copied the full ~2 GB array because West's dimensions
+   (25650 cols / 11) aren't an exact multiple of the coarsen factor.
+2. Part A's plain raw download held one ~2 GB float32 year array on its own.
+3. Part B's NetCDF assembly held up to three ~439 MB copies at once (list + `np.stack()` + `.astype()`).
+
+The script was also reordered to run raw-download-first (A → B → C) so B/C read plain local GeoTIFFs instead
+of re-querying arraylake, and `rasterio` became a hard requirement.
+
+**Then the `file.exists()` gotcha hit GRIT for real.** A relaunch was started as a bare foreground command,
+not under `tmux`; a dropped connection killed it mid-Part-B-write and left a 7 KB corrupted `.nc`. Diagnosed
+live: 26/26 Part A TIFs present, `.nc` header-only, no `_west_fireagb_scratch/` (Part C never started), no
+`tmux` session, `memory.events` showing no OOM.
+
+**Fixes applied before relaunching** (commit `c931dcd`):
+- `netcdf_is_valid()` added — Part B now deletes and rebuilds a corrupt `.nc` instead of trusting
+  `OUT_NC.exists()`.
+- Part C hardened pre-emptively (it had never run at West scale): per-fire `rasterio.Window` reads instead of
+  a full ~2 GB array per year; mask cache shrunk with `np.packbits`; the previously dead `errors` list is now
+  populated via per-fire `try/except`.
+- End-of-script sanity check no longer loads the whole ~439 MB NetCDF (same bug as Part B's assembly).
+- `log_peak_memory()` helper (`/proc/self/status` → `VmHWM`) after each part, so a future OOM is diagnosable
+  from the log.
+
+**Status:** code fixes committed; not yet re-run on GRIT. Next: delete the corrupt `.nc`, pull, relaunch under
+`tmux` (command block in `DATA_DOWNLOAD_GUIDE.md` §3.3), and cross-validate the West CSV's CA rows against
+the validated `03_download_ctrees_ca.py` baseline (expect correlation ≈ 1.000).
 
 ---
 
-## Open Questions
+### 2026-08-30 — Laptop → GRIT handoff: decisions worth keeping
 
-Questions that have not yet been resolved and need investigation or a decision.
+Consolidated when the project moved from the local laptop to GRIT. Pipeline *status* from that date is
+superseded by `CLAUDE.md` "Current Status"; the decisions below still stand.
 
-- Which ecoregion classification to use (EPA Level III vs. Bailey's)?
-- Should fire complexes be treated as a single large fire or excluded?
-- What is the actual GEE asset path for eMapR biomass? (`projects/eMapR/biomass` — verify in GEE catalog)
-- Minimum pre-fire years needed for parallel trends test with Callaway-Sant'Anna?
-- How to handle fires that re-burn the same site in a different year?
+**`07`/`08` rewrite — design.** Rewritten from hardcoded `STATE_FIPS <- "CA"` to a `STATES_TO_RUN` vector,
+reading shared West-wide crops instead of per-state files:
+- **eMapR (`07`)** reads the native ~30m West-cropped TIF directly and does crop-to-polygon →
+  `aggregate(fact=3)` → mask per fire — no separate whole-West downsampled file (avoids an extra multi-GB/year
+  artifact).
+- **ctrees (`08`)**: same algorithm as before, pointed at the shared `ctrees_YYYY_west_100m.tif`.
+- **MTBS dedup:** both use event_id-prefix dedup (spatial join to the West states union, then
+  `STUSPS = substr(event_id, 1, 2)` as authoritative) instead of single-state `st_filter()` +
+  `startsWith()` — the fix for the border-fire mechanism below.
+- **Output:** one combined CSV per script with a `STUSPS` column, resumable per (state, year).
+- Per-polygon extraction is wrapped in `tryCatch()` so one bad polygon logs a warning and returns `NA`
+  instead of crashing a multi-hour run.
+- **Validation harness** (`scripts/r/validate_west_pipeline.R` + `analysis/west_pipeline_sanity_check.qmd`,
+  re-run with `Rscript scripts/r/validate_west_pipeline.R`) gated the rewrite. It caught a corrupted WY mask
+  and a CRS bug (missing `st_transform(5070)`) in the harness's own comparison code — not in `07`/`08`.
+  Result: ctrees matches the retired baseline exactly (0% difference across 1,632 fire×year pairs); the CA
+  dedup selects the identical 304-fire 2005–2010 set (0 disagreements); the WY smoke test gave 76 well-formed
+  fires. **eMapR re-validation pending:** the first attempt returned all-NA because of the harness CRS bug
+  (fixed). To finish it, delete `data/processed/validation/emapr_method_comparison_ca.csv` and `..._diff.csv`
+  (they hold the bad run) and re-run the script — the ctrees output is skip-safe.
+
+**Border-fire eMapR/ctrees count gap (open).** In the old CA-only pipeline, ctrees matched all 272 study fires
+(2005–2010 cohort) but eMapR only 234 — the same ~38 fires missing consistently. Leading hypothesis: eMapR's
+old CA extraction was polygon-masked to the CA state boundary while ctrees' wasn't, so a border fire with most
+of its forested area outside CA lost its entire eMapR value to NA. The `07`/`08` dedup rewrite targets that
+mechanism and the harness confirmed old-vs-new fire *selection* matches (0 disagreements), but that doesn't
+confirm the eMapR *data availability* gap is closed. Re-check the ctrees-vs-eMapR fire count directly once
+real multi-state output exists. A secondary hypothesis to rule out alongside it: eMapR's forest mask is coarser
+(~90 m) than ctrees' (~100 m), so a small fire with only a sliver of forest could lose its only forest pixel
+under the coarser mask regardless of the border issue. Diagnostic: take the `event_id`s present in ctrees but
+not eMapR and check whether they cluster near the state border.
+
+**Nextcloud storage architecture — dropped.** The plan was raw eMapR composites (~1 TB) living on Nextcloud,
+fetched transiently via `rclone` to crop then discard. WebDAV credentials were never obtained and the
+GRIT migration supersedes it: GRIT is the durable store (raw files are kept, per PI request).
+
+**Retired CA-only pipeline** (`00_crop_emapr_to_ca.R` → `02_extract_emapr_within_fires.R` /
+`04_extract_ctrees_within_fires.R` → `analysis/biomass_within_fires_old.qmd`): kept only as the validation
+baseline the `05`–`08` pipeline was cross-checked against. Do not extend it for new work.
+
+**eMapR West-crop interruptions (laptop).** `00_crop_emapr_to_west.R` was repeatedly killed on the laptop
+(first by lid-close sleep, later with no confirmed cause), leaving unverified `composite_YYYY_west.tif` files.
+Re-verify any West-crop file on GRIT rather than assuming earlier laptop output carried over.
 
 ---
 
-## Literature Notes
+### 2026-08-12 — ctrees West download: root causes from three interrupted laptop runs
 
-*Key findings and methodological details from papers relevant to design decisions.*
+- **Lid-close** triggered Modern Standby regardless of the idle-sleep setting, killing background jobs (same
+  failure as the eMapR crop). Fixed on the laptop via `powercfg` `SUB_BUTTONS LIDACTION` = 0; only relevant if
+  long runs move back to a laptop.
+- **Part B had no per-year checkpointing** — a kill lost 16/26 years of progress. It now checkpoints to
+  `data/processed/ctrees/_west_fireagb_scratch/` per year, like Part A's `_west_1km_scratch/`.
+- **Part C's existence-only check** left a truncated `ctrees_2018_west_100m.tif` (15.6 MB vs ~730 MB) that had
+  to be deleted by hand — the origin of the "validate, don't trust `file.exists()`" gotcha above.
 
-### Callaway & Sant'Anna (2021)
-- Estimator: `att_gt()` for group-time ATTs, `aggte()` for aggregation
-- Clean controls: "never treated" or "not yet treated" units
-- Does not require balanced panel
-- Pre-treatment parallel trends is testable with their placebo approach
+---
+
+### 2026-05-13 — Fire polygon extraction: shapely thinning replaced by rasterio rasterization
+
+Part B of `03_download_ctrees_ca.py` extracts mean ctrees AGB within each MTBS CA fire polygon per year.
+
+- **Abandoned — shapely point-in-polygon with grid thinning.** Large fires (e.g. the 2020 August Complex,
+  ~1M acres) have bounding boxes with millions of pixels; even thinned to ≤80,000 test points the
+  1,064-fire × 26-year loop ran ~1 year per 5 minutes (~130 min projected) and under-sampled boundaries.
+- **Current — `rasterio.features.rasterize()` + precomputed masks.** A C-level scanline burn onto a boolean
+  grid aligned to the pixel coordinates: no sampling, handles Polygon/MultiPolygon, and masks are computed
+  once for all fires before the year loop, so the 26-year extraction is pure numpy indexing
+  (`raw[np.ix_(yi, xi)][mask]`). ~10–50x faster for large polygons. (A `matplotlib.path` fallback for machines
+  without rasterio existed at the time; `04_download_ctrees_west.py` has since made rasterio mandatory.)
+
+---
+
+### 2026-05-12 — NBR/Landsat GEE extraction approach archived
+
+The first extraction pipeline built raw annual Landsat composites in Google Earth Engine and computed **NBR**
+as a biomass proxy. Archived because **NBR is a unitless spectral index (−1 to +1), not a biomass
+quantity** — DiD effects in NBR units lack ecological interpretability and won't satisfy ecology/fire-science
+reviewers who expect biomass (Mg/ha) or carbon (MgC/ha).
+
+Converting NBR to biomass needs an empirical calibration (typically random forest on co-located FIA plots,
+plus climate/topography to handle saturation above ~300 Mg/ha) — exactly what the eMapR lab built:
+
+> Kennedy, R.E., Yang, Z., Gorelick, N., Braaten, J., Cavalcante, L., Cohen, W.B., & Healey, S. (2018).
+> Implementation of the LandTrendr algorithm on Google Earth Engine. *Remote Sensing*, 10(5), 691.
+> https://iopscience.iop.org/article/10.1088/1748-9326/aa9d9e
+
+Replicating that calibration is a separate research project. **Archived in `archive/nbr_landsat_approach/`:**
+`01_extract_biomass_gee_nbr.py`, `test_gee_debug_nbr.py`, `02_biomass_exploration_nbr.qmd`/`.html`,
+`biomass_timeseries_nbr.csv`. LandTrendR reference: https://emapr.github.io/LT-GEE/ (defaults used:
+`spikeThreshold=0.9`, `recoveryThreshold=0.25`, `pvalThreshold=0.1`, `minObservationsNeeded=6`).
+
+Data-access notes from the same day (scratch note, 2026-05-12): eMapR's own download is a GUI (one grid cell,
+one year — impractical); direct GEE access yields NBR, not biomass. Chosen approach: download all years for a
+region/state from the eMapR FTP, and compare against ctrees filtered to the same state.
+
+The underlying goal (long pre-fire baselines for parallel-trends testing) is met by eMapR's 1990 start year
+without the archived approach.
+
+---
+
+## Literature notes
+
+### Callaway & Sant'Anna (2021) — staggered DiD
+- `att_gt()` for group-time ATTs, `aggte()` for aggregation.
+- Clean controls: "never treated" or "not yet treated" units.
+- Does not require a balanced panel.
+- Pre-treatment parallel trends testable via their placebo approach.
+
+### Other methods papers
+Goodman-Bacon (2021) — TWFE decomposition; Sun & Abraham (2021) — interaction-weighted estimator;
+Liermann & Roni (2021) — staircase design power analysis.
 
 ### Bright et al. (2019)
-- Predictive (not causal) — R² > 0.7 with random forest
-- Useful benchmark for biomass signal magnitude
+Predictive (not causal); random forest, R² > 0.7. Useful benchmark for biomass signal magnitude.
 
 ### Ilangakoon et al. (2026)
-- GAM with space-for-time substitution — lacks formal causal identification
-- Our study directly addresses this gap
+GAM with space-for-time substitution — lacks formal causal identification. Our study addresses this gap.
 
----
+### Other domain papers
+Garcia et al. (2017) — Rim Fire carbon; Reisch (2024); Stenzel (2019).
 
-## GEE / Python Notes
+### MTBS methodology
+Eidenshink, J., Schwind, B., Brewer, K., Zhu, Z. L., Quayle, B., & Howard, S. (2007). A project for monitoring
+trends in burn severity. *Fire Ecology*, 3(1), 3–21. Dataset DOI: https://doi.org/10.5066/P9IED7RZ. Covers NBR/dNBR
+mapping, per-fire threshold calibration from unburned reference areas, the five severity classes (including
+Increased Greenness), the ≥1,000 ac western US size threshold, and coverage since 1984.
 
-*Notes on Google Earth Engine setup and extraction issues.*
+### RdNBR
+Miller, J. D., & Thode, A. E. (2007). Quantifying burn severity in a heterogeneous landscape with a relative
+version of the delta Normalized Burn Ratio (dNBR). *Remote Sensing of Environment*, 109(1), 66–80.
+RdNBR = dNBR / √|preNBR / 1000|; normalizes for pre-fire vegetation density.
 
-- GEE authentication: `earthengine authenticate` in terminal before running Python script
-- eMapR biomass asset path needs verification in GEE catalog before running extraction
-- LandTrendR reference: https://emapr.github.io/LT-GEE/
-- LandTrendR key parameters (defaults): `maxSegments`, `spikeThreshold=0.9`, `recoveryThreshold=0.25`, `pvalThreshold=0.1`, `minObservationsNeeded=6`
-
----
-
-## Meeting / Advisor Notes
-
-*Notes from advisor meetings or collaborator discussions.*
-
----
+### Our contribution
+First application of modern staggered and continuous DiD to wildfire–biomass; relaxes the untestable
+conditional-independence assumption of prior work and exploits the natural staggered timing of fires.
