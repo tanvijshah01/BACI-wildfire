@@ -228,13 +228,10 @@ for (st in STATES_TO_RUN) {
     strip_rows   <- max(1L, floor(5e6 / n_cols_total))  # ~5M cells/strip, any state width
 
     # Built from nlcd_raw's geometry VALUES (extent/res/crs), not from
-    # nlcd_raw itself via terra::rast(nlcd_raw) — that shares some
-    # connection to nlcd_raw's underlying (file-backed) source rather than
-    # being a truly independent blank raster, so calling writeStart() on it
-    # closed nlcd_raw's own read handle out from under it (confirmed on
-    # GRIT: "[readValues] the file is not open for reading" on the very
-    # next loop iteration). Constructing mask_30m from copied values instead
-    # has no connection to nlcd_raw's file at all.
+    # nlcd_raw itself via terra::rast(nlcd_raw) — kept from the previous
+    # attempt as a harmless, verified-correct way to get an independent
+    # blank raster, even though it turned out not to be the actual cause of
+    # the "[readValues] the file is not open for reading" error below.
     mask_30m <- terra::rast(terra::ext(nlcd_raw), resolution = terra::res(nlcd_raw),
                              crs = terra::crs(nlcd_raw))
     # Rebuilding geometry from extent+resolution (rather than copying
@@ -246,6 +243,13 @@ for (st in STATES_TO_RUN) {
       "mask_30m dims don't match nlcd_raw" =
         terra::nrow(mask_30m) == n_rows_total && terra::ncol(mask_30m) == n_cols_total
     )
+    # The actual, confirmed cause of "[readValues] the file is not open for
+    # reading" (per terra's own docs, ?readwrite / terra R/read.R source):
+    # readValues() in a chunked loop requires readStart(x) first, exactly
+    # mirroring writeStart()/writeStop() on the write side — this was simply
+    # missing, on every attempt so far, not a side effect of how mask_30m
+    # was built.
+    terra::readStart(nlcd_raw)
     terra::writeStart(mask_30m, out_30m, overwrite = FALSE, datatype = "INT1U",
                        gdal = c("COMPRESS=LZW", "TILED=YES", "BLOCKXSIZE=512", "BLOCKYSIZE=512"))
     for (row0 in seq(1L, n_rows_total, by = strip_rows)) {
@@ -254,6 +258,7 @@ for (st in STATES_TO_RUN) {
       strip  <- as.integer(strip %in% FOREST_CLASSES)
       terra::writeValues(mask_30m, strip, row0, n_this)
     }
+    terra::readStop(nlcd_raw)
     terra::writeStop(mask_30m)
 
     size_mb <- round(file.size(out_30m) / 1e6, 1)
