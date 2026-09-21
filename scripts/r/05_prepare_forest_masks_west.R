@@ -330,10 +330,30 @@ report_res <- function(label, pattern) {
       cat(glue("  {st}: MISSING\n"))
       next
     }
-    r        <- terra::rast(out_tif)
-    n_total  <- terra::ncell(r)
-    n_forest <- terra::global(r, "sum", na.rm = TRUE)[[1]]
-    pct      <- round(100 * n_forest / n_total, 1)
+    r       <- terra::rast(out_tif)
+    n_total <- terra::ncell(r)
+
+    # terra::global(r, "sum") was OOM-killed here on GRIT, right after the
+    # 30/90/100 m build loop above finished cleanly for both CA and WY —
+    # same class of issue as classify()/aggregate() during the build (terra's
+    # own memory heuristics don't account for this job's real ~4 GiB cgroup
+    # cap; see NOTES.md 2026-09-20), just in the one function in this script
+    # that was still trusting terra to chunk it automatically. Same manual
+    # row-strip readStart()/readValues()/readStop() loop as the 30 m build
+    # step, summing instead of writing.
+    n_rows     <- terra::nrow(r)
+    n_cols     <- terra::ncol(r)
+    strip_rows <- max(1L, floor(5e6 / n_cols))
+    n_forest   <- 0
+    terra::readStart(r)
+    for (row0 in seq(1L, n_rows, by = strip_rows)) {
+      n_this   <- min(strip_rows, n_rows - row0 + 1L)
+      strip    <- terra::readValues(r, row = row0, nrows = n_this)
+      n_forest <- n_forest + sum(strip, na.rm = TRUE)
+    }
+    terra::readStop(r)
+
+    pct <- round(100 * n_forest / n_total, 1)
     cat(glue("  {st}: {scales::comma(n_forest)} forest px / {scales::comma(n_total)} total  ({pct}%)\n"))
   }
 }
