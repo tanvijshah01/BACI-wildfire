@@ -244,6 +244,21 @@ for (i in seq_along(years_to_do)) {
       cat(glue("    [WARN] {vect_yr$event_id[j]} ({yr}) failed: {conditionMessage(e)} — set NA\n"))
       NA_real_
     })
+
+    # Periodic cleanup — mirrors the fix applied to 06 after it was
+    # confirmed OOM-killed partway through a 1044-fire loop on GRIT: the
+    # terra::tmpFiles()/gc() cleanup below only runs ONCE, after this whole
+    # per-year loop finishes, which is too late if a state/year combination
+    # ever has enough fires for terra's accumulated temp files/objects to
+    # eat through the ~2.3 GiB real headroom under GRIT's cgroup cap first
+    # (see NOTES.md 2026-09-20). Not yet confirmed to fail here — CA's
+    # current per-year fire counts are much smaller than 06's all-at-once
+    # 1044 — but it's the identical pattern, so fixed pre-emptively rather
+    # than waiting for it to actually happen once more states/years are added.
+    if (j %% 50 == 0) {
+      terra::tmpFiles(remove = TRUE)
+      gc(verbose = FALSE, full = TRUE)
+    }
   }
 
   elapsed <- round((proc.time() - t1)[["elapsed"]], 1)

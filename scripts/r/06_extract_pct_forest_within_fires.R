@@ -158,6 +158,18 @@ for (st in states_to_do) {
     vals     <- terra::values(fm_m, na.rm = TRUE)
     n_px[j]       <- length(vals)
     pct_forest[j] <- if (length(vals) > 0L) 100 * mean(vals) else NA_real_
+
+    # Periodic cleanup — the terra::tmpFiles()/gc() cleanup below only ran
+    # ONCE, after this whole loop finished. Confirmed OOM-killed on GRIT
+    # partway through CA's 1044 fires because of exactly that: each single
+    # crop()/mask() is tiny, but terra temp files/objects accumulating
+    # across hundreds of iterations with zero intermediate cleanup ate
+    # through the ~2.3 GiB real headroom under GRIT's cgroup cap (see
+    # NOTES.md 2026-09-20) well before the loop could ever finish.
+    if (j %% 50 == 0) {
+      terra::tmpFiles(remove = TRUE)
+      gc(verbose = FALSE, full = TRUE)
+    }
   }
 
   df_st <- data.frame(
