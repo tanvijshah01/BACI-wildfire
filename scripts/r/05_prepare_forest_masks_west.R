@@ -93,10 +93,32 @@ raster_is_valid <- function(path) {
   # raster_is_valid() and halted the whole script on its next run, instead
   # of being treated as "invalid, delete and rebuild" like this function is
   # supposed to do for any other kind of corruption.
-  tryCatch(
-    terra::global(terra::rast(path), "notNA")[[1]] > 0,
-    error = function(e) FALSE
-  )
+  # terra::global(r, "notNA") is the same whole-raster pattern that OOM-
+  # killed report_res()'s terra::global(r, "sum") — and worse here, since
+  # this function runs on every state's masks at the very start of every
+  # loop iteration (checked it live on GRIT: killed on CA's 954M-cell 30 m
+  # mask before any "[CA] ..." message even printed). Same manual row-strip
+  # readStart()/readValues()/readStop() scan, with an early exit as soon as
+  # one non-NA value is found — this only needs a yes/no answer, not a full
+  # count, so it doesn't need to scan the whole raster in the common case.
+  tryCatch({
+    r          <- terra::rast(path)
+    n_rows     <- terra::nrow(r)
+    n_cols     <- terra::ncol(r)
+    strip_rows <- max(1L, floor(5e6 / n_cols))
+    terra::readStart(r)
+    valid <- FALSE
+    for (row0 in seq(1L, n_rows, by = strip_rows)) {
+      n_this <- min(strip_rows, n_rows - row0 + 1L)
+      strip  <- terra::readValues(r, row = row0, nrows = n_this)
+      if (any(!is.na(strip))) {
+        valid <- TRUE
+        break
+      }
+    }
+    terra::readStop(r)
+    valid
+  }, error = function(e) FALSE)
 }
 
 # ── NLCD fetch, bypassing FedData::get_nlcd()'s factor/color-table step ──────
