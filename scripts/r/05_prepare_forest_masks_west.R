@@ -227,7 +227,25 @@ for (st in STATES_TO_RUN) {
     n_cols_total <- terra::ncol(nlcd_raw)
     strip_rows   <- max(1L, floor(5e6 / n_cols_total))  # ~5M cells/strip, any state width
 
-    mask_30m <- terra::rast(nlcd_raw)   # blank template: same extent/res/CRS, no values
+    # Built from nlcd_raw's geometry VALUES (extent/res/crs), not from
+    # nlcd_raw itself via terra::rast(nlcd_raw) — that shares some
+    # connection to nlcd_raw's underlying (file-backed) source rather than
+    # being a truly independent blank raster, so calling writeStart() on it
+    # closed nlcd_raw's own read handle out from under it (confirmed on
+    # GRIT: "[readValues] the file is not open for reading" on the very
+    # next loop iteration). Constructing mask_30m from copied values instead
+    # has no connection to nlcd_raw's file at all.
+    mask_30m <- terra::rast(terra::ext(nlcd_raw), resolution = terra::res(nlcd_raw),
+                             crs = terra::crs(nlcd_raw))
+    # Rebuilding geometry from extent+resolution (rather than copying
+    # nlcd_raw's dimensions directly) could in principle round to a
+    # different nrow/ncol than the original — fail loudly rather than
+    # silently write misaligned rows if so, since there's no R here to
+    # test this against the real data before it runs on GRIT.
+    stopifnot(
+      "mask_30m dims don't match nlcd_raw" =
+        terra::nrow(mask_30m) == n_rows_total && terra::ncol(mask_30m) == n_cols_total
+    )
     terra::writeStart(mask_30m, out_30m, overwrite = FALSE, datatype = "INT1U",
                        gdal = c("COMPRESS=LZW", "TILED=YES", "BLOCKXSIZE=512", "BLOCKYSIZE=512"))
     for (row0 in seq(1L, n_rows_total, by = strip_rows)) {
