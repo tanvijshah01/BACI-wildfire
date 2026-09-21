@@ -73,7 +73,8 @@ CTREES_DIR <- here("data", "processed", "ctrees")
 dir.create(MASK_DIR, recursive = TRUE, showWarnings = FALSE)
 
 FOREST_CLASSES <- c(41L, 42L, 43L)   # Deciduous, Evergreen, Mixed Forest
-rcl <- matrix(c(FOREST_CLASSES, rep(1L, length(FOREST_CLASSES))), ncol = 2)
+# (no reclassification matrix needed — the 30 m mask below reclassifies via
+# a manual row-strip loop using FOREST_CLASSES directly, not terra::classify())
 
 # A writeRaster() interrupted mid-write (e.g. laptop sleep — the same failure
 # mode already seen with 00_crop_emapr_to_west.R) can leave a GeoTIFF with a
@@ -206,19 +207,37 @@ for (st in STATES_TO_RUN) {
              "cells: {scales::comma(terra::ncell(nlcd_raw))}\n"))
 
     cat(glue("[{st}] Reclassifying to 0/1 forest mask (30 m)...\n"))
-    # filename= passed directly to classify() (not a separate writeRaster()
-    # call after) — this is what makes terra process the ~954M-cell result
-    # block-by-block straight to disk instead of materializing the whole
-    # thing in memory first. Confirmed on GRIT: with the two-step version
-    # (classify() with no filename, holding mask_30m in memory, THEN
-    # writeRaster()), this step got OOM-killed even after fixing the
-    # download itself (see NOTES.md 2026-09-20) — the reclassify was never
-    # the bottleneck we originally suspected, the missing filename= was.
-    mask_30m <- terra::classify(
-      nlcd_raw, rcl, others = 0L,
-      filename = out_30m, overwrite = FALSE, datatype = "INT1U",
-      gdal = c("COMPRESS=LZW", "TILED=YES", "BLOCKXSIZE=512", "BLOCKYSIZE=512")
-    )
+    # terra::classify() OOM-killed this step on GRIT twice — once with no
+    # filename= (holding the whole ~954M-cell result in memory), then again
+    # with filename= AND terra::terraOptions(todisk = TRUE) both set. Neither
+    # was enough: terra's own decision about how small to make its internal
+    # processing chunks is driven by its estimate of "available" memory,
+    # which reads the node's full system RAM rather than the ~4 GiB this job
+    # is actually capped to (NOTES.md 2026-09-20) — so even in disk mode, the
+    # chunks it chose were still too large. Rather than guess another terra
+    # setting, this bypasses classify()'s automatic chunking entirely: a
+    # manual row-strip read -> reclassify -> write loop via terra's own
+    # low-level block I/O (writeStart/readValues/writeValues/writeStop),
+    # sized explicitly ourselves instead of left to any heuristic — the same
+    # technique already proven safe today in 04_download_ctrees_west.py's
+    # Part A (STRIP_ROWS). `strip %in% FOREST_CLASSES` treats NA/unmatched
+    # cells as 0, matching this script's documented 0/1-not-1/NA design
+    # (see file header) exactly.
+    n_rows_total <- terra::nrow(nlcd_raw)
+    n_cols_total <- terra::ncol(nlcd_raw)
+    strip_rows   <- max(1L, floor(5e6 / n_cols_total))  # ~5M cells/strip, any state width
+
+    mask_30m <- terra::rast(nlcd_raw)   # blank template: same extent/res/CRS, no values
+    terra::writeStart(mask_30m, out_30m, overwrite = FALSE, datatype = "INT1U",
+                       gdal = c("COMPRESS=LZW", "TILED=YES", "BLOCKXSIZE=512", "BLOCKYSIZE=512"))
+    for (row0 in seq(1L, n_rows_total, by = strip_rows)) {
+      n_this <- min(strip_rows, n_rows_total - row0 + 1L)
+      strip  <- terra::readValues(nlcd_raw, row = row0, nrows = n_this)
+      strip  <- as.integer(strip %in% FOREST_CLASSES)
+      terra::writeValues(mask_30m, strip, row0, n_this)
+    }
+    terra::writeStop(mask_30m)
+
     size_mb <- round(file.size(out_30m) / 1e6, 1)
     cat(glue("[{st}] Saved {basename(out_30m)} ({size_mb} MB)\n"))
     rm(nlcd_raw)
