@@ -132,16 +132,28 @@ cat("Study fires (deduped, all 11 states):", nrow(mtbs_study), "\n\n")
 
 mtbs_5070 <- sf::st_transform(mtbs_study, 5070)
 
-# ── 3. Cache check — which states still need extraction ────────────────────────
-done_states <- character(0)
+# ── 3. Cache check — which fires still need extraction (per-fire, not per-state) ──
+# 06 was repeatedly OOM-killed partway through CA's 1044-fire loop (see
+# NOTES.md 2026-09-20); with results only ever written once, at the very
+# end of the whole per-state loop, every failed run lost ALL progress and
+# started over from fire 1. Checkpointing per fire now (see the extraction
+# loop below) needs the resume check to match: checking whether a STATE has
+# any row at all (the original logic) would either wrongly treat a
+# half-done state as fully complete, or force redoing already-checkpointed
+# fires — checks individual event_ids instead.
+done_fires <- character(0)
 if (file.exists(OUT_CSV)) {
-  partial     <- readr::read_csv(OUT_CSV, show_col_types = FALSE)
-  done_states <- sort(unique(partial$STUSPS))
-  cat("Partial cache found —", length(done_states), "state(s) already done:",
-      paste(done_states, collapse = ", "), "\n\n")
+  partial    <- readr::read_csv(OUT_CSV, show_col_types = FALSE)
+  done_fires <- unique(partial$event_id)
+  cat("Partial cache found —", length(done_fires), "fire(s) already extracted.\n\n")
 }
 
-states_to_do <- setdiff(STATES_TO_RUN, done_states)
+states_to_do <- STATES_TO_RUN[
+  vapply(STATES_TO_RUN, function(st) {
+    st_fires <- mtbs_5070$event_id[mtbs_5070$STUSPS == st]
+    length(st_fires) > 0 && !all(st_fires %in% done_fires)
+  }, logical(1))
+]
 if (length(states_to_do) == 0) {
   cat("Cache is up to date for all requested states. Nothing to do.\n")
   cat("Delete", basename(OUT_CSV), "to force re-extraction.\n")
@@ -161,14 +173,17 @@ for (st in states_to_do) {
     next
   }
 
-  fires_st <- mtbs_5070 |> dplyr::filter(STUSPS == st)
-  n_fires  <- nrow(fires_st)
+  fires_st_all <- mtbs_5070 |> dplyr::filter(STUSPS == st)
+  fires_st     <- fires_st_all |> dplyr::filter(!event_id %in% done_fires)
+  n_fires      <- nrow(fires_st)
+  n_skipped    <- nrow(fires_st_all) - n_fires
   if (n_fires == 0) {
     cat(glue("[{st}] No study fires. Skipping.\n\n"))
     next
   }
 
-  cat(glue("[{st}] Extracting % forest for {n_fires} fire polygon(s)...\n"))
+  cat(glue("[{st}] Extracting % forest for {n_fires} fire polygon(s)",
+           "{if (n_skipped > 0) glue(' ({n_skipped} already checkpointed, skipped)') else ''}...\n"))
   t0 <- proc.time()["elapsed"]
 
   forest_mask <- terra::rast(mask_tif)
@@ -179,6 +194,38 @@ for (st in states_to_do) {
   # the same mitigation used in 02/04_extract_*_within_fires.R for Windows
   # terra memory limits. Values are 0/1, so mean(na.rm=TRUE) directly gives
   # fraction-forest — no separate denominator step needed.
+  #
+  # Checkpointed every 10 fires (written straight to OUT_CSV, not held until
+  # the whole loop finishes) — this loop has been killed four times on GRIT
+  # partway through, and every time, ALL progress was lost because nothing
+  # was written until the very end. This turns "start over from fire 1
+  # every failed attempt" into "resume from wherever it died" — the same
+  # per-fire/per-year checkpointing pattern already used in
+  # 04_download_ctrees_west.py and 07/08's per-(state,year) resumability,
+  # just at per-fire granularity here since this script processes a whole
+  # state's fires in one uninterrupted pass. Also still true regardless of
+  # whether the underlying memory growth (NOTES.md 2026-09-20) ever gets
+  # fully fixed — checkpointing alone guarantees this eventually completes
+  # across enough re-runs, even if any single run can't get through all of
+  # them.
+  n_zero      <- 0L
+  batch_start <- 1L
+  flush_batch <- function(j) {
+    idx <- batch_start:j
+    df_batch <- data.frame(
+      event_id     = fires_st$event_id[idx],
+      STUSPS       = st,
+      fire_year    = as.integer(fires_st$year[idx]),
+      burnbndac    = fires_st$burnbndac[idx],
+      asmnt_binary = fires_st$asmnt_binary[idx],
+      pct_forest   = pct_forest[idx],
+      n_pixels     = n_px[idx]
+    )
+    readr::write_csv(df_batch, OUT_CSV, append = file.exists(OUT_CSV))
+    batch_start <<- j + 1L
+    n_zero      <<- n_zero + sum(df_batch$n_pixels == 0L)
+  }
+
   pct_forest <- numeric(n_fires)
   n_px       <- integer(n_fires)
   for (j in seq_len(n_fires)) {
@@ -189,34 +236,16 @@ for (st in states_to_do) {
     n_px[j]       <- length(vals)
     pct_forest[j] <- if (length(vals) > 0L) 100 * mean(vals) else NA_real_
 
-    # Periodic cleanup + progress/memory logging, every 10 fires (tighter
-    # than the first attempt's 50 — that fix alone didn't resolve the OOM,
-    # and with zero progress output there was no way to tell whether it
-    # simply never ran even once before dying). If this still dies with no
-    # "processed N/n_fires" line at all, the problem is in the first ~10
-    # fires specifically, not slow accumulation — worth knowing either way.
-    if (j %% 10 == 0) {
+    if (j %% 10 == 0 || j == n_fires) {
+      flush_batch(j)
       terra::tmpFiles(remove = TRUE)
       gc(verbose = FALSE, full = TRUE)
-      cat(glue("    ...{j}/{n_fires} fires processed\n"))
+      cat(glue("    ...{j}/{n_fires} fires processed (checkpointed)\n"))
       log_peak_memory(glue("after fire {j}"))
     }
   }
 
-  df_st <- data.frame(
-    event_id      = fires_st$event_id,
-    STUSPS        = st,
-    fire_year     = as.integer(fires_st$year),
-    burnbndac     = fires_st$burnbndac,
-    asmnt_binary  = fires_st$asmnt_binary,
-    pct_forest    = pct_forest,
-    n_pixels      = n_px
-  )
-
-  readr::write_csv(df_st, OUT_CSV, append = file.exists(OUT_CSV))
-
   elapsed <- round(proc.time()["elapsed"] - t0, 1)
-  n_zero  <- sum(df_st$n_pixels == 0L)
   cat(glue("[{st}] Done — {elapsed}s ({round(elapsed/n_fires, 2)}s/fire) — ",
            "{n_zero} fire(s) with 0 masked pixels\n\n"))
 
