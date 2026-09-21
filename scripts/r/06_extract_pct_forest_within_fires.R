@@ -44,6 +44,21 @@ sf_use_s2(FALSE)
 options(tigris_use_cache = TRUE)
 here::i_am("scripts/r/06_extract_pct_forest_within_fires.R")
 
+# Must be set before ANY raster I/O — GDAL fixes its block-cache size on
+# first use, and changing this afterward has no effect. Confirmed on GRIT:
+# peak RSS grew slowly but steadily across the per-fire loop below (from
+# ~2098 MB at fire 770 to ~2150 MB at fire 930, then killed) even with
+# periodic gc()/tmpFiles() every 10 fires — since plain R gc() can't touch
+# it, this is GDAL's own C-level block cache, not R-managed memory. Its
+# default size is a % of the NODE's full system RAM (the same wrong basis
+# behind every other terra/GDAL surprise on GRIT today), which grows
+# unbounded as each fire's crop() touches a new, essentially random region
+# of the 954M-cell mask file — the opposite of 05's sequential row-strip
+# reads, which never needed this because they touch each block exactly
+# once, in order. Capped to an explicit small size instead.
+terra::setGDALconfig("GDAL_CACHEMAX", "64")                        # MB
+terra::setGDALconfig("GDAL_MAX_DATASET_POOL_RAM_USAGE", "64")      # MB
+
 WESTERN_STATES <- c("AZ", "CA", "CO", "ID", "MT", "NV", "NM", "OR", "UT", "WA", "WY")
 YEAR_MIN <- 2000
 YEAR_MAX <- 2023

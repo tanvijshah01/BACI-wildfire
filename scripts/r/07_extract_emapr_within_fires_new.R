@@ -63,6 +63,17 @@ sf_use_s2(FALSE)
 options(tigris_use_cache = TRUE)
 here::i_am("scripts/r/07_extract_emapr_within_fires_new.R")
 
+# Must be set before ANY raster I/O — GDAL fixes its block-cache size on
+# first use. Confirmed on GRIT in 06 (identical per-fire crop() pattern):
+# peak RSS grew slowly but steadily across hundreds of fires even with
+# periodic gc()/tmpFiles(), because GDAL's own C-level block cache (not
+# R-managed memory, so gc() can't touch it) defaults to a % of the NODE's
+# full system RAM and grows unbounded as each fire's crop() touches a new,
+# essentially random region of a large raster. Applied here pre-emptively —
+# same access pattern, same risk once run at real scale.
+terra::setGDALconfig("GDAL_CACHEMAX", "64")                        # MB
+terra::setGDALconfig("GDAL_MAX_DATASET_POOL_RAM_USAGE", "64")      # MB
+
 # ── 1. Paths and parameters ───────────────────────────────────────────────────
 STUDY_YEARS    <- 2005L:2010L   # matches biomass_within_fires.qmd params (fire ignition year filter)
 WESTERN_STATES <- c("AZ", "CA", "CO", "ID", "MT", "NV", "NM", "OR", "UT", "WA", "WY")
