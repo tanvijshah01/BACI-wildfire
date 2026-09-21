@@ -18,7 +18,7 @@ needed to reproduce them is in **[`DATA_DOWNLOAD_GUIDE.md`](DATA_DOWNLOAD_GUIDE.
 | MTBS fire perimeters | [mtbs.gov/direct-download](https://www.mtbs.gov/direct-download) → extract into `data/raw/mtbs/` | expected file `mtbs_perimeter_data/mtbs_perims_DD.shp` |
 | eMapR biomass | anonymous FTP (`islay.ceoas.oregonstate.edu`), ~27.7 GB/year | guide Part 2 |
 | ctrees biomass | arraylake zarr store (needs `arraylake auth login`) | guide Part 3 |
-| Forest mask | NLCD 2004, auto-downloaded via `FedData` | guide Part 4 |
+| Forest mask | NLCD 2004, auto-downloaded from MRLC (no login) | guide Part 4 |
 
 ## Pipeline (R, from the project root, outside Quarto)
 
@@ -31,7 +31,8 @@ Rscript scripts/r/07_extract_emapr_within_fires_new.R  # eMapR AGB within forest
 Rscript scripts/r/08_extract_ctrees_within_fires_new.R # ctrees AGB within forested fire pixels
 ```
 
-Outputs feed the Quarto documents in `analysis/`. Scripts are skip-safe and resume where they left off.
+Outputs feed the Quarto documents in `analysis/`. Scripts are skip-safe and resume where they left off. What each
+step does and produces: [`DATA_DOWNLOAD_GUIDE.md`](DATA_DOWNLOAD_GUIDE.md) → *Processing at a glance*.
 
 ## Documentation map
 

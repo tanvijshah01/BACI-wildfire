@@ -112,7 +112,7 @@ BACI/
 - `fixest` — fast fixed effects (alternative specifications)
 - `modelsummary` — regression tables
 - `ggplot2` + `tmap` — visualization
-- `FedData` — download NLCD land cover data
+- `FedData` — NLCD download in the retired `03` script (`05` calls MRLC's WCS endpoint directly via `httr`/`xml2`)
 - `here`, `glue` — path/string handling in scripts
 
 ### Key Python Packages
@@ -162,7 +162,8 @@ flow for new eMapR years, not the old manual `curl.exe --ftp-pasv` loop. Key fac
   `00_crop_emapr_to_west.R` crops/masks each locally-available year to the union of the 11 Western states
   (`data/processed/emapr_biomass_west/`, ~1 GB/year). `00_crop_emapr_to_ca.R` is the retired CA-only
   predecessor. Both are skip-safe. Validate raw files with `check_raw_emapr_files.R` before trusting them.
-- **Forest mask (NLCD):** `FedData::get_nlcd()` (no login). The current pipeline uses **NLCD 2004**,
+- **Forest mask (NLCD):** fetched from MRLC's WCS endpoint by `fetch_nlcd_landcover()` in `05` (no login;
+  replaces `FedData::get_nlcd()`, whose post-download step OOM-killed on GRIT). The current pipeline uses **NLCD 2004**,
   per-state, 0/1-encoded fraction-forest masks built by `05_prepare_forest_masks_west.R` (classes 41
   Deciduous, 42 Evergreen, 43 Mixed) — replaces the retired CA-only 1/NA mask.
 - **Never trust `file.exists()`** as proof a raster is valid — see `NOTES.md` → Technical gotchas.
@@ -177,6 +178,9 @@ flow for new eMapR years, not the old manual `curl.exe --ftp-pasv` loop. Key fac
 The pipeline builds per-state NLCD forest masks, then extracts biomass (eMapR and ctrees) within MTBS
 fire perimeters, restricted to forested pixels. Ctrees acquisition (Python) and the R processing/
 extraction pipeline run independently; their outputs are combined in the `analysis/` documents.
+
+A step-by-step summary of what each stage does and produces is in `DATA_DOWNLOAD_GUIDE.md` →
+*Processing at a glance*.
 
 **Current run order (R, from project root, outside Quarto):**
 

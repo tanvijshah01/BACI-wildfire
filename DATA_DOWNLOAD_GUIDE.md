@@ -27,6 +27,30 @@ this table before anything else:**
 | **Raw data retention** | **Kept permanently** (PI request, 2026-08-30) — every downloaded `composite_YYYY_median.tif` stays in `data/raw/emapr_biomass/`, not deleted after cropping. See the storage callout in Part 2. | N/A — the native-resolution GeoTIFFs from Part 3 are the retained artifact. |
 | **Analysis-ready output** | `biomass_fire_polygons_emapr_west_<years>_100m_forested.csv` | `biomass_fire_polygons_ctrees_west_forested.csv` |
 
+## Processing at a glance
+
+Raw biomass → fire-level biomass, in the order things run (details in Parts 2–4):
+
+| # | Step | Script | What it does | Output |
+|---|---|---|---|---|
+| 1 | Fetch raw eMapR | FTP pull + `check_raw_emapr_files.R` | Copy CONUS annual composites (30 m, 1990–2023); validate size and pixel content | `data/raw/emapr_biomass/composite_YYYY_median.tif` |
+| 2 | Crop eMapR | `00_crop_emapr_to_west.R` | Crop and mask each year to the union of the 11 Western states | `data/processed/emapr_biomass_west/composite_YYYY_west.tif` (~1 GB/yr) |
+| 3 | Download ctrees | `04_download_ctrees_west.py` | Query the arraylake zarr store for the West bbox: (A) native ~100 m annual GeoTIFFs, (B) coarsened 1 km NetCDF, (C) mean AGB per fire × year | `data/processed/ctrees/` |
+| 4 | Forest masks | `05_prepare_forest_masks_west.R` | Fetch NLCD 2004 per state; classes 41/42/43 → 1, everything else → 0 (0/1, not 1/NA); write 30 m, 90 m (modal aggregate for eMapR) and ~100 m (ctrees grid) versions | `data/processed/forest_mask/nlcd2004_forestfrac_*_<st>.tif` |
+| 5 | % forest per fire | `06_extract_pct_forest_within_fires.R` | Mean of the 30 m mask within each MTBS perimeter | `pct_forest_by_fire_west.csv` |
+| 6 | eMapR within fires | `07_extract_emapr_within_fires_new.R` | Per fire polygon: crop → aggregate 30 → ~90 m (mean) → mask non-forest → mean AGB, for each year | `biomass_fire_polygons_emapr_west_<years>_100m_forested.csv` |
+| 7 | ctrees within fires | `08_extract_ctrees_within_fires_new.R` | Same per-polygon crop → mask → mean on the ~100 m ctrees TIFs, forest mask projected per polygon | `biomass_fire_polygons_ctrees_west_forested.csv` |
+| 8 | Validate | `validate_west_pipeline.R` | Regression-check 05–08 against the retired CA-only baseline | `data/processed/validation/`, `west_pipeline_sanity_check.qmd` |
+
+**Fire selection (steps 5–7):** MTBS `Wildfire` perimeters ≥ 1,000 acres whose ignition year is in
+`STUDY_YEARS`; each fire's state comes from its `event_id` prefix (not a raw spatial join), so border fires
+are counted once. **Then:** the `analysis/*.qmd` documents read the step 5–7 CSVs; the unit × year panel and
+Callaway-Sant'Anna estimation are the planned next stages (`CLAUDE.md`).
+
+**Conventions used throughout:** every extraction is a per-polygon crop → mask → mean (whole-raster masking
+OOMs on these files); all scripts are skip-safe and resume per state/year; existing outputs are validated, not
+just checked for existence (`NOTES.md` → Technical gotchas).
+
 **Contents**
 - [Part 1: One-Time Setup](#part-1-one-time-setup)
 - [Part 2: eMapR Biomass](#part-2-emapr-biomass)
@@ -360,7 +384,7 @@ Rscript scripts/r/08_extract_ctrees_within_fires_new.R
 
 | Script | Depends on | Output |
 |---|---|---|
-| `05` | NLCD 2004 (auto-downloaded via `FedData::get_nlcd()`, no login needed); a ctrees `_100m.tif` template for the ~100 m mask variant | `data/processed/forest_mask/nlcd2004_forestfrac_{30m,90m,100m}_<state>.tif` |
+| `05` | NLCD 2004 (auto-downloaded from MRLC's WCS endpoint via `fetch_nlcd_landcover()`, no login needed); a ctrees `_100m.tif` template for the ~100 m mask variant | `data/processed/forest_mask/nlcd2004_forestfrac_{30m,90m,100m}_<state>.tif` |
 | `06` | `05`'s 30 m masks | `data/processed/forest_mask/pct_forest_by_fire_west.csv` |
 | `07` | `05`'s 90 m masks; §2.3's West-cropped eMapR TIFs | `data/processed/emapr_biomass_west/biomass_fire_polygons_emapr_west_<years>_100m_forested.csv` |
 | `08` | `05`'s 30 m masks; §3.3's West-wide ctrees `_100m.tif` files | `data/processed/ctrees/biomass_fire_polygons_ctrees_west_forested.csv` |
