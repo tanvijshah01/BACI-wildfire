@@ -50,6 +50,19 @@ sf_use_s2(FALSE)
 options(tigris_use_cache = TRUE)
 here::i_am("scripts/r/05_prepare_forest_masks_west.R")
 
+# terra decides whether to process a raster in memory or chunk it through
+# disk based on its own estimate of "available" memory — which reads the
+# NODE's full system RAM, not the ~4 GiB this job is actually capped to
+# under GRIT's cgroup (confirmed 2026-09-20; see NOTES.md). That's why
+# passing filename= to classify() alone didn't fix its OOM: filename= only
+# says where the output goes, not how terra decides to compute it — terra
+# still concluded a 954M-cell raster comfortably fits in memory and never
+# switched to chunked processing. todisk = TRUE forces every terra
+# operation for the rest of this script to always chunk through disk,
+# overriding that heuristic outright rather than hoping any one call's
+# arguments are enough to sidestep it.
+terra::terraOptions(todisk = TRUE)
+
 WESTERN_STATES <- c("AZ", "CA", "CO", "ID", "MT", "NV", "NM", "OR", "UT", "WA", "WY")
 
 # Override for a pilot run, e.g.: STATES_TO_RUN <- c("WY", "CO")
