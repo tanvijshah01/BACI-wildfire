@@ -181,12 +181,19 @@ for (st in STATES_TO_RUN) {
              "cells: {scales::comma(terra::ncell(nlcd_raw))}\n"))
 
     cat(glue("[{st}] Reclassifying to 0/1 forest mask (30 m)...\n"))
-    mask_30m <- terra::classify(nlcd_raw, rcl, others = 0L)
-
-    terra::writeRaster(mask_30m, out_30m, overwrite = FALSE,
-                       datatype = "INT1U",
-                       gdal = c("COMPRESS=LZW", "TILED=YES",
-                                 "BLOCKXSIZE=512", "BLOCKYSIZE=512"))
+    # filename= passed directly to classify() (not a separate writeRaster()
+    # call after) — this is what makes terra process the ~954M-cell result
+    # block-by-block straight to disk instead of materializing the whole
+    # thing in memory first. Confirmed on GRIT: with the two-step version
+    # (classify() with no filename, holding mask_30m in memory, THEN
+    # writeRaster()), this step got OOM-killed even after fixing the
+    # download itself (see NOTES.md 2026-09-20) — the reclassify was never
+    # the bottleneck we originally suspected, the missing filename= was.
+    mask_30m <- terra::classify(
+      nlcd_raw, rcl, others = 0L,
+      filename = out_30m, overwrite = FALSE, datatype = "INT1U",
+      gdal = c("COMPRESS=LZW", "TILED=YES", "BLOCKXSIZE=512", "BLOCKYSIZE=512")
+    )
     size_mb <- round(file.size(out_30m) / 1e6, 1)
     cat(glue("[{st}] Saved {basename(out_30m)} ({size_mb} MB)\n"))
     rm(nlcd_raw)
