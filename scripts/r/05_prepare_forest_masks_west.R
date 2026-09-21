@@ -83,7 +83,19 @@ rcl <- matrix(c(FOREST_CLASSES, rep(1L, length(FOREST_CLASSES))), ncol = 2)
 # in practice on nlcd2004_forestfrac_30m_wy.tif (2026-08-12): correct 17066 x
 # 20554 / EPSG:5070 header, 100% of cells NA.
 raster_is_valid <- function(path) {
-  terra::global(terra::rast(path), "notNA")[[1]] > 0
+  # Wrapped in tryCatch() after a real crash on GRIT: a file killed mid-write
+  # by the classify() OOM above (before the todisk=TRUE fix) was truncated
+  # badly enough that GDAL couldn't even recognize it as a file at all
+  # ("GDAL Error 4: ... not recognized as a supported file format"), which
+  # makes terra::rast() throw a hard error rather than return an openable-
+  # but-all-NA raster. Without this, that error propagated straight out of
+  # raster_is_valid() and halted the whole script on its next run, instead
+  # of being treated as "invalid, delete and rebuild" like this function is
+  # supposed to do for any other kind of corruption.
+  tryCatch(
+    terra::global(terra::rast(path), "notNA")[[1]] > 0,
+    error = function(e) FALSE
+  )
 }
 
 # ── NLCD fetch, bypassing FedData::get_nlcd()'s factor/color-table step ──────
@@ -167,7 +179,7 @@ for (st in STATES_TO_RUN) {
 
   # ── 30 m mask — download (or reuse cached NLCD) + reclassify ────────────────
   if (file.exists(out_30m) && !ok_30m) {
-    cat(glue("[REBUILD] {st} — {basename(out_30m)} exists but is corrupt (all-NA); deleting and rebuilding.\n"))
+    cat(glue("[REBUILD] {st} — {basename(out_30m)} exists but is corrupt (all-NA or unreadable); deleting and rebuilding.\n"))
     file.remove(out_30m)
   }
   if (ok_30m) {
@@ -216,7 +228,7 @@ for (st in STATES_TO_RUN) {
   # native resolution closely enough for 07's crop+resample step; mirrors old
   # 03_prepare_forest_mask.R §4, but 0/1-encoded like everything else here).
   if (file.exists(out_90m) && !raster_is_valid(out_90m)) {
-    cat(glue("[REBUILD] {st} — {basename(out_90m)} exists but is corrupt (all-NA); deleting and rebuilding.\n"))
+    cat(glue("[REBUILD] {st} — {basename(out_90m)} exists but is corrupt (all-NA or unreadable); deleting and rebuilding.\n"))
     file.remove(out_90m)
   }
   if (file.exists(out_90m)) {
@@ -238,7 +250,7 @@ for (st in STATES_TO_RUN) {
   # this state as the target grid — skip (not fail) if none exists yet, since
   # ctrees downloads currently only cover CA.
   if (file.exists(out_100m) && !raster_is_valid(out_100m)) {
-    cat(glue("[REBUILD] {st} — {basename(out_100m)} exists but is corrupt (all-NA); deleting and rebuilding.\n"))
+    cat(glue("[REBUILD] {st} — {basename(out_100m)} exists but is corrupt (all-NA or unreadable); deleting and rebuilding.\n"))
     file.remove(out_100m)
   }
   if (file.exists(out_100m)) {
