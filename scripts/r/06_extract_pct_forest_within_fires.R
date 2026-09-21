@@ -48,6 +48,21 @@ WESTERN_STATES <- c("AZ", "CA", "CO", "ID", "MT", "NV", "NM", "OR", "UT", "WA", 
 YEAR_MIN <- 2000
 YEAR_MAX <- 2023
 
+# Diagnostic only — periodic gc()/tmpFiles() (added after 06 was confirmed
+# OOM-killed on GRIT partway through CA's 1044-fire loop) didn't fix it, and
+# with no progress logging at all there's no way to tell whether it died on
+# fire 1 or fire 1000 — meaning that fix might just never have gotten a
+# chance to run. Mirrors log_peak_memory() in 04_download_ctrees_west.py
+# (same /proc/self/status VmHWM technique) so the next failure is
+# diagnosable from the log instead of another blind guess.
+log_peak_memory <- function(label) {
+  status_path <- "/proc/self/status"
+  if (!file.exists(status_path)) return(invisible(NULL))
+  hwm <- grep("^VmHWM:", readLines(status_path, warn = FALSE), value = TRUE)
+  if (length(hwm) > 0) cat(glue("    [mem] {label}: peak RSS = {trimws(sub('VmHWM:', '', hwm))}\n"))
+  invisible(NULL)
+}
+
 # Override for a pilot run, e.g.: STATES_TO_RUN <- c("WY", "CO")
 STATES_TO_RUN <- c("CA")
 
@@ -159,16 +174,17 @@ for (st in states_to_do) {
     n_px[j]       <- length(vals)
     pct_forest[j] <- if (length(vals) > 0L) 100 * mean(vals) else NA_real_
 
-    # Periodic cleanup — the terra::tmpFiles()/gc() cleanup below only ran
-    # ONCE, after this whole loop finished. Confirmed OOM-killed on GRIT
-    # partway through CA's 1044 fires because of exactly that: each single
-    # crop()/mask() is tiny, but terra temp files/objects accumulating
-    # across hundreds of iterations with zero intermediate cleanup ate
-    # through the ~2.3 GiB real headroom under GRIT's cgroup cap (see
-    # NOTES.md 2026-09-20) well before the loop could ever finish.
-    if (j %% 50 == 0) {
+    # Periodic cleanup + progress/memory logging, every 10 fires (tighter
+    # than the first attempt's 50 — that fix alone didn't resolve the OOM,
+    # and with zero progress output there was no way to tell whether it
+    # simply never ran even once before dying). If this still dies with no
+    # "processed N/n_fires" line at all, the problem is in the first ~10
+    # fires specifically, not slow accumulation — worth knowing either way.
+    if (j %% 10 == 0) {
       terra::tmpFiles(remove = TRUE)
       gc(verbose = FALSE, full = TRUE)
+      cat(glue("    ...{j}/{n_fires} fires processed\n"))
+      log_peak_memory(glue("after fire {j}"))
     }
   }
 
