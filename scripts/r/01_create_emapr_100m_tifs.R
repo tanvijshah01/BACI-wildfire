@@ -1,76 +1,130 @@
 # =============================================================================
 # 01_create_emapr_100m_tifs.R
 #
-# One-time preprocessing: downsample CA-clipped eMapR TIFs from 30 m to ~90 m
+# One-time preprocessing: downsample CA eMapR composites from 30 m to ~90 m
 # (labeled "~100 m" by convention, matching ctrees native ~100 m resolution).
 #
 # Why: Enables fair comparison with ctrees at matched ~100 m resolution.
 # 30 m × 3 = 90 m is the closest clean block-average to ctrees ~100 m (~0.000889°).
 # The resulting ~90 m files (~55 MB each) are also memory-safe for terra::extract().
 #
+# Source: prefers the retired CA-only 30 m crop (composite_YYYY_ca.tif, from
+# the retired 00_crop_emapr_to_ca.R) when it's already on disk (laptop-era
+# years); falls back to cropping + masking the CURRENT West-wide crop
+# (composite_YYYY_west.tif, from 00_crop_emapr_to_west.R) down to CA when
+# the CA-only file isn't available — e.g. on GRIT, which never ran the
+# retired CA-only crop script, so years like 2005-2010 only exist as West
+# crops there. Added 2026-09-21 so this script works from the current
+# pipeline's output without depending on the retired script having run.
+#
 # How: terra::aggregate(fact = 3, fun = "mean") shrinks each 30 m pixel grid
 # by 3× in each dimension → ~90 m output. Skip-safe: already-existing 100 m
-# TIFs are never overwritten.
+# TIFs are never overwritten. Both eMapR crops share EPSG:5070 (confirmed in
+# 00_crop_emapr_to_west.R), so the West-crop fallback needs crop()+mask()
+# only, no reprojection.
 #
 # Run once from any working directory:
 #   Rscript scripts/r/01_create_emapr_100m_tifs.R
 #
 # Outputs: data/processed/emapr_biomass_ca/composite_YYYY_ca_100m.tif
-#          (one per available source year)
+#          (one per available source year, from either source)
 #
 # OUTLINE
-# 1. Locate source (30 m CA) TIFs
-# 2. Identify years missing 100 m versions
-# 3. Aggregate and write
-# 4. Report summary
+# 1. Setup + CA boundary (only needed for the West-crop fallback path)
+# 2. Locate source years (CA-only 30 m crop, or West-wide crop as fallback)
+# 3. Identify years missing 100 m versions
+# 4. Aggregate and write
+# 5. Report summary
 # =============================================================================
 
 library(terra)
+library(sf)
+library(tigris)
 library(here)
 library(glue)
+library(dplyr)
 
 here::i_am("scripts/r/01_create_emapr_100m_tifs.R")
+sf_use_s2(FALSE)
+options(tigris_use_cache = TRUE)
 
-EMAPR_DIR <- here("data", "processed", "emapr_biomass_ca")
+# Must be set before any raster I/O touching the West-wide composites below
+# — GDAL's block cache otherwise defaults to a % of the node's full system
+# RAM, not the ~4 GiB cgroup cap this job actually runs under on GRIT (see
+# scripts/r/05_prepare_forest_masks_west.R for the full writeup of this
+# failure mode and why it's set this early, before any raster is touched).
+terra::setGDALconfig("GDAL_CACHEMAX", "64")                        # MB
+terra::setGDALconfig("GDAL_MAX_DATASET_POOL_RAM_USAGE", "64")      # MB
 
-# ── 1. Locate source TIFs ─────────────────────────────────────────────────────
-src_files <- sort(list.files(EMAPR_DIR,
-                             pattern    = "^composite_\\d{4}_ca\\.tif$",
-                             full.names = TRUE))
-src_years <- as.integer(regmatches(basename(src_files),
-                                   regexpr("\\d{4}", basename(src_files))))
+# ── 1. Setup + CA boundary ────────────────────────────────────────────────────
+EMAPR_CA_DIR   <- here("data", "processed", "emapr_biomass_ca")
+EMAPR_WEST_DIR <- here("data", "processed", "emapr_biomass_west")
+dir.create(EMAPR_CA_DIR, recursive = TRUE, showWarnings = FALSE)
 
-cat("Source 30 m CA TIFs found:", length(src_files), "years\n")
-cat("Years:", paste(src_years, collapse = ", "), "\n\n")
+# Only used for the West-crop fallback path (crop + mask to CA); skipped
+# entirely if every needed year already has a CA-only 30 m source on disk.
+ca_5070 <- tigris::states(cb = TRUE, year = 2022, resolution = "5m") |>
+  dplyr::filter(STUSPS == "CA") |>
+  sf::st_transform(5070)
+ca_vect_5070 <- terra::vect(ca_5070)
 
-# ── 2. Identify years missing 100 m TIFs ──────────────────────────────────────
-out_files  <- file.path(EMAPR_DIR, glue("composite_{src_years}_ca_100m.tif"))
+# ── 2. Locate source years (either source) ────────────────────────────────────
+ca_files <- list.files(EMAPR_CA_DIR, pattern = "^composite_\\d{4}_ca\\.tif$",
+                       full.names = TRUE)
+ca_years <- as.integer(regmatches(basename(ca_files), regexpr("\\d{4}", basename(ca_files))))
+
+west_files <- list.files(EMAPR_WEST_DIR, pattern = "^composite_\\d{4}_west\\.tif$",
+                         full.names = TRUE)
+west_years <- as.integer(regmatches(basename(west_files), regexpr("\\d{4}", basename(west_files))))
+
+all_years <- sort(union(ca_years, west_years))
+cat("CA-only 30 m crops found:  ", length(ca_years), "year(s) —",
+    paste(ca_years, collapse = ", "), "\n")
+cat("West-wide 30 m crops found:", length(west_years), "year(s) —",
+    paste(west_years, collapse = ", "), "\n")
+cat("Years available overall:   ", length(all_years), "\n\n")
+
+# ── 3. Identify years missing 100 m TIFs ──────────────────────────────────────
+out_files  <- file.path(EMAPR_CA_DIR, glue("composite_{all_years}_ca_100m.tif"))
 need_build <- !file.exists(out_files)
 
 cat(sum(!need_build), "100 m TIF(s) already exist — will skip.\n")
 cat(sum(need_build),  "100 m TIF(s) to build:",
-    paste(src_years[need_build], collapse = ", "), "\n\n")
+    paste(all_years[need_build], collapse = ", "), "\n\n")
 
 if (!any(need_build)) {
   cat("Nothing to do — all 100 m TIFs are present.\n")
   quit(save = "no", status = 0)
 }
 
-# ── 3. Aggregate and write ────────────────────────────────────────────────────
+# ── 4. Aggregate and write ────────────────────────────────────────────────────
 # fact = 3: 30 m × 3 = 90 m (~100 m by convention); fun = "mean" preserves
 # mean AGB within block. NAflag keeps existing nodata value from source raster.
-t_start  <- proc.time()
-counter  <- 0L
+t_start <- proc.time()
+counter <- 0L
+n_build <- sum(need_build)
 
 for (i in which(need_build)) {
-  counter  <- counter + 1L
-  yr       <- src_years[i]
-  tif_in   <- src_files[i]
-  tif_out  <- out_files[i]
+  counter <- counter + 1L
+  yr      <- all_years[i]
+  tif_out <- out_files[i]
 
-  cat(glue("[{counter}/{sum(need_build)}] {yr} ... "))
+  cat(glue("[{counter}/{n_build}] {yr} ... "))
 
-  r_in  <- terra::rast(tif_in)
+  if (yr %in% ca_years) {
+    # Preferred: already CA-shaped, no crop/mask needed.
+    r_in <- terra::rast(ca_files[match(yr, ca_years)])
+  } else {
+    # Fallback: crop + mask the West-wide crop down to CA first. Masking
+    # the full West raster directly (125M+ cells across 11 states) with no
+    # crop() first is the whole-raster pattern that OOMs/takes 500s+
+    # elsewhere in this project (see CLAUDE.md -> Avoid); cropping first
+    # keeps this cheap by only reading CA's window.
+    r_in <- terra::rast(west_files[match(yr, west_years)])
+    r_in <- terra::crop(r_in, ca_vect_5070)
+    r_in <- terra::mask(r_in, ca_vect_5070)
+  }
+
   r_out <- terra::aggregate(r_in, fact = 3, fun = "mean", na.rm = TRUE)
 
   terra::writeRaster(r_out, tif_out,
@@ -86,8 +140,8 @@ for (i in which(need_build)) {
   cat(glue("done  [{elapsed}s elapsed]\n"))
 }
 
-# ── 4. Summary ────────────────────────────────────────────────────────────────
-all_100m <- sort(list.files(EMAPR_DIR,
+# ── 5. Summary ────────────────────────────────────────────────────────────────
+all_100m <- sort(list.files(EMAPR_CA_DIR,
                             pattern = "^composite_\\d{4}_ca_100m\\.tif$"))
 cat("\nDone. 100 m TIFs now available for",
     length(all_100m), "year(s):\n")
