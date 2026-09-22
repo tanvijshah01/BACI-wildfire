@@ -55,6 +55,23 @@ confirmed — see the caveat in §7.
 ## 1. Setup
 
 ```{r setup}
+# Install any missing packages before loading — this environment (a fresh
+# GRIT rebuild, or a new laptop checkout) won't necessarily have every CRAN
+# package pre-installed; mirrors the same helper in 01_mtbs_exploration.qmd.
+# Caught missing ggspatial then plotly one render at a time on 2026-09-21 —
+# check the whole list up front instead.
+.install_if_missing <- function(pkgs) {
+  missing <- pkgs[!pkgs %in% rownames(installed.packages())]
+  if (length(missing) > 0) {
+    message("Installing missing packages: ", paste(missing, collapse = ", "))
+    install.packages(missing, repos = "https://cloud.r-project.org", quiet = TRUE)
+  }
+}
+.install_if_missing(c("terra", "sf", "here", "dplyr", "tidyr", "readr", "ggplot2",
+                       "scales", "glue", "patchwork", "tigris", "lubridate",
+                       "ggspatial", "knitr", "stringr", "RColorBrewer", "viridis",
+                       "plotly"))
+
 library(terra)
 library(sf)
 library(here)

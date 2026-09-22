@@ -23,11 +23,14 @@
 #   data/processed/forest_mask/nlcd2004_forestfrac_30m_<st>.tif   30 m,  EPSG:5070 (native; 06 pct-forest extraction)
 #   data/processed/forest_mask/nlcd2004_forestfrac_90m_<st>.tif   90 m,  EPSG:5070, modal-aggregated (07 eMapR extraction)
 #   data/processed/forest_mask/nlcd2004_forestfrac_100m_<st>.tif  ~100 m, EPSG:4326, projected onto the ctrees
-#                                                                  grid template (08 ctrees extraction + display maps)
+#                                                                  grid template (08 itself uses the 30 m mask;
+#                                                                  this one is for analysis/biomass_within_fires.qmd's
+#                                                                  ctrees-resolution masking + display maps)
 #
-# The ~100 m variant requires a ctrees_<year>_<st>_100m.tif to already exist
-# as a template (currently only CA) — skipped with a message for states
-# without one yet.
+# The ~100 m variant requires a ctrees_<year>_west_100m.tif to already exist
+# as a template — one shared West-wide raster per year (04_download_ctrees_
+# west.py's "_west_" tier, used as-is by 08), not a per-state file. Skipped
+# with a message if no such raster exists yet.
 #
 # OUTLINE
 # 1. Setup
@@ -187,7 +190,14 @@ for (st in STATES_TO_RUN) {
   out_90m  <- file.path(MASK_DIR, glue("nlcd2004_forestfrac_90m_{tolower(st)}.tif"))
   out_100m <- file.path(MASK_DIR, glue("nlcd2004_forestfrac_100m_{tolower(st)}.tif"))
 
-  ctrees_tif <- list.files(CTREES_DIR, pattern = glue("^ctrees_\\d{{4}}_{tolower(st)}_100m\\.tif$"),
+  # Shared West-wide raster (one per year, covers every state) — not a
+  # per-state file. Was previously searched as "_{st}_100m.tif" (a per-state
+  # naming that 04/08 never actually produce, now that ctrees TIFs are one
+  # raster shared across the whole West bbox), which silently resolved to
+  # NA for every state and skipped the 100 m mask build entirely — caught
+  # 2026-09-21 when biomass_within_fires.qmd failed loading FOREST_MASK_100M
+  # on GRIT despite 05 having "completed" for CA.
+  ctrees_tif <- list.files(CTREES_DIR, pattern = "^ctrees_\\d{4}_west_100m\\.tif$",
                             full.names = TRUE)[1]
   need_100m  <- !file.exists(out_100m) && !is.na(ctrees_tif)
 
@@ -310,9 +320,9 @@ for (st in STATES_TO_RUN) {
   }
 
   # ── ~100 m mask — EPSG:4326, projected onto the ctrees grid template ─────────
-  # Mirrors old 03_prepare_forest_mask.R §5. Requires a ctrees 100m TIF for
-  # this state as the target grid — skip (not fail) if none exists yet, since
-  # ctrees downloads currently only cover CA.
+  # Mirrors old 03_prepare_forest_mask.R §5. Requires the shared West-wide
+  # ctrees 100m TIF as the target grid (same file for every state) — skip
+  # (not fail) if none exists yet.
   if (file.exists(out_100m) && !raster_is_valid(out_100m)) {
     cat(glue("[REBUILD] {st} — {basename(out_100m)} exists but is corrupt (all-NA or unreadable); deleting and rebuilding.\n"))
     file.remove(out_100m)
