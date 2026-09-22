@@ -53,6 +53,20 @@ sf_use_s2(FALSE)
 options(tigris_use_cache = TRUE)
 here::i_am("scripts/r/05_prepare_forest_masks_west.R")
 
+# Must be set before ANY raster I/O — GDAL fixes its block-cache size on
+# first use. Applied to 06/07/08 on 2026-09-20 after diagnosing the "slow
+# growth" OOM there (GDAL's own C-level block cache, invisible to R's gc(),
+# defaults to a % of the NODE's full system RAM and grows unbounded on
+# scattered reads). Missed here originally because the 30 m mask build's
+# manual row-strip loop reads sequentially (safe — each block touched once,
+# in order), but the ~100 m mask's terra::project() below does NOT: warping
+# onto a different grid/CRS means scattered, effectively random reads from
+# the source raster — the exact access pattern that triggers this. Confirmed
+# on GRIT 2026-09-21: CA's 100 m mask build was OOM-killed here before this
+# cap was added.
+terra::setGDALconfig("GDAL_CACHEMAX", "64")                        # MB
+terra::setGDALconfig("GDAL_MAX_DATASET_POOL_RAM_USAGE", "64")      # MB
+
 # terra decides whether to process a raster in memory or chunk it through
 # disk based on its own estimate of "available" memory — which reads the
 # NODE's full system RAM, not the ~4 GiB this job is actually capped to
