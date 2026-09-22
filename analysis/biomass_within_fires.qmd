@@ -680,14 +680,20 @@ ca_vect_4326 <- terra::vect(sf::st_transform(ca_5070, 4326))
 
 # Year-2005 raw rasters and forest masks, each in its dataset's native CRS/grid
 # (ctrees: EPSG:4326 ~100m; eMapR: EPSG:5070 90m raw raster + 90m forest mask).
-ctrees_2005_raw <- terra::rast(here("data", "processed", "ctrees", "ctrees_2005_ca_100m.tif"))
+ctrees_2005_raw <- terra::rast(here("data", "processed", "ctrees", "ctrees_2005_west_100m.tif"))
 emapr_2005_raw  <- terra::rast(here("data", "processed", "emapr_biomass_ca", "composite_2005_ca_100m.tif"))
 
-# ctrees_YYYY_ca_100m.tif is only cropped to a lon/lat bounding box in
-# scripts/python/03_download_ctrees_ca.py (Part C), never polygon-masked —
-# unlike eMapR's composite_YYYY_ca.tif, which scripts/r/00_crop_emapr_to_ca.R
-# both crops AND masks to the CA polygon. Mask here so the "raw" layer is
-# actually CA-shaped, not a rectangle, for both the map and table below.
+# ctrees_YYYY_west_100m.tif now covers the full 11-state West bbox (built by
+# scripts/python/04_download_ctrees_west.py) — not the CA-sized crop the
+# retired ctrees_YYYY_ca_100m.tif this used to read was. So crop to CA's
+# extent FIRST, before masking: terra::mask() alone on the full West raster
+# is a whole-raster op on a 125M+-cell file — exactly what OOMs/takes 500s+
+# elsewhere in this project (see CLAUDE.md -> Avoid, and NOTES.md's terra-
+# masking gotcha). crop() first keeps this cheap by only reading CA's window.
+# eMapR's composite_YYYY_ca.tif is untouched here — a separate, already
+# CA-only precomputed display raster (00_crop_emapr_to_ca.R /
+# 01_create_emapr_100m_tifs.R), already both cropped AND masked to CA.
+ctrees_2005_raw <- terra::crop(ctrees_2005_raw, ca_vect_4326)
 ctrees_2005_raw <- terra::mask(ctrees_2005_raw, ca_vect_4326)
 
 # 0/1-encoded masks from the generalized per-state pipeline (05_prepare_forest_masks_west.R)
@@ -1038,7 +1044,7 @@ for (yr in fire_perimeter_years) {
   t_year <- Sys.time()
   cat(glue("\n**{yr}**\n\n"))
 
-  ctrees_tif <- here("data", "processed", "ctrees", glue("ctrees_{yr}_ca_100m.tif"))
+  ctrees_tif <- here("data", "processed", "ctrees", glue("ctrees_{yr}_west_100m.tif"))
   emapr_tif  <- here("data", "processed", "emapr_biomass_ca", glue("composite_{yr}_ca_100m.tif"))
   if (!file.exists(ctrees_tif) || !file.exists(emapr_tif)) {
     cat(glue("Skipping {yr} — missing source TIF(s).\n\n"))
@@ -1054,7 +1060,10 @@ for (yr in fire_perimeter_years) {
 
   # ── Load + mask this year's rasters (same pipeline as masking-load-rasters,
   # generalized): raw -> forest-masked -> masked to this year's fire perimeters.
-  ctrees_raw_yr <- terra::rast(ctrees_tif) |> terra::mask(ca_vect_4326)
+  # crop() before mask() — ctrees_tif is now the shared full-West raster (see
+  # note in masking-2005-prep above); masking it directly, uncropped, is the
+  # whole-raster pattern CLAUDE.md's Avoid list warns against.
+  ctrees_raw_yr <- terra::rast(ctrees_tif) |> terra::crop(ca_vect_4326) |> terra::mask(ca_vect_4326)
   emapr_raw_yr  <- terra::rast(emapr_tif)
 
   # Resample the (year-independent, already-loaded) forest mask onto THIS
