@@ -351,28 +351,45 @@ for (st in STATES_TO_RUN) {
     ctrees_template <- terra::rast(ctrees_tif)
 
     # ctrees_tif is the SHARED West-wide raster (~125M cells, all 11 states)
-    # — project()ing straight onto its full extent as the target grid means
-    # terra builds/writes a West-wide output even though mask_30m only has
-    # data for this one state. Confirmed on GRIT 2026-09-21: still "Killed"
-    # here even after capping GDAL_CACHEMAX above, which only bounds read-
-    # cache growth, not the size of the output extent terra decides to
-    # allocate — the same "terra's automatic chunking doesn't respect the
-    # cgroup cap" failure already diagnosed for classify()/aggregate() in
-    # this script, just triggered by an oversized TARGET this time instead
-    # of an oversized source. Crop the template to this state's footprint
-    # first so project() only ever has to build a state-sized output.
+    # — crop the template to this state's footprint first so the target
+    # extent/resolution below are state-sized, not West-sized.
     state_bbox_native <- terra::as.polygons(terra::ext(mask_30m), crs = terra::crs(mask_30m))
     state_bbox_4326   <- terra::project(state_bbox_native, terra::crs(ctrees_template))
     ctrees_template   <- terra::crop(ctrees_template, state_bbox_4326)
+    target_ext <- as.vector(terra::ext(ctrees_template))   # named: xmin, xmax, ymin, ymax
+    target_res <- terra::res(ctrees_template)              # xres, yres
 
-    mask_100m <- terra::project(mask_30m, ctrees_template, method = "near")
-    terra::writeRaster(mask_100m, out_100m, overwrite = FALSE,
-                       datatype = "INT1U",
-                       gdal = c("COMPRESS=LZW", "TILED=YES",
-                                 "BLOCKXSIZE=512", "BLOCKYSIZE=512"))
+    # terra::project() OOM-killed twice on GRIT even after (1) capping
+    # GDAL_CACHEMAX and (2) cropping the target extent above (this block's
+    # previous two fixes, 3d1c6ef/7d86111) — because a CRS warp (EPSG:5070
+    # -> 4326, unlike a same-CRS aggregate()/classify()) runs through GDAL's
+    # own warp engine, which manages its working-set memory via GDAL's own
+    # -wm flag — not GDAL_CACHEMAX, and not terra's todisk/row-chunking
+    # logic. Neither previous fix actually bounded it. sf::gdal_utils("warp")
+    # calls GDAL's warp utility directly and exposes -wm explicitly, instead
+    # of trusting terra::project() to pick a safe memory strategy for a warp
+    # under this cgroup's real ~4 GiB cap. Reads straight from out_30m on
+    # disk rather than the in-memory mask_30m object.
+    sf::gdal_utils(
+      util        = "warp",
+      source      = out_30m,
+      destination = out_100m,
+      options = c(
+        "-t_srs", "EPSG:4326",
+        "-te", as.character(target_ext["xmin"]), as.character(target_ext["ymin"]),
+               as.character(target_ext["xmax"]), as.character(target_ext["ymax"]),
+        "-tr", as.character(target_res[1]), as.character(target_res[2]),
+        "-r", "near",
+        "-ot", "Byte",
+        "-wm", "256",
+        "--config", "GDAL_CACHEMAX", "128",
+        "-co", "COMPRESS=LZW", "-co", "TILED=YES",
+        "-co", "BLOCKXSIZE=512", "-co", "BLOCKYSIZE=512"
+      )
+    )
     size_mb <- round(file.size(out_100m) / 1e6, 1)
     cat(glue("[{st}] Saved {basename(out_100m)} ({size_mb} MB)\n"))
-    rm(mask_100m, ctrees_template)
+    rm(ctrees_template)
   }
 
   total_elapsed <- round(proc.time()["elapsed"] - t0)
