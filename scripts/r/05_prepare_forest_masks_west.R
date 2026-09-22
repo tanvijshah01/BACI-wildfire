@@ -349,6 +349,22 @@ for (st in STATES_TO_RUN) {
   } else {
     cat(glue("[{st}] Building ~100 m forest mask (EPSG:4326, projected onto ctrees grid)...\n"))
     ctrees_template <- terra::rast(ctrees_tif)
+
+    # ctrees_tif is the SHARED West-wide raster (~125M cells, all 11 states)
+    # — project()ing straight onto its full extent as the target grid means
+    # terra builds/writes a West-wide output even though mask_30m only has
+    # data for this one state. Confirmed on GRIT 2026-09-21: still "Killed"
+    # here even after capping GDAL_CACHEMAX above, which only bounds read-
+    # cache growth, not the size of the output extent terra decides to
+    # allocate — the same "terra's automatic chunking doesn't respect the
+    # cgroup cap" failure already diagnosed for classify()/aggregate() in
+    # this script, just triggered by an oversized TARGET this time instead
+    # of an oversized source. Crop the template to this state's footprint
+    # first so project() only ever has to build a state-sized output.
+    state_bbox_native <- terra::as.polygons(terra::ext(mask_30m), crs = terra::crs(mask_30m))
+    state_bbox_4326   <- terra::project(state_bbox_native, terra::crs(ctrees_template))
+    ctrees_template   <- terra::crop(ctrees_template, state_bbox_4326)
+
     mask_100m <- terra::project(mask_30m, ctrees_template, method = "near")
     terra::writeRaster(mask_100m, out_100m, overwrite = FALSE,
                        datatype = "INT1U",
