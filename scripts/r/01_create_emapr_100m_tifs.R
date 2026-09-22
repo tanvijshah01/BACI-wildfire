@@ -56,10 +56,28 @@ options(tigris_use_cache = TRUE)
 terra::setGDALconfig("GDAL_CACHEMAX", "64")                        # MB
 terra::setGDALconfig("GDAL_MAX_DATASET_POOL_RAM_USAGE", "64")      # MB
 
+# terra decides whether to hold a raster in memory or chunk it through disk
+# based on its own estimate of "available" memory, which reads the NODE's
+# full system RAM, not this job's actual ~4 GiB cgroup cap — the same
+# failure already diagnosed and fixed in 05_prepare_forest_masks_west.R.
+# Missed here on the first attempt (2026-09-21): the West-crop fallback
+# path's crop() of a ~954M-cell CA-sized extent out of the full West raster
+# was OOM-killed immediately, exactly like 05's classify() was before this
+# was added there. todisk = TRUE forces every terra operation for the rest
+# of this script to chunk through disk instead of trusting that heuristic.
+terra::terraOptions(todisk = TRUE)
+
 # ── 1. Setup + CA boundary ────────────────────────────────────────────────────
 EMAPR_CA_DIR   <- here("data", "processed", "emapr_biomass_ca")
 EMAPR_WEST_DIR <- here("data", "processed", "emapr_biomass_west")
 dir.create(EMAPR_CA_DIR, recursive = TRUE, showWarnings = FALSE)
+
+# Restrict to the years biomass_within_fires.qmd's current params actually
+# need (study_year_min/max = 2005/2010) rather than building all 34
+# available West-crop years unattended — narrows both the OOM blast radius
+# and the wasted time if something still goes wrong partway through.
+# Set to NULL to build every available year instead.
+YEARS_TO_BUILD <- 2005:2010
 
 # Only used for the West-crop fallback path (crop + mask to CA); skipped
 # entirely if every needed year already has a CA-only 30 m source on disk.
@@ -83,6 +101,11 @@ cat("CA-only 30 m crops found:  ", length(ca_years), "year(s) —",
 cat("West-wide 30 m crops found:", length(west_years), "year(s) —",
     paste(west_years, collapse = ", "), "\n")
 cat("Years available overall:   ", length(all_years), "\n\n")
+
+if (!is.null(YEARS_TO_BUILD)) {
+  all_years <- intersect(all_years, YEARS_TO_BUILD)
+  cat("Restricting to YEARS_TO_BUILD:", paste(all_years, collapse = ", "), "\n\n")
+}
 
 # ── 3. Identify years missing 100 m TIFs ──────────────────────────────────────
 out_files  <- file.path(EMAPR_CA_DIR, glue("composite_{all_years}_ca_100m.tif"))
