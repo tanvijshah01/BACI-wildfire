@@ -4,7 +4,7 @@ Decisions, findings, and durable lessons for the project. Where things live:
 
 | Section | What goes here |
 |---|---|
-| [Technical gotchas](#technical-gotchas) | Undated, durable lessons — check here before debugging |
+| [Technical hurdles](#technical-hurdles) | Undated, durable lessons — check here before debugging |
 | [Design decisions & open questions](#design-decisions--open-questions) | Single copy of what's decided and what isn't |
 | [Dated log](#dated-log-newest-first) | What happened and why, newest first |
 | [Literature notes](#literature-notes) | Papers and methods details |
@@ -14,7 +14,7 @@ Operating instructions (how to download, crop, extract, run on GRIT) live in
 
 ---
 
-## Technical gotchas
+## Technical hurdles
 
 ### `file.exists()` ≠ "file is valid"
 A background write killed mid-`writeRaster()` (laptop sleep, dropped connection, OOM) leaves a file
@@ -102,13 +102,10 @@ extend the validator to include fire-set identity.
 |---|---|---|---|
 | 2026-05-12 | Biomass outcome variable | eMapR + ctrees pre-calibrated AGB (Mg/ha); NBR approach archived | NBR is a unitless spectral index; calibrating it to biomass is a separate research project (see log) |
 | 2026-08 | Forest mask | NLCD 2004, per-state, 0/1 fraction-forest (classes 41/42/43) | Replaces retired CA-only 1/NA mask; built by `05_prepare_forest_masks_west.R` |
-| 2026-08-30 | Raw eMapR retention | Keep all raw CONUS composites permanently (~1 TB) | PI request; requires GRIT-scale storage, not a laptop |
+| 2026-08-30 | Raw eMapR retention | Keep all raw CONUS composites permanently (~1 TB) | Requires GRIT-scale storage, not a laptop |
 | 2026-09 | Where data lives | GRIT is the durable store; Nextcloud plan dropped | See 2026-08-30 log entry |
 | — | Time window | As long as the data allows (eMapR 1990–2023, ctrees 2000–2025, MTBS fires 2000–2023) | Long pre-fire baselines for parallel-trends testing |
 
-### Leaning, not final
-- **Treatment variable:** RdNBR (continuous; = dNBR / √|preNBR/1000|, Miller & Thode 2007) preferred over raw
-  dNBR for cross-fire comparison — vs. categorical severity classes.
 
 ### Open
 - Minimum fire size threshold?
@@ -150,7 +147,7 @@ path works unchanged. Python env is a venv at `~/BACI-wildfire/.venv`, not the l
 The script was also reordered to run raw-download-first (A → B → C) so B/C read plain local GeoTIFFs instead
 of re-querying arraylake, and `rasterio` became a hard requirement.
 
-**Then the `file.exists()` gotcha hit GRIT for real.** A relaunch was started as a bare foreground command,
+**Then the `file.exists()` hurdle hit GRIT for real.** A relaunch was started as a bare foreground command,
 not under `tmux`; a dropped connection killed it mid-Part-B-write and left a 7 KB corrupted `.nc`. Diagnosed
 live: 26/26 Part A TIFs present, `.nc` header-only, no `_west_fireagb_scratch/` (Part C never started), no
 `tmux` session, `memory.events` showing no OOM.
@@ -195,10 +192,10 @@ walltime). Plausibly the same cgroup cap below, but not confirmed the way the MT
 memory diagnosis moved on to the R pipeline instead. Revisit before trusting any `03`-vs-`04` comparison.
 
 **R pipeline (`05`–`08`) exercised for the first time in this session — found the same cgroup cap twice
-more.** Confirmed the actual limit for the first time (see "GRIT's real memory cap" in Technical gotchas
+more.** Confirmed the actual limit for the first time (see "GRIT's real memory cap" in Technical hurdles
 above): a hard 4 GiB cap, ~1.7 GiB baseline, ~2.3 GiB real headroom. Two more things hit it:
 - `08` (and identically `06`/`07`) loading the full national MTBS shapefile via plain `sf::st_read()` —
-  fixed by pushing attribute filters into an OGR SQL query (see Technical gotchas); verified on GRIT
+  fixed by pushing attribute filters into an OGR SQL query (see Technical hurdles); verified on GRIT
   (304 CA fires, exact match to the validated baseline).
 - `05`'s `FedData::get_nlcd()` call, downloading NLCD 2004 for CA — investigated `FedData`'s actual source
   (`R/NLCD_FUNCTIONS.R` on GitHub): the WCS path it uses is genuinely CA-bbox-scoped server-side, not a
@@ -271,7 +268,7 @@ Re-verify any West-crop file on GRIT rather than assuming earlier laptop output 
 - **Part B had no per-year checkpointing** — a kill lost 16/26 years of progress. It now checkpoints to
   `data/processed/ctrees/_west_fireagb_scratch/` per year, like Part A's `_west_1km_scratch/`.
 - **Part C's existence-only check** left a truncated `ctrees_2018_west_100m.tif` (15.6 MB vs ~730 MB) that had
-  to be deleted by hand — the origin of the "validate, don't trust `file.exists()`" gotcha above.
+  to be deleted by hand — the origin of the "validate, don't trust `file.exists()`" hurdle above.
 
 ---
 

@@ -1,14 +1,14 @@
 # EDA Plan — Wildfire Biomass Recovery
 
 **Phase:** Exploration → West-wide expansion
-**Last updated:** 2026-09-20
+**Last updated:** 2026-09-24
 **Goal:** Understand the MTBS, eMapR, and ctrees data well enough to make the design decisions in
 `NOTES.md` (→ Design decisions & open questions) before building the analysis panel.
 
 **Status legend:** ✅ done · 🔄 in progress / partly done · ⬜ not started · ⛔ stale (superseded)
 
 Where this fits: `CLAUDE.md` = project orientation and pipeline status · `DATA_DOWNLOAD_GUIDE.md` = how to
-run the pipeline · `NOTES.md` = decisions, gotchas, history · **this file = what EDA we're doing and how far
+run the pipeline · `NOTES.md` = decisions, hurdles, history · **this file = what EDA we're doing and how far
 along each piece is.** Analysis documents live in `analysis/`; figures land in `figures/` (gitignored).
 
 ---
@@ -44,7 +44,106 @@ along each piece is.** Analysis documents live in `analysis/`; figures land in `
 
 ---
 
-## 3. Next EDA steps
+## 3. Data products feeding the EDA documents
+
+The EDA documents read small per-fire CSVs produced by the extraction scripts, plus (for maps only) a few
+large rasters. This section lists what each raster is, how it is built from raw data, and where processing
+currently stands. Run commands and environment setup are in `DATA_DOWNLOAD_GUIDE.md`.
+
+### 3.1 Raster files and what each is for
+
+**Forest masks.** Each mask records whether a pixel is forest, from NLCD 2004 land cover (classes 41
+Deciduous, 42 Evergreen, 43 Mixed → 1; everything else → 0). Several versions exist because each biomass
+dataset sits on a different grid, and a mask is only usable if its pixels line up with the raster it is
+applied to. All are built per state by `05_prepare_forest_masks_west.R` into `data/processed/forest_mask/`.
+
+| File (`<st>` = state code, e.g. `ca`) | Grid | Purpose | Used by |
+|---|---|---|---|
+| `nlcd2004_forestfrac_30m_<st>.tif` | 30 m, EPSG:5070 (NLCD native) | Full-detail master mask | `06` (% forest per fire); `08` (reprojected per fire onto the ctrees grid) |
+| `nlcd2004_forestfrac_90m_<st>.tif` | 90 m, EPSG:5070 | Matches eMapR after `07` aggregates it from 30 m to 90 m | `07` (eMapR AGB per fire) |
+| `nlcd2004_forestfrac_100m_<st>.tif` | ~100 m, EPSG:4326 (ctrees grid) | Matches ctrees' native grid, so a whole-state map can be masked in one step | `biomass_within_fires.qmd` §6 only (maps, masking-progression figures) |
+
+**Biomass rasters.**
+
+| File | Contents | Used by |
+|---|---|---|
+| `data/raw/emapr_biomass/…` | eMapR AGB, 30 m, CONUS-wide (~27.7 GB/year) | `00_crop_emapr_to_west.R` only |
+| `emapr_biomass_west/composite_<yr>_west.tif` | eMapR AGB, 30 m, clipped to the 11 Western states (~1 GB/year) | `07`; source for the CA display files below |
+| `composite_<yr>_ca_100m.tif` | eMapR AGB aggregated to 90 m, CA only | `biomass_within_fires.qmd` §6 only |
+| `ctrees/ctrees_<yr>_west_100m.tif` | ctrees AGB, native ~100 m, EPSG:4326, one shared raster for the whole West | `08`; `biomass_within_fires.qmd` §6 |
+
+The 100 m mask and the CA-100m eMapR composites exist only for figures. None of the per-fire extractions
+(`06`–`08`) need them.
+
+### 3.2 Pipeline: raw data → EDA
+
+```
+RAW                            PROCESSING                                  EDA
+MTBS fire perimeters ──────────────────────────────────────┐
+                                                           │
+NLCD 2004 (fetched by 05 ──► 05  forest masks 30/90/100 m ─┤
+  from MRLC WCS)                                           ├─► 06  % forest per fire ───► mtbs_assessment_comparison.qmd
+                                                           │
+eMapR CONUS (~28 GB/yr) ──► 00_crop_emapr_to_west ─────────┼─► 07  eMapR AGB per fire ──┐
+                              (composite_<yr>_west.tif)    │                            │
+                                 └─► 01_create_emapr_100m (CA 90 m display) ─────────┐ ├─► biomass_within_fires.qmd
+                                                           │                         │ │
+ctrees zarr store ──► 04_download_ctrees_west.py ──────────┴─► 08  ctrees AGB per fire ┘ │
+                        (ctrees_<yr>_west_100m.tif) ─────────────────────────────────────┘
+```
+
+In words:
+
+1. **Acquire raw data.** MTBS perimeters are downloaded once. eMapR comes from the eMapR lab FTP server, one
+   CONUS composite per year. ctrees is pulled from the arraylake zarr store by `04_download_ctrees_west.py`,
+   which writes one West-wide ~100 m GeoTIFF per year.
+2. **Reduce raster size.** `00_crop_emapr_to_west.R` clips each raw eMapR year to the 11 Western states.
+   ctrees already arrives at West extent.
+3. **Build forest masks.** `05` downloads NLCD 2004 per state and writes the 30 m, 90 m, and ~100 m masks
+   described above.
+4. **Extract per-fire values.** For each MTBS fire, `06` computes the fraction of forest inside the
+   perimeter; `07` and `08` compute mean forest-only AGB per year from eMapR and ctrees. Each writes one
+   CSV with a `STUSPS` column. All three work fire-by-fire (crop → mask → mean) to stay within memory.
+5. **EDA.** `mtbs_assessment_comparison.qmd` reads the `06` CSV. `biomass_within_fires.qmd` reads the `07`/`08`
+   CSVs for its cohort and event-study analyses, and reads the large rasters directly for the §6 maps.
+
+### 3.3 Where processing stands (2026-09-24)
+
+**Complete and verified on GRIT:**
+- ctrees West download: 26/26 yearly rasters valid (2000/2001 rebuilt after being found 100% NaN).
+- MTBS loading in `06`–`08` filtered at read time; `08` reproduces the validated CA baseline (304 fires).
+
+**Blocked by GRIT's 4 GiB memory cap** (cgroup v2; see `NOTES.md` → Technical hurdles):
+
+| Step | State | Most recent fix (not yet run on GRIT) |
+|---|---|---|
+| `05`: CA ~100 m mask | Killed three times at the reprojection step | `5d93d1d`: replace `terra::project()` with `sf::gdal_utils("warp")`, working memory capped at 256 MB |
+| `01_create_emapr_100m_tifs.R`: CA display composites | First GRIT run killed on the first year | `b5a67ee`: `todisk = TRUE`, restricted to 2005–2010 |
+| `06`: % forest per fire, CA | Reached fire 970 of 1,044 before being killed | `0398410`: checkpoints every 10 fires, so re-runs resume |
+| `biomass_within_fires.qmd` render | Fails at §6 masking-progression chunks | `2badaad`: read the `_west_` ctrees file and crop to CA before masking |
+
+**Why the 100 m mask is the sticking point.** The 30 m and 90 m masks stay in NLCD's own projection, so
+building them is a simple read → reclassify → write in strips. The ~100 m mask has to be reprojected from
+EPSG:5070 onto the ctrees lat/lon grid. Reprojection is handled by GDAL's warp engine, which reads the
+source in scattered blocks and manages its own working memory. That memory is controlled by neither
+`GDAL_CACHEMAX` nor terra's `todisk` option, which is why the first two fixes (`3d1c6ef`, `7d86111`) had no
+effect. The current fix calls GDAL warp directly with an explicit `-wm` limit. If it still fails, the next
+option is to warp the state in tiles and write each tile as it completes.
+
+Because only the §6 figures need the 100 m mask and the CA-100m eMapR composites, this does not block the
+per-fire CSVs. `06`–`08` can finish with just the 30 m and 90 m masks, and the rest of
+`biomass_within_fires.qmd` can render with §6 temporarily skipped.
+
+**Scope limits.** Everything is currently CA-only (`STATES_TO_RUN` = CA in `06`–`08`; CA + WY in `05`) and
+2005–2010 (`STUDY_YEARS`). Going West-wide waits on the remaining 15 raw eMapR years (19/34 confirmed
+complete as of 2026-09-08) and on the steps above running reliably under the memory cap.
+
+**Next run order on GRIT:** `05` → `06` (re-run until CA completes) → `07` → `08` →
+`01_create_emapr_100m_tifs.R` → render `biomass_within_fires.qmd`.
+
+---
+
+## 4. Next EDA steps
 
 1. **West-wide within-fire extraction** — after the ctrees West download and West eMapR crops finish
    (`CLAUDE.md` → Current Status), widen `STATES_TO_RUN` / `STUDY_YEARS` and refresh `biomass_within_fires.qmd`
@@ -58,13 +157,13 @@ along each piece is.** Analysis documents live in `analysis/`; figures land in `
 
 ---
 
-## 4. Record: completed MTBS EDA (`01_mtbs_exploration.qmd`)
+## 5. Record: completed MTBS EDA (`01_mtbs_exploration.qmd`)
 
 **Filter steps** (row count printed after each): `incid_type == "Wildfire"` → `year` 2000–2023 → spatial
 join to the 11 Western states (`tigris::states()`). **Sanity checks:** required fields present, no duplicate
 `event_id`, valid geometries (`st_make_valid()`), dNBR thresholds not all in 0–100 (would mean percentages),
 sentinel values −9999/9999 flagged, all 11 target states present. `sf_use_s2(FALSE)` is required — see
-`NOTES.md` → Technical gotchas.
+`NOTES.md` → Technical hurdles.
 
 **Figures produced** (`figures/`, gitignored — regenerate by rendering the qmd):
 
@@ -85,7 +184,7 @@ Methodology and citations: `NOTES.md` → Literature notes.
 
 ---
 
-## 5. Figure QA (apply to every plot before saving)
+## 6. Figure QA (apply to every plot before saving)
 
 - 300 dpi; check pixel dimensions match the intended inches
 - Legend has a descriptive title (not a raw column name), text ≥ 10 pt, no overlap with data

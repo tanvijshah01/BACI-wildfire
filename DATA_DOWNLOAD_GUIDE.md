@@ -13,7 +13,7 @@ this order:
 
 This guide is the *process reference* (how to run things). See `CLAUDE.md`
 for the directory structure and current project status, and `NOTES.md` for
-the reasoning behind decisions and known gotchas. If you just want the
+the reasoning behind decisions and known hurdles. If you just want the
 command to run right now, jump to **Part 5: End-to-End Checklist**.
 
 **The two datasets don't work the same way — this trips people up, so read
@@ -49,7 +49,7 @@ Callaway-Sant'Anna estimation are the planned next stages (`CLAUDE.md`).
 
 **Conventions used throughout:** every extraction is a per-polygon crop → mask → mean (whole-raster masking
 OOMs on these files); all scripts are skip-safe and resume per state/year; existing outputs are validated, not
-just checked for existence (`NOTES.md` → Technical gotchas).
+just checked for existence (`NOTES.md` → Technical hurdles).
 
 **Contents**
 - [Part 1: One-Time Setup](#part-1-one-time-setup)

@@ -689,7 +689,7 @@ emapr_2005_raw  <- terra::rast(here("data", "processed", "emapr_biomass_ca", "co
 # extent FIRST, before masking: terra::mask() alone on the full West raster
 # is a whole-raster op on a 125M+-cell file — exactly what OOMs/takes 500s+
 # elsewhere in this project (see CLAUDE.md -> Avoid, and NOTES.md's terra-
-# masking gotcha). crop() first keeps this cheap by only reading CA's window.
+# masking hurdle). crop() first keeps this cheap by only reading CA's window.
 # eMapR's composite_YYYY_ca.tif is untouched here — a separate, already
 # CA-only precomputed display raster (00_crop_emapr_to_ca.R /
 # 01_create_emapr_100m_tifs.R), already both cropped AND masked to CA.

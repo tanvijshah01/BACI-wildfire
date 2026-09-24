@@ -28,7 +28,7 @@ Keep each kind of information in exactly one place; link instead of copying.
 | `README.md` | Public one-screen overview and quick start |
 | `CLAUDE.md` (this file) | Stable orientation: design, stack, directory tree, run order, style, current status |
 | `DATA_DOWNLOAD_GUIDE.md` | Process reference: environment setup (GRIT + laptop), download → crop → extract commands |
-| `NOTES.md` | Technical gotchas, design decisions + open questions, dated log of findings, literature notes |
+| `NOTES.md` | Technical hurdles, design decisions + open questions, dated log of findings, literature notes |
 | `EDA_PLAN.md` | Live EDA plan: questions, status, and outputs per analysis document |
 
 ---
@@ -166,7 +166,7 @@ flow for new eMapR years, not the old manual `curl.exe --ftp-pasv` loop. Key fac
   replaces `FedData::get_nlcd()`, whose post-download step OOM-killed on GRIT). The current pipeline uses **NLCD 2004**,
   per-state, 0/1-encoded fraction-forest masks built by `05_prepare_forest_masks_west.R` (classes 41
   Deciduous, 42 Evergreen, 43 Mixed) — replaces the retired CA-only 1/NA mask.
-- **Never trust `file.exists()`** as proof a raster is valid — see `NOTES.md` → Technical gotchas.
+- **Never trust `file.exists()`** as proof a raster is valid — see `NOTES.md` → Technical hurdles.
 - **`terra::extract()` inside Quarto on Windows:** Quarto buffers chunk output until the chunk finishes,
   which makes terra's C++ threading appear frozen. Run extraction scripts from the R console or via
   `Rscript`, never inside a Quarto chunk.
@@ -283,7 +283,7 @@ and open questions are tracked in `NOTES.md` → Design decisions & open questio
 - [x] `06`/`07`/`08`'s MTBS-loading OOM fixed (OGR SQL read-time filter) and verified on GRIT (304 CA
       fires, exact match to the validated baseline)
 - [x] GRIT's actual memory cap identified: 4 GiB, enforced via cgroup v2 (not a laptop-era red herring —
-      see `NOTES.md` "Technical gotchas")
+      see `NOTES.md` "Technical hurdles")
 - [x] `ctrees_2000_west_100m.tif` / `ctrees_2001_west_100m.tif` rebuilt on GRIT and confirmed 100% valid
       (were 100% NaN — see `NOTES.md` 2026-09-20 entry for root cause)
 
@@ -373,4 +373,4 @@ When helping with this project:
 - Using TWFE without noting bias issues
 - Mixing causal and correlational language
 - Overcomplicated code (keep it readable)
-- Whole-raster terra masking on the big ctrees/eMapR rasters (see `NOTES.md` → Technical gotchas)
+- Whole-raster terra masking on the big ctrees/eMapR rasters (see `NOTES.md` → Technical hurdles)

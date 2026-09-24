@@ -40,5 +40,5 @@ step does and produces: [`DATA_DOWNLOAD_GUIDE.md`](DATA_DOWNLOAD_GUIDE.md) → *
 |---|---|
 | [`CLAUDE.md`](CLAUDE.md) | Project orientation: study design, directory layout, pipeline, current status, coding conventions |
 | [`DATA_DOWNLOAD_GUIDE.md`](DATA_DOWNLOAD_GUIDE.md) | How to set up an environment and run download → crop → extract |
-| [`NOTES.md`](NOTES.md) | Technical gotchas, design decisions and open questions, dated findings log, literature notes |
+| [`NOTES.md`](NOTES.md) | Technical hurdles, design decisions and open questions, dated findings log, literature notes |
 | [`EDA_PLAN.md`](EDA_PLAN.md) | EDA questions and per-document status |
