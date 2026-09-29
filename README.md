@@ -8,6 +8,9 @@ annual Landsat-based aboveground-biomass products, **eMapR** (1990–2023) and *
 **Status:** exploratory data analysis and West-wide data pipeline build-out. See
 [`CLAUDE.md`](CLAUDE.md) → *Current Status* for what's done and what's next.
 
+**Contact:** Tanvi Shah tanvijshah01@gmail.com
+For questions about this repository, please use this email. 
+
 ## Getting started
 
 Large data files are not in this repository (`data/raw/`, `data/processed/` are gitignored). Everything
